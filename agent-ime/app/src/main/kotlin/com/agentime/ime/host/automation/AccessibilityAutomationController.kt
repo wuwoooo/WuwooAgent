@@ -1,0 +1,18 @@
+package com.agentime.ime.host.automation
+
+import android.content.Context
+import android.content.Intent
+
+class AccessibilityAutomationController(private val context: Context) : AutomationController {
+    override fun launchWechat(): Boolean {
+        val ok = WechatAccessibilityService.launchWechat(context)
+        if (ok) WechatAccessibilityService.warmupInputAfterLaunch()
+        return ok
+    }
+
+    override fun isWechatForeground(): Boolean = WechatAccessibilityService.isWechatForeground()
+
+    override fun focusInputArea(): Boolean = WechatAccessibilityService.focusInputArea()
+
+    override fun clickSend(): Boolean = WechatAccessibilityService.clickSend()
+}

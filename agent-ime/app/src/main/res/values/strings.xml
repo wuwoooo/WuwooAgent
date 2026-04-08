@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Wuwoo Agent</string>
+    <string name="ime_name">Agent 代聊输入法</string>
+    <string name="ime_hint">Agent IME · 广播可注入文本</string>
+    <string name="host_service_title">Wuwoo Agent 服务</string>
+    <string name="accessibility_service_name">Wuwoo Agent 微信自动化服务</string>
+    <string name="tap_config_title">点击坐标</string>
+</resources>

@@ -1,0 +1,25 @@
+# macOS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# local codex artifacts
+.codex/
+
+# Android
+agent-ime/.gradle/
+agent-ime/local.properties
+agent-ime/app/build/
+agent-ime/**/build/
+agent-ime/**/*.apk
+
+# Python / FastAPI
+FastAPI/.env
+FastAPI/venv/
+FastAPI/__pycache__/
+FastAPI/**/*.pyc
+FastAPI/uploads/
+
+# logs / temp
+*.log
+*.tmp

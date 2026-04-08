@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 与 input_view 最小高度一致。过大会整块盖住微信底部工具栏；保持一条提示带即可 -->
+    <dimen name="ime_keyboard_min_height">40dp</dimen>
+</resources>

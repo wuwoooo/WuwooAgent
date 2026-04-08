@@ -1,0 +1,298 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:padding="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/textGuideTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Wuwoo Agent"
+            android:textColor="#FF102027"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/textGuideSummary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:lineSpacingExtra="2dp"
+            android:text="先把下面的红叉项全部处理完成；全部就绪后，点击“开始运行”，App 会切到微信并进入自动监听状态。"
+            android:textColor="#FF455A64"
+            android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/textCurrentStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:background="#FFF1F8E9"
+            android:padding="12dp"
+            android:textColor="#FF1B5E20"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/textAccessibilityStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="#FFF5F5F5"
+            android:padding="10dp"
+            android:textColor="#FF37474F"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/textImeStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="#FFF5F5F5"
+            android:padding="10dp"
+            android:textColor="#FF37474F"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/textNotificationStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="#FFF5F5F5"
+            android:padding="10dp"
+            android:textColor="#FF37474F"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/textForegroundAutoStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="#FFF5F5F5"
+            android:padding="10dp"
+            android:textColor="#FF37474F"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/textCaptureProvider"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:textColor="#FF37474F"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/textExecutionMode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:textColor="#FF37474F"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/textBackendStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:textColor="#FF37474F"
+            android:textSize="13sp" />
+
+        <Button
+            android:id="@+id/btnGrantProjection"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="去授权截图" />
+
+        <Button
+            android:id="@+id/btnAccessibilitySettings"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="去打开无障碍设置" />
+
+        <Button
+            android:id="@+id/btnImeSettings"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="去打开输入法设置" />
+
+        <Button
+            android:id="@+id/btnNotificationSettings"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="去打开通知读取权限" />
+
+        <Button
+            android:id="@+id/btnToggleNotificationAuto"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="开启/关闭后台通知自动触发" />
+
+        <Button
+            android:id="@+id/btnToggleForegroundAuto"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="开启/关闭前台聊天自动触发" />
+
+        <Button
+            android:id="@+id/btnStartRunOnce"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="开始运行" />
+
+        <TextView
+            android:id="@+id/textSupportTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:text="辅助与高级"
+            android:textColor="#FF102027"
+            android:textSize="15sp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/btnToggleAdvanced"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="展开高级选项" />
+
+        <LinearLayout
+            android:id="@+id/layoutAdvanced"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <EditText
+                android:id="@+id/inputSessionId"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:hint="session_id（可选）"
+                android:singleLine="true" />
+
+            <EditText
+                android:id="@+id/inputContactName"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:hint="contact_name（可选）"
+                android:singleLine="true" />
+
+            <EditText
+                android:id="@+id/inputAgentEndpoint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:hint="后端接口地址（agent_chat_endpoint）"
+                android:inputType="textUri"
+                android:singleLine="true" />
+
+            <TextView
+                android:id="@+id/textAdvancedHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="session/contact 一般可留空；后端默认接口已经内置，通常不需要改。"
+                android:textColor="#FF607D8B"
+                android:textSize="12sp" />
+
+            <Button
+                android:id="@+id/btnModeAuto"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="切到自动模式（调试用）" />
+
+            <Button
+                android:id="@+id/btnModeManual"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="切到手动模式（调试用）" />
+
+            <Button
+                android:id="@+id/btnDebugRunOnce"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="立即执行一次 runOnce（调试）" />
+
+            <Button
+                android:id="@+id/btnTapConfig"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="配置点击坐标（输入框 / 发送）" />
+
+            <Button
+                android:id="@+id/btnOverlaySettings"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="打开应用详情（权限排查）" />
+
+            <TextView
+                android:id="@+id/textLogTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                android:text="日志与诊断"
+                android:textColor="#FF102027"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <Button
+                android:id="@+id/btnRefreshLog"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="刷新日志" />
+
+            <Button
+                android:id="@+id/btnCopyLog"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="复制日志" />
+
+            <Button
+                android:id="@+id/btnClearLog"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="清除日志" />
+
+            <TextView
+                android:id="@+id/textLog"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:textColor="#FF263238"
+                android:textSize="12sp"
+                android:textIsSelectable="true" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/textCopyright"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:gravity="center"
+            android:text="wuwoo 版权所有"
+            android:textColor="#FF90A4AE"
+            android:textSize="12sp" />
+    </LinearLayout>
+</ScrollView>
