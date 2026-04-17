@@ -129,7 +129,7 @@ class HostForegroundService : Service() {
             // 注意：此处不以 MEDIA_PROJECTION 类型调用 startForeground，
             // Android 14 下重复声明该类型会触发系统停止旧的 MediaProjection（onStop 回调）。
             // prepareProjection() 已在首次初始化时声明了该类型，后续无需重复。
-            startForegroundCompat("正在识别当前微信页面", includeProjectionType = false)
+            startForegroundCompat("正在识别当前微信页面", includeProjectionType = true)
             val cap = capture.captureScreen("wx_list_scan")
             val headerOcrText = recognizeHeaderWithFallbacks(ocr, cap)
             val ocrText = recognizePageWithFallbacks(ocr, cap)
@@ -310,11 +310,11 @@ class HostForegroundService : Service() {
                 logger.log(TAG, "会话列表截图分析失败: ${e.message}")
                 // 管线类失败 → 仅允许重试一次（source 不含 _retry 时），防止出现无限重试链
                 if (isPipelineFailure && !scanSource.contains("_retry")) {
-                    val retryDelaySec = 10L
+                    val retryDelaySec = PIPELINE_RETRY_DELAY_MS / 1000L
                     logger.log(TAG, "截图管线失败，将在 ${retryDelaySec}s 后自动重试扫描一次（source=${scanSource}_retry）")
                     mainHandler.postDelayed({
                         io.execute { scanConversationListAndRun(scanSource = "${scanSource}_retry") }
-                    }, retryDelaySec * 1000L)
+                    }, PIPELINE_RETRY_DELAY_MS)
                 }
             }
         }
@@ -386,11 +386,11 @@ class HostForegroundService : Service() {
                 ocrText = preOcrText
                 latestInbound = preLatestInbound
                 inboundSignature = preInboundSignature.orEmpty()
-                startForegroundCompat("正在分析微信聊天", includeProjectionType = false)
+                startForegroundCompat("正在分析微信聊天", includeProjectionType = true)
                 logger.log(TAG, "复用页面分析阶段已成功获取的截图与 OCR，跳过二次截图")
                 moveState(HostState.SCREEN_CAPTURED, "复用截图: ${cap.imagePath}")
             } else {
-                startForegroundCompat("正在分析微信聊天", includeProjectionType = false)
+                startForegroundCompat("正在分析微信聊天", includeProjectionType = true)
                 logger.log(TAG, "开始截图，executionMode=$executionMode provider=$captureProvider")
                 cap = capture.captureScreen(sessionId)
                 logger.log(
@@ -527,11 +527,11 @@ class HostForegroundService : Service() {
             val prefs2 = getSharedPreferences("host_config", Context.MODE_PRIVATE)
             val autoMode = prefs2.getString("execution_mode", "auto").orEmpty() == "auto"
             if (isPipelineFailure && autoMode && !sessionId.contains("_retry")) {
-                val retryDelaySec = 10L
+                val retryDelaySec = PIPELINE_RETRY_DELAY_MS / 1000L
                 logger.log(TAG, "截图管线失败，将在 ${retryDelaySec}s 后自动重试扫描一次（source=runonce_capture_retry）")
                 mainHandler.postDelayed({
                     io.execute { scanConversationListAndRun(scanSource = "runonce_capture_retry") }
-                }, retryDelaySec * 1000L)
+                }, PIPELINE_RETRY_DELAY_MS)
             }
         } finally {
             lastFinishedAt = System.currentTimeMillis()
@@ -800,6 +800,7 @@ class HostForegroundService : Service() {
         const val EXTRA_SCAN_SOURCE = "scan_source"
         const val EXTRA_SESSION_ID = "session_id"
         const val EXTRA_CONTACT_NAME = "contact_name"
+        private const val PIPELINE_RETRY_DELAY_MS = 3_000L
 
         fun isBusyOrCoolingDown(): Boolean {
             val coolingDown = System.currentTimeMillis() - lastFinishedAt < 8_000L

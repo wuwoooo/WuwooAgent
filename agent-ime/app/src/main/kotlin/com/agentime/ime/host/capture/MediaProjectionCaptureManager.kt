@@ -18,7 +18,9 @@ class MediaProjectionCaptureManager(private val context: Context) : CaptureContr
     companion object {
         private const val TAG = "MediaProjectionCapture"
         /** 纯截帧失败（无帧可读）时的最大重试次数，重试间不重建管线。 */
-        private const val MAX_FRAME_RETRIES = 2
+        // 单次调用内不做长时间重试，失败快速返回给上层（Host 会在短延时后重扫），
+        // 避免一次截图把链路卡住 30~60 秒。
+        private const val MAX_FRAME_RETRIES = 0
     }
 
     override fun prewarm() {

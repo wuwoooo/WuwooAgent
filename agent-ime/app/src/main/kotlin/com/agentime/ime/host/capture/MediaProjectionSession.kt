@@ -25,7 +25,9 @@ import java.util.concurrent.TimeUnit
  */
 object MediaProjectionSession {
     private const val TAG = "MediaProjectionSession"
-    private const val ENABLE_SURFACE_REFRESH_PER_CAPTURE = false
+    // 某些机型在静止页面（尤其微信会话列表）不会持续出新帧；
+    // 每次截图前刷新一次 ImageReader Surface，可显著降低 listener=false/null=170 的概率。
+    private const val ENABLE_SURFACE_REFRESH_PER_CAPTURE = true
     private const val ENABLE_LEGACY_SINGLE_SHOT_PATH = true
     private const val DESIRED_SAMPLE_COUNT = 6
     private const val EARLY_ACCEPT_SCORE = 205.0
@@ -342,7 +344,7 @@ object MediaProjectionSession {
         }
 
         runAcquireLoop(0, 0)
-        val ok = done.await(18, TimeUnit.SECONDS)
+        val ok = done.await(10, TimeUnit.SECONDS)
         reader.setOnImageAvailableListener(null, null)
         val frame = bestFrame
         if ((!ok && frame == null) || frame == null) {

@@ -182,18 +182,15 @@ class MainActivity : ComponentActivity() {
                 .apply()
             WechatAccessibilityService.onRuntimeEnabledChanged(true)
 
-            // 只有当截图管线未就绪时才发送 PREPARE；
-            // 如果已经初始化过（用户就是先授权再点开始），
-            // 重复发送会导致在同一 MediaProjection 上再次调用 createVirtualDisplay 而报错。
-            if (!ProjectionPermissionStore.hasPermission()) {
-                val prepareIntent = Intent(this, HostForegroundService::class.java).apply {
-                    action = HostForegroundService.ACTION_PREPARE_PROJECTION
-                }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    startForegroundService(prepareIntent)
-                } else {
-                    startService(prepareIntent)
-                }
+            // 每次开始运行都触发一次预热（Host 内部 ensurePipeline 已幂等，不会重复 createVirtualDisplay）。
+            // 这样可避免“已授权但管线未热启动”导致首轮截图长时间空帧。
+            val prepareIntent = Intent(this, HostForegroundService::class.java).apply {
+                action = HostForegroundService.ACTION_PREPARE_PROJECTION
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(prepareIntent)
+            } else {
+                startService(prepareIntent)
             }
 
             launchWechatApp()
