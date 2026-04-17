@@ -4,6 +4,7 @@ import logging
 import os
 import requests
 import re
+import time
 from typing import List, Dict, Any, Set
 from dotenv import load_dotenv
 from database import get_session_messages, update_session_profile, get_session_profile
@@ -69,34 +70,57 @@ def extract_profile_sync(session_id: str) -> Dict[str, Any]:
         "temperature": 0.1
     }
     
-    try:
-        response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        result_text = data["choices"][0]["message"]["content"]
-        
-        # 更加鲁棒的 JSON 提取：使用正则匹配第一个 { 到最后一个 }
-        match = re.search(r'\{.*\}', result_text, re.DOTALL)
-        if match:
-            json_str = match.group()
-            try:
-                profile_json = json.loads(json_str)
-                update_session_profile(session_id, profile_json)
-                return profile_json
-            except json.JSONDecodeError as je:
-                logger.error(f"JSON 解析失败: {je}. 原文本: {result_text}")
-                raise Exception(f"大模型返回的 JSON 格式不规范: {je}")
-        else:
-            logger.error(f"未能从模型回复中提取到 JSON 结构. 原文本: {result_text}")
-            raise Exception("大模型未返回有效的 JSON 结构，请稍后重试。")
+    last_error = None
+    # 增加自动重试机制
+    for attempt in range(2):
+        try:
+            start_time = time.time()
+            logger.info(f"开始提取画像 (Session: {session_id}, 尝试 {attempt + 1}, 上下文长度: {len(chat_text)})")
             
-    except requests.exceptions.HTTPError as he:
-        err_msg = f"API 请求失败(HTTP {response.status_code}): {response.text}"
-        logger.error(err_msg)
-        raise Exception(f"大模型 API 调用失败: {err_msg}")
-    except Exception as e:
-        logger.error(f"画像提取发生未知错误: {e}")
-        raise e
+            # 使用 (连接超时, 读取超时) 的格式
+            response = requests.post(API_URL, headers=headers, json=payload, timeout=(10, 60))
+            response.raise_for_status()
+            
+            data = response.json()
+            result_text = data["choices"][0]["message"]["content"]
+            
+            elapsed = time.time() - start_time
+            logger.info(f"画像提取接口返回成功，耗时 {elapsed:.2f}s")
+            
+            # 更加鲁棒的 JSON 提取：使用正则匹配第一个 { 到最后一个 }
+            match = re.search(r'\{.*\}', result_text, re.DOTALL)
+            if match:
+                json_str = match.group()
+                try:
+                    profile_json = json.loads(json_str)
+                    update_session_profile(session_id, profile_json)
+                    return profile_json
+                except json.JSONDecodeError as je:
+                    logger.error(f"JSON 解析失败: {je}. 原文本: {result_text}")
+                    raise Exception(f"大模型返回的 JSON 格式不规范: {je}")
+            else:
+                logger.error(f"未能从模型回复中提取到 JSON 结构. 原文本: {result_text}")
+                raise Exception("大模型未返回有效的 JSON 结构，请稍后重试。")
+                
+        except requests.exceptions.Timeout:
+            last_error = Exception("连接火山引擎接口超时，可能是由于提取内容较多或网络波动，请尝试再次点击。")
+            logger.warning(f"第 {attempt + 1} 次尝试请求超时")
+        except requests.exceptions.HTTPError as he:
+            err_msg = f"API 请求失败(HTTP {response.status_code}): {response.text}"
+            last_error = Exception(f"大模型 API 调用失败: {err_msg}")
+            logger.error(err_msg)
+            break # HTTP 错误通常不重试
+        except Exception as e:
+            last_error = e
+            logger.error(f"画像提取发生未知错误: {e}")
+            break
+            
+        if attempt == 0:
+            time.sleep(1) # 重试前稍作等待
+            
+    if last_error:
+        raise last_error
+    return {}
 
 async def async_extract_profile(session_id: str):
     return await asyncio.to_thread(extract_profile_sync, session_id)
@@ -110,7 +134,7 @@ async def check_and_trigger_profile_update(session_id: str):
     msg_count = len(messages)
     rounds = msg_count // 2
     
-    # 策略改成：第 2 轮（约 3~4 条消息）触发首次提取，之后每 3 轮再去提取一次
+    # 策略：第 2 轮（约 3~4 条消息）触发首次提取，之后每 3 轮再去提取一次
     if rounds == 2 or (rounds > 2 and rounds % 3 == 0):
         task = asyncio.create_task(async_extract_profile(session_id))
         background_tasks.add(task)
