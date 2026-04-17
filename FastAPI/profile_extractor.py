@@ -1,20 +1,26 @@
 import asyncio
 import json
 import logging
+import os
 import requests
 from typing import List, Dict, Any, Set
+from dotenv import load_dotenv
 from database import get_session_messages, update_session_profile, get_session_profile
+
+# 加载环境变量
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 # 保存后台任务的强引用，防止被垃圾回收
 background_tasks: Set[asyncio.Task] = set()
 
-# User provided model configuration
+# 从环境变量加载配置
 API_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
-# Using auth provided by user
-AUTHORIZATION = "Bearer ceecbd62-3e97-43d5-9507-2acbbb0acbc1"
-MODEL = "doubao-seed-2-0-mini-260215"
+# 从环境变量获取 API Key 和模型名称
+_API_KEY = os.getenv("VOLC_ARK_API_KEY", "")
+AUTHORIZATION = f"Bearer {_API_KEY}"
+MODEL = os.getenv("VOLC_ARK_MODEL", "doubao-seed-2-0-mini-260215")
 
 PROFILE_PROMPT = """你是一个旅游定制分析助手，你的任务是从下面的微信聊天记录中提取出用户的画像特征。
 请务必返回一个纯JSON结构，不要包含任何额外的多余说明、markdown格式或代码块标记（如```json），只需返回合法的JSON字符串。
