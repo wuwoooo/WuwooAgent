@@ -93,14 +93,21 @@
                 
                 <div v-for="session in sessions" :key="session.session_id" 
                      @click="selectSession(session)"
-                     class="p-3 rounded-xl cursor-pointer transition-all duration-200 border border-transparent hover:bg-indigo-50 hover:border-indigo-100"
+                     class="p-3 rounded-xl cursor-pointer transition-all duration-200 border border-transparent hover:bg-indigo-50 hover:border-indigo-100 group relative"
                      :class="{'bg-indigo-50 border-indigo-200 shadow-sm ring-1 ring-indigo-200': currentSession?.session_id === session.session_id}">
                     <div class="flex justify-between items-center mb-1">
                         <span class="font-bold text-slate-700 truncate mr-2">
                             <i class="fa-regular fa-user text-indigo-400 mr-1"></i>
                             {{ session.contact_name || '未知客户' }}
                         </span>
-                        <span class="text-xs text-slate-400 whitespace-nowrap">{{ formatTime(session.updated_at) }}</span>
+                        <div class="flex items-center space-x-2">
+                            <span class="text-xs text-slate-400 whitespace-nowrap">{{ formatTime(session.updated_at) }}</span>
+                            <button @click.stop="deleteSession(session.session_id)" 
+                                    class="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-rose-500 transition-all p-1"
+                                    title="清除会话">
+                                <i class="fa-solid fa-trash-can text-xs"></i>
+                            </button>
+                        </div>
                     </div>
                     <div class="text-sm text-slate-500 truncate mt-1">
                         {{ session.last_msg || '...' }}
@@ -127,14 +134,21 @@
                 <!-- 消息区 -->
                 <div class="flex-1 overflow-y-auto p-6 space-y-4" ref="messageBox">
                     <TransitionGroup name="msg">
-                        <div v-for="(msg, index) in messages" :key="index" class="flex flex-col max-w-[85%]" 
+                        <div v-for="(msg, index) in messages" :key="msg.id || index" class="flex flex-col max-w-[85%] group" 
                              :class="msg.role === 'user' ? 'self-start' : 'self-end items-end ml-auto'">
                             <span class="text-[11px] text-slate-400 mb-1 ml-1" :class="msg.role === 'user' ? '' : 'mr-1'">
                                 {{ msg.role === 'user' ? '客户' : '智能助理' }} • {{ formatTime(msg.created_at) }}
                             </span>
-                            <div class="px-4 py-2.5 rounded-2xl shadow-sm text-sm leading-relaxed"
-                                 :class="msg.role === 'user' ? 'bg-white text-slate-700 rounded-tl-none border border-slate-100' : 'bg-indigo-500 text-white rounded-tr-none'">
-                                {{ msg.content }}
+                            <div class="flex items-center space-x-2" :class="msg.role === 'user' ? 'flex-row' : 'flex-row-reverse space-x-reverse'">
+                                <div class="px-4 py-2.5 rounded-2xl shadow-sm text-sm leading-relaxed"
+                                     :class="msg.role === 'user' ? 'bg-white text-slate-700 rounded-tl-none border border-slate-100' : 'bg-indigo-500 text-white rounded-tr-none'">
+                                    {{ msg.content }}
+                                </div>
+                                <button @click="deleteMessage(msg.id)" 
+                                        class="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-rose-500 transition-all p-1"
+                                        title="删除此条消息">
+                                    <i class="fa-solid fa-trash-can text-xs"></i>
+                                </button>
                             </div>
                         </div>
                     </TransitionGroup>
@@ -277,17 +291,20 @@
                 const formatTime = (timeStr) => {
                     if(!timeStr) return '';
                     try {
+                        // 现在的后端存的是 "YYYY-MM-DD HH:MM:SS" (北京时间)
+                        // 只需要简单转换显示格式
                         let d;
                         if(timeStr.includes('Z') || timeStr.includes('T')) {
                            d = new Date(timeStr);
                         } else {
-                           // Try to parse basic SQL timestamp 
-                           // "2023-10-10 12:00:00"
                            d = new Date(timeStr.replace(/-/g, '/')); 
                         }
+                        
                         if (isNaN(d.getTime())) {
                             return timeStr;
                         }
+                        
+                        // 由于后端存的就是北京时间，这里直接取本地时间（浏览器通常也是北京时间）
                         return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
                     } catch(e) {
                         return timeStr;
@@ -332,20 +349,19 @@
                     try {
                         const sid = currentSession.value.session_id;
                         const res = await fetch(`/api/admin/sessions/${sid}/profile`, { method: 'POST', headers: getAuthHeaders() });
-                        if(res.ok) {
-                            const data = await res.json();
+                        const data = await res.json();
+                        
+                        if(res.ok && data.ok) {
                             profile.value = data.profile;
                             currentSession.value.profile_json = data.profile;
-                            // Update sessions list to reflect the badge
                             fetchSessions();
-                        } else if (res.status === 401) {
-                            triggerLogin();
                         } else {
-                            alert("提取失败：" + await res.text());
+                            const errMsg = data.error || '提取失败，请稍后重试';
+                            alert("配置或接口异常：" + errMsg);
                         }
                     } catch(e) {
-                        console.error('提取失败', e);
-                        alert("提取失败，网络异常");
+                        console.error('分析接口异常', e);
+                        alert("外部接口调用超时或网络异常，请重试");
                     } finally {
                         isExtracting.value = false;
                     }
@@ -357,6 +373,51 @@
                             messageBox.value.scrollTop = messageBox.value.scrollHeight;
                         }
                     });
+                };
+
+                const deleteSession = async (sid) => {
+                    if (!confirm('确定要清除该客户的所有对话记录吗？此操作不可恢复。')) return;
+                    try {
+                        const res = await fetch(`/api/admin/sessions/${sid}`, { 
+                            method: 'DELETE', 
+                            headers: getAuthHeaders() 
+                        });
+                        if (res.ok) {
+                            if (currentSession.value?.session_id === sid) {
+                                currentSession.value = null;
+                                messages.value = [];
+                                profile.value = null;
+                            }
+                            fetchSessions();
+                        } else if (res.status === 401) {
+                            triggerLogin();
+                        } else {
+                            alert('删除失败');
+                        }
+                    } catch (e) {
+                        console.error('删除会话失败', e);
+                    }
+                };
+
+                const deleteMessage = async (mid) => {
+                    if (!mid) return;
+                    if (!confirm('确定要删除这条消息吗？')) return;
+                    try {
+                        const res = await fetch(`/api/admin/messages/${mid}`, { 
+                            method: 'DELETE', 
+                            headers: getAuthHeaders() 
+                        });
+                        if (res.ok) {
+                            // 从本地数组中移除，避免重刷整个 session
+                            messages.value = messages.value.filter(m => m.id !== mid);
+                        } else if (res.status === 401) {
+                            triggerLogin();
+                        } else {
+                            alert('删除失败');
+                        }
+                    } catch (e) {
+                        console.error('删除消息失败', e);
+                    }
                 };
 
                 const getPreferencesList = (pref) => {
@@ -398,7 +459,9 @@
                     fetchSessions,
                     selectSession,
                     extractProfile,
-                    getPreferencesList
+                    getPreferencesList,
+                    deleteSession,
+                    deleteMessage
                 };
             }
         }).mount('#app');

@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import requests
+import re
 from typing import List, Dict, Any, Set
 from dotenv import load_dotenv
 from database import get_session_messages, update_session_profile, get_session_profile
@@ -22,9 +23,9 @@ _API_KEY = os.getenv("VOLC_ARK_API_KEY", "")
 AUTHORIZATION = f"Bearer {_API_KEY}"
 MODEL = os.getenv("VOLC_ARK_MODEL", "doubao-seed-2-0-mini-260215")
 
-PROFILE_PROMPT = """你是一个旅游定制分析助手，你的任务是从下面的微信聊天记录中提取出用户的画像特征。
-请务必返回一个纯JSON结构，不要包含任何额外的多余说明、markdown格式或代码块标记（如```json），只需返回合法的JSON字符串。
-需要的JSON字段：
+PROFILE_PROMPT = """你是一个旅游定制 analysis 助手，你的任务是从下面的微信聊天记录中提取出用户的画像特征。
+请务必返回一个纯 JSON 结构，不要包含任何额外的多余说明、markdown 格式或代码块标记（如 ```json），只需返回合法的 JSON 字符串。
+需要的 JSON 字段：
 {
   "destination": "倾向的目的地，如果没有提请留空或无",
   "budget": "预算情况",
@@ -74,20 +75,28 @@ def extract_profile_sync(session_id: str) -> Dict[str, Any]:
         data = response.json()
         result_text = data["choices"][0]["message"]["content"]
         
-        # Clean json if the model adds markdown
-        result_text = result_text.strip()
-        if result_text.startswith("```json"):
-            result_text = result_text[7:]
-        if result_text.endswith("```"):
-            result_text = result_text[:-3]
-        result_text = result_text.strip()
+        # 更加鲁棒的 JSON 提取：使用正则匹配第一个 { 到最后一个 }
+        match = re.search(r'\{.*\}', result_text, re.DOTALL)
+        if match:
+            json_str = match.group()
+            try:
+                profile_json = json.loads(json_str)
+                update_session_profile(session_id, profile_json)
+                return profile_json
+            except json.JSONDecodeError as je:
+                logger.error(f"JSON 解析失败: {je}. 原文本: {result_text}")
+                raise Exception(f"大模型返回的 JSON 格式不规范: {je}")
+        else:
+            logger.error(f"未能从模型回复中提取到 JSON 结构. 原文本: {result_text}")
+            raise Exception("大模型未返回有效的 JSON 结构，请稍后重试。")
             
-        profile_json = json.loads(result_text)
-        update_session_profile(session_id, profile_json)
-        return profile_json
+    except requests.exceptions.HTTPError as he:
+        err_msg = f"API 请求失败(HTTP {response.status_code}): {response.text}"
+        logger.error(err_msg)
+        raise Exception(f"大模型 API 调用失败: {err_msg}")
     except Exception as e:
-        logger.error(f"Failed to extract profile: {e}")
-        return {}
+        logger.error(f"画像提取发生未知错误: {e}")
+        raise e
 
 async def async_extract_profile(session_id: str):
     return await asyncio.to_thread(extract_profile_sync, session_id)
@@ -101,10 +110,8 @@ async def check_and_trigger_profile_update(session_id: str):
     msg_count = len(messages)
     rounds = msg_count // 2
     
-    # 策略改成：第2轮（约3~4条消息）触发首次提取，之后每 3 轮再去提取一次
-    # 也可根据需要改成如果超过 5 轮就每轮提取：(rounds > 5)
+    # 策略改成：第 2 轮（约 3~4 条消息）触发首次提取，之后每 3 轮再去提取一次
     if rounds == 2 or (rounds > 2 and rounds % 3 == 0):
         task = asyncio.create_task(async_extract_profile(session_id))
         background_tasks.add(task)
         task.add_done_callback(background_tasks.discard)
-

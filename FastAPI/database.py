@@ -2,7 +2,12 @@ import sqlite3
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 import json
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+def get_beijing_time() -> str:
+    """获取格式化的北京时间字符串"""
+    tz = timezone(timedelta(hours=8))
+    return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "agent_chat.db"
@@ -44,22 +49,23 @@ def save_message(session_id: str, contact_name: str, role: str, content: str):
     cursor = conn.cursor()
     
     # Ensure session exists
+    now_bj = get_beijing_time()
     cursor.execute("SELECT session_id FROM sessions WHERE session_id = ?", (session_id,))
     if not cursor.fetchone():
         cursor.execute(
-            "INSERT INTO sessions (session_id, contact_name) VALUES (?, ?)",
-            (session_id, contact_name)
+            "INSERT INTO sessions (session_id, contact_name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            (session_id, contact_name, now_bj, now_bj)
         )
     else:
         cursor.execute(
-            "UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE session_id = ?",
-            (session_id,)
+            "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+            (now_bj, session_id)
         )
         
     # Insert message
     cursor.execute(
-        "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
-        (session_id, role, content)
+        "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+        (session_id, role, content, now_bj)
     )
     conn.commit()
     conn.close()
@@ -82,7 +88,7 @@ def get_session_messages(session_id: str) -> List[Dict[str, Any]]:
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT role, content, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC",
+        "SELECT id, role, content, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC",
         (session_id,)
     )
     rows = cursor.fetchall()
@@ -111,5 +117,20 @@ def update_session_profile(session_id: str, profile_dict: Dict[str, Any]):
         "UPDATE sessions SET profile_json = ? WHERE session_id = ?",
         (profile_str, session_id)
     )
+    conn.commit()
+    conn.close()
+
+def delete_session(session_id: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+    cursor.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+    conn.commit()
+    conn.close()
+
+def delete_message(message_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM messages WHERE id = ?", (message_id,))
     conn.commit()
     conn.close()

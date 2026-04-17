@@ -230,5 +230,21 @@ async def api_get_session_detail(session_id: str, username: str = Depends(verify
 
 @app.post("/api/admin/sessions/{session_id}/profile")
 async def api_extract_profile(session_id: str, username: str = Depends(verify_admin)):
-    profile = await async_extract_profile(session_id)
-    return {"profile": profile}
+    try:
+        profile = await async_extract_profile(session_id)
+        return {"ok": True, "profile": profile}
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": str(e)}
+        )
+
+@app.delete("/api/admin/sessions/{session_id}")
+async def api_delete_session(session_id: str, username: str = Depends(verify_admin)):
+    database.delete_session(session_id)
+    return {"ok": True}
+
+@app.delete("/api/admin/messages/{message_id}")
+async def api_delete_message(message_id: int, username: str = Depends(verify_admin)):
+    database.delete_message(message_id)
+    return {"ok": True}
