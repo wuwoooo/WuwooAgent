@@ -80,8 +80,8 @@ class WechatNotificationListenerService : NotificationListenerService() {
                 return
             }
 
-        val normalizedTitle = SessionIdentity.normalizeContactName(title)
-        val sessionId = SessionIdentity.buildSessionId(normalizedTitle)
+        val normalizedTitle = SessionIdentity.normalizeContactName(this, title)
+        val sessionId = SessionIdentity.buildSessionId(this, normalizedTitle)
         Handler(Looper.getMainLooper()).postDelayed({
             val currentPrefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
             if (!currentPrefs.getBoolean(PREF_RUNTIME_ENABLED, false)) {

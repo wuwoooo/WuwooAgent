@@ -15,4 +15,5 @@ class AccessibilityAutomationController(private val context: Context) : Automati
     override fun focusInputArea(): Boolean = WechatAccessibilityService.focusInputArea()
 
     override fun clickSend(): Boolean = WechatAccessibilityService.clickSend()
+    override fun clickBack(): Boolean = WechatAccessibilityService.clickBack()
 }

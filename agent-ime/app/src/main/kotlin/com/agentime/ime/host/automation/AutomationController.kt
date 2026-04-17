@@ -5,4 +5,5 @@ interface AutomationController {
     fun isWechatForeground(): Boolean
     fun focusInputArea(): Boolean
     fun clickSend(): Boolean
+    fun clickBack(): Boolean
 }

@@ -15,6 +15,15 @@ import java.io.FileOutputStream
 object CaptureImageProcessor {
     private const val TAG = "CaptureImageProcessor"
 
+    enum class Side { LEFT, RIGHT }
+
+    data class AvatarBand(
+        val side: Side,
+        val top: Int,
+        val bottom: Int,
+        val peak: Double,
+    )
+
     fun processBitmap(
         context: Context,
         bitmap: Bitmap,
@@ -42,7 +51,7 @@ object CaptureImageProcessor {
                 val rawFile = File(outDir, rawFileName)
                 FileOutputStream(rawFile).use { fos -> fos.write(rawPngBytes) }
                 rawImagePath = rawFile.absolutePath
-                rawExportedPath = exportPublicCopy(context, rawFileName, rawPngBytes)
+                rawExportedPath = null
             } else {
                 rawImagePath = null
                 rawExportedPath = null
@@ -51,13 +60,25 @@ object CaptureImageProcessor {
             rawImagePath = null
             rawExportedPath = null
         }
-        val exportedPath = exportPublicCopy(context, fileName, pngBytes)
+        val exportedPath = null
+        val headerCrop = createHeaderCrop(bitmap)
+        val headerCropPath = saveBitmapIfPresent(context, headerCrop, outDir, fileName, "header")
+        val titleCrop = createTitleCrop(bitmap)
+        val titleCropPath = saveBitmapIfPresent(context, titleCrop, outDir, fileName, "title")
         val chatCrop = createChatCrop(bitmap)
-        val chatCropPath = saveBitmapIfPresent(chatCrop, outDir, fileName, "chatcrop")
-        val enhancedChatCrop = chatCrop?.let(::createEnhancedBitmap)
-        val enhancedChatCropPath = saveBitmapIfPresent(enhancedChatCrop, outDir, fileName, "enhanced")
+        val chatCropPath = saveBitmapIfPresent(context, chatCrop, outDir, fileName, "chatcrop")
+        val leftMessageCrop = chatCrop?.let(::createLeftMessageCrop)
+        val leftMessageCropPath = saveBitmapIfPresent(context, leftMessageCrop, outDir, fileName, "leftmsg")
+        val recentLeftMessageCrop = leftMessageCrop?.let(::createRecentLeftMessageCrop)
+        val recentLeftMessageCropPath = saveBitmapIfPresent(context, recentLeftMessageCrop, outDir, fileName, "leftmsg_recent")
+        val latestInboundBubbleCrop = createLatestInboundBubbleCrop(bitmap)
+        val latestInboundBubbleCropPath = saveBitmapIfPresent(context, latestInboundBubbleCrop, outDir, fileName, "leftmsg_latest_bubble")
+        headerCrop?.recycle()
+        titleCrop?.recycle()
         chatCrop?.recycle()
-        enhancedChatCrop?.recycle()
+        leftMessageCrop?.recycle()
+        recentLeftMessageCrop?.recycle()
+        latestInboundBubbleCrop?.recycle()
 
         return CaptureResult(
             imagePath = out.absolutePath,
@@ -66,8 +87,12 @@ object CaptureImageProcessor {
             exportedPath = exportedPath,
             debugSummary = debugSummary,
             captureTrace = captureTrace,
+            headerCropPath = headerCropPath,
+            titleCropPath = titleCropPath,
             chatCropPath = chatCropPath,
-            enhancedChatCropPath = enhancedChatCropPath,
+            leftMessageCropPath = leftMessageCropPath,
+            recentLeftMessageCropPath = recentLeftMessageCropPath,
+            latestInboundBubbleCropPath = latestInboundBubbleCropPath,
             acceptableForOcr = acceptableForOcr,
             sharpnessScore = sharpnessScore,
             totalScore = totalScore,
@@ -97,6 +122,35 @@ object CaptureImageProcessor {
         }
     }
 
+    private fun createHeaderCrop(bitmap: Bitmap): Bitmap? {
+        val width = bitmap.width
+        val height = bitmap.height
+        if (width < 50 || height < 50) return null
+
+        val left = (width * 0.12f).toInt().coerceAtLeast(0)
+        val top = (height * 0.035f).toInt().coerceAtLeast(0)
+        val right = (width * 0.88f).toInt().coerceAtMost(width)
+        val bottom = (height * 0.125f).toInt().coerceAtMost(height)
+        val cropWidth = (right - left).coerceAtLeast(10)
+        val cropHeight = (bottom - top).coerceAtLeast(10)
+        return Bitmap.createBitmap(bitmap, left, top, cropWidth, cropHeight)
+    }
+
+    private fun createTitleCrop(bitmap: Bitmap): Bitmap? {
+        val width = bitmap.width
+        val height = bitmap.height
+        if (width < 50 || height < 50) return null
+
+        // 只取联系人标题所在的中部窄区域，尽量避开状态栏、屏幕共享浮层、返回按钮和右上角菜单。
+        val left = (width * 0.22f).toInt().coerceAtLeast(0)
+        val top = (height * 0.060f).toInt().coerceAtLeast(0)
+        val right = (width * 0.78f).toInt().coerceAtMost(width)
+        val bottom = (height * 0.118f).toInt().coerceAtMost(height)
+        val cropWidth = (right - left).coerceAtLeast(10)
+        val cropHeight = (bottom - top).coerceAtLeast(10)
+        return Bitmap.createBitmap(bitmap, left, top, cropWidth, cropHeight)
+    }
+
     private fun createChatCrop(bitmap: Bitmap): Bitmap? {
         val width = bitmap.width
         val height = bitmap.height
@@ -105,70 +159,175 @@ object CaptureImageProcessor {
         val left = (width * 0.05f).toInt().coerceAtLeast(0)
         val top = (height * 0.10f).toInt().coerceAtLeast(0)
         val right = (width * 0.95f).toInt().coerceAtMost(width)
-        val bottom = (height * 0.84f).toInt().coerceAtMost(height)
+        val bottom = (height * 0.92f).toInt().coerceAtMost(height)
         val cropWidth = (right - left).coerceAtLeast(10)
         val cropHeight = (bottom - top).coerceAtLeast(10)
         return Bitmap.createBitmap(bitmap, left, top, cropWidth, cropHeight)
     }
 
-    private fun createEnhancedBitmap(source: Bitmap): Bitmap {
-        val scaled = Bitmap.createScaledBitmap(source, source.width * 2, source.height * 2, false)
-        val width = scaled.width
-        val height = scaled.height
-        val gray = IntArray(width * height)
+    private fun createLeftMessageCrop(source: Bitmap): Bitmap? {
+        val width = source.width
+        val height = source.height
+        if (width < 50 || height < 50) return null
 
-        var y = 0
-        while (y < height) {
-            var x = 0
-            while (x < width) {
-                val c = scaled.getPixel(x, y)
-                val r = (c shr 16) and 0xFF
-                val g = (c shr 8) and 0xFF
-                val b = c and 0xFF
-                gray[y * width + x] = (r * 30 + g * 59 + b * 11) / 100
-                x++
-            }
-            y++
-        }
-
-        val out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        y = 0
-        while (y < height) {
-            var x = 0
-            while (x < width) {
-                val idx = y * width + x
-                val center = gray[idx]
-                val left = gray[y * width + maxOf(0, x - 1)]
-                val right = gray[y * width + minOf(width - 1, x + 1)]
-                val up = gray[maxOf(0, y - 1) * width + x]
-                val down = gray[minOf(height - 1, y + 1) * width + x]
-
-                val sharpened = (5 * center - left - right - up - down).coerceIn(0, 255)
-                val boosted = (((sharpened - 128) * 1.85f) + 128f).toInt().coerceIn(0, 255)
-                val normalized = when {
-                    boosted > 185 -> 255
-                    boosted < 70 -> 0
-                    else -> boosted
-                }
-                val color = (0xFF shl 24) or (normalized shl 16) or (normalized shl 8) or normalized
-                out.setPixel(x, y, color)
-                x++
-            }
-            y++
-        }
-
-        scaled.recycle()
-        return out
+        val left = (width * 0.02f).toInt().coerceAtLeast(0)
+        val top = (height * 0.04f).toInt().coerceAtLeast(0)
+        val right = (width * 0.58f).toInt().coerceAtMost(width)
+        val bottom = (height * 0.98f).toInt().coerceAtMost(height)
+        val cropWidth = (right - left).coerceAtLeast(10)
+        val cropHeight = (bottom - top).coerceAtLeast(10)
+        return Bitmap.createBitmap(source, left, top, cropWidth, cropHeight)
     }
 
+    private fun createRecentLeftMessageCrop(source: Bitmap): Bitmap? {
+        val width = source.width
+        val height = source.height
+        if (width < 50 || height < 50) return null
+
+        val left = (width * 0.00f).toInt().coerceAtLeast(0)
+        val top = (height * 0.62f).toInt().coerceAtLeast(0)
+        val right = (width * 0.52f).toInt().coerceAtMost(width)
+        val bottom = (height * 0.98f).toInt().coerceAtMost(height)
+        val cropWidth = (right - left).coerceAtLeast(10)
+        val cropHeight = (bottom - top).coerceAtLeast(10)
+        return Bitmap.createBitmap(source, left, top, cropWidth, cropHeight)
+    }
+
+    private fun createLatestInboundBubbleCrop(source: Bitmap): Bitmap? {
+        val width = source.width
+        val height = source.height
+        if (width < 80 || height < 120) return null
+
+        val searchTop = (height * 0.10f).toInt().coerceAtLeast(0)
+        val searchBottom = (height * 0.95f).toInt().coerceAtMost(height)
+        if (searchBottom - searchTop < 40) return null
+
+        fun rowComplexity(y: Int, xStart: Int, xEnd: Int): Int {
+            var diffCount = 0
+            var prevC = source.getPixel(xStart, y)
+            for (x in xStart + 2 until xEnd step 2) {
+                val c = source.getPixel(x, y)
+                val dr = Math.abs(((c shr 16) and 0xFF) - ((prevC shr 16) and 0xFF))
+                val dg = Math.abs(((c shr 8) and 0xFF) - ((prevC shr 8) and 0xFF))
+                val db = Math.abs((c and 0xFF) - (prevC and 0xFF))
+                if (dr + dg + db > 120) diffCount++
+                prevC = c
+            }
+            return diffCount
+        }
+
+        // 检测头像列（x: 0~13% 宽）区间内是否存在明显色彩（非纯色背景），用于识别轻量气泡
+        fun avatarBandHasContent(top: Int, bottom: Int): Boolean {
+            val xStart = (width * 0.005f).toInt().coerceAtLeast(0)
+            val xEnd = (width * 0.13f).toInt().coerceAtMost(width - 1)
+            var totalDiff = 0
+            var samples = 0
+            val step = maxOf(1, (bottom - top) / 8)
+            for (y in top until bottom step step) {
+                val cx = rowComplexity(y, xStart, xEnd)
+                totalDiff += cx
+                samples++
+            }
+            // 若头像区域整体复杂度 > 2/采样行，认为有头像
+            return samples > 0 && totalDiff.toFloat() / samples > 2f
+        }
+
+        // 分级判定：
+        //   标准 block（高度≥30）：leftScore > rightScore*1.2 && leftScore > 20
+        //   轻量 block（高度<30）：leftScore > rightScore*1.2 && leftScore > 4，或头像区有内容
+        class Block(val top: Int, val bottom: Int, val leftScore: Int, val rightScore: Int) {
+            val blockH = bottom - top
+            val hasLeft: Boolean by lazy {
+                val leftDominant = leftScore > rightScore * 1.2f
+                if (blockH >= 30) {
+                    leftDominant && leftScore > 20
+                } else {
+                    // 轻量气泡（单字符、数字、短词）：降低绝对阈值，辅以头像区检测
+                    (leftDominant && leftScore > 4) || (leftScore > 0 && avatarBandHasContent(top, bottom))
+                }
+            }
+        }
+        val blocks = mutableListOf<Block>()
+
+        var currentTop = -1
+        var currentLeftScore = 0
+        var currentRightScore = 0
+        var gapCount = 0
+
+        for (y in searchTop..searchBottom) {
+            val leftCx = rowComplexity(y, (width * 0.03f).toInt(), (width * 0.18f).toInt())
+            val rightCx = rowComplexity(y, (width * 0.82f).toInt(), (width * 0.97f).toInt())
+            val centerCx = rowComplexity(y, (width * 0.20f).toInt(), (width * 0.80f).toInt())
+
+            val rowHasLeft = leftCx > 2
+            val rowHasRight = rightCx > 2
+            val rowHasCenter = centerCx > 5
+
+            if (rowHasLeft || rowHasRight || rowHasCenter) {
+                if (currentTop < 0) currentTop = y
+                currentLeftScore += leftCx
+                currentRightScore += rightCx
+                gapCount = 0
+            } else {
+                if (currentTop >= 0) {
+                    gapCount++
+                    if (gapCount >= 10) {
+                        val blockBottom = y - gapCount
+                        val blockHeight = blockBottom - currentTop
+                        // 降低最小高度门槛至 6px，以捕获"1"等极短消息气泡
+                        if (blockHeight >= 6) {
+                            blocks.add(Block(currentTop, blockBottom, currentLeftScore, currentRightScore))
+                        }
+                        currentTop = -1
+                        currentLeftScore = 0
+                        currentRightScore = 0
+                        gapCount = 0
+                    }
+                }
+            }
+        }
+        if (currentTop >= 0) {
+            val blockHeight = searchBottom - currentTop
+            if (blockHeight >= 6) {
+                blocks.add(Block(currentTop, searchBottom, currentLeftScore, currentRightScore))
+            }
+        }
+
+        val lastInbound = blocks.lastOrNull { it.hasLeft } ?: return null
+
+        val topPadding = maxOf((height * 0.010f).toInt(), 6)
+        val bottomPadding = maxOf((height * 0.014f).toInt(), 10)
+        val cropTop = (lastInbound.top - topPadding).coerceAtLeast(searchTop)
+        val cropBottom = (lastInbound.bottom + bottomPadding).coerceAtMost(searchBottom)
+
+        if (cropBottom - cropTop < 10) return null
+
+        val cropLeft = 0
+        val cropRight = (width * 0.85f).toInt().coerceAtMost(width)
+        val cropWidth = (cropRight - cropLeft).coerceAtLeast(10)
+        val cropHeight = (cropBottom - cropTop).coerceAtLeast(10)
+
+        return Bitmap.createBitmap(
+            source,
+            cropLeft,
+            cropTop,
+            cropWidth,
+            cropHeight
+        )
+    }
+
+
+
     private fun saveBitmapIfPresent(
+        context: Context,
         bitmap: Bitmap?,
         outDir: File,
         baseFileName: String,
         suffix: String,
     ): String? {
         if (bitmap == null) return null
-        val target = File(outDir, baseFileName.removeSuffix(".png") + "_$suffix.png")
+        val exportedFileName = baseFileName.removeSuffix(".png") + "_$suffix.png"
+        val target = File(outDir, exportedFileName)
         FileOutputStream(target).use { fos ->
             bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
         }
@@ -182,7 +341,7 @@ object CaptureImageProcessor {
         }
     }
 
-    private fun exportPublicCopy(context: Context, fileName: String, pngBytes: ByteArray): String? {
+    fun exportPublicCopy(context: Context, fileName: String, pngBytes: ByteArray): String? {
         return runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val values = ContentValues().apply {

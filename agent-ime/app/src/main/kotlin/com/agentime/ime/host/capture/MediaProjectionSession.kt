@@ -64,19 +64,14 @@ object MediaProjectionSession {
 
             val cb = projectionCallback
             val p = boundProjection
-            if (p != null && cb != null) {
-                try {
-                    p.unregisterCallback(cb)
-                } catch (_: Exception) {
-                }
-            }
+            // 先置 null 并注销 Callback，确保后续 p.stop() 触发的 onStop 回调不会再执行
             projectionCallback = null
             boundProjection = null
-
-            try {
-                p?.stop()
-            } catch (_: Exception) {
+            if (p != null && cb != null) {
+                runCatching { p.unregisterCallback(cb) }
             }
+            // stop 放在 unregisterCallback 之后，避免回调重入
+            runCatching { p?.stop() }
             ProjectionPermissionStore.onProjectionSessionEnded()
         }
     }
@@ -111,7 +106,10 @@ object MediaProjectionSession {
         handler = Handler(handlerThread!!.looper)
         val cb = object : MediaProjection.Callback() {
             override fun onStop() {
-                Log.w(TAG, "MediaProjection.Callback.onStop 触发，当前投影已失效")
+                // 系统停止投影时的回调。此时管线已无效，下次 captureScreen 会报「未授权」错误。
+                // 不在此调用 tearDown：tearDown 在 synchronized(lock) 内调 p.stop()，
+                // 而 onStop 本身可能在 stop() 内部同步触发，再试图拿同一把锁会死锁。
+                Log.w(TAG, "MediaProjection.Callback.onStop 触发，当前投影已被系统停止")
             }
         }
         projectionCallback = cb

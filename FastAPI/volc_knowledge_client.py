@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 import os
 import re
 import time
@@ -25,50 +26,19 @@ BASE_PROMPT = """# 角色
 5. 让客户感受到专业、靠谱、耐心，而不是模板化客服话术。
 
 # 核心原则
-你必须优先依据参考资料回答问题，参考资料放在 <context></context> 标签内。
+如果提供了参考资料（<context>标签内），你必须优先依据参考资料回答问题。
 如果参考资料中有足够信息，应基于参考资料作答；
 如果参考资料不足，不要编造，不要强行回答。
 
-但请注意：
-你不是在写正式客服公告，而是在微信聊天。
-回答必须像真人聊天，简洁、自然、顺着用户的话说，避免生硬、官方、机械。
-
-# 回答风格要求
-1. 语气自然，像微信真人聊天，不要像客服公告，不要像机器人。
-2. 优先先回应客户当前情绪或问题，再给信息，不要上来就堆知识点。
-3. 一次回复尽量控制在 1 到 3 句，避免过长。
-4. 除非用户明确要求，不要使用分点、编号、大段说明。
-5. 不要每次都自我介绍，不要重复固定开场白。
-6. 不要频繁使用“您好”“亲”“请问您方便...”这类过度客服化表达。
-7. 如果适合推进成交或继续沟通，可以自然追问一个最关键的问题，但一次最多追问 1 个。
-8. 如果客户已经表现出拒绝、犹豫、质疑、不耐烦，要先顺着客户回应，降低推销感，不要强行推进。
-9. 如果客户只是简单打招呼或试探，可以轻松自然地接话，并把话题引到出行需求上。
-10. 不要脱离参考资料胡乱承诺价格、资源、政策、服务范围。
-
-# 参考资料使用规则
-1. 回答时应尽量基于参考资料，不得虚构资料中没有的信息。
-2. 如果参考资料足够支持回答，就直接自然地回答，不要暴露“我是根据资料回答”的痕迹。
-3. 如果参考资料只能支持部分内容，就只回答能确认的部分，其余部分委婉说明需要更多信息或需要进一步确认。
-4. 如果参考资料完全无法支持回答：
-   - 不要编造；
-   - 不要空泛敷衍；
-   - 应自然地告诉客户目前还不能准确判断；
-   - 并引导客户补充更具体的信息，方便你继续帮他判断。
-5. 如果客户追问资料来源、文档名称、作者、内部规则等敏感信息，请委婉回避，不直接暴露文档细节。
-
-# 输出限制
-1. 只输出最终要发给客户的微信消息内容。
-2. 不要输出分析过程，不要解释你用了哪些资料。
-3. 不要输出“根据参考资料”“根据知识库”“参考文档”“资料显示”等字样。
-4. 不要输出任何引用标记、标签、reference、point_id、文档名、标题、XML 标签或额外备注。
-5. 不要输出 Markdown、编号、小标题、括号说明。
-6. 不要使用固定模板反复重复。
-7. 最终输出必须是一段可以直接发送给微信客户的话，看起来像真人说的。
-
-# 参考资料
-<context>
-{}
-</context>"""
+# 回答风格要求与限制
+1. 像真人聊天，简短自然，1 到 3 句即可，绝不长篇大论。
+2. 严禁重复固定开场白，严禁重复自我介绍，严禁再次索要微信。
+3. 优先先回应客户当前情绪或问题，如果客户是在拒绝、质疑、抱怨或表达不方便，要先顺着客户的话回应，不要答非所问。
+4. 除非用户明确要求，不要使用分点、编号、大段说明、Markdown 或小标题。
+5. 不要输出分析过程，不要输出标题，不要加括号说明，只输出最终要发给客户的话。
+6. 【绝对禁止】严禁使用任何类似于“稍等”、“马上”、“明天”、“我这就为您排版”、“正在为您”等表示延迟或过渡的客套话与废话。
+7. 【直接执行】当用户需要方案或规划时，必须在此次回复中直接输出完整的最终结果，立即出具内容，绝不允许推迟。
+8. 不要输出“根据参考资料”“根据知识库”“参考文档”“资料显示”等字样，也不要输出任何引用标记、标签（如 <reference>等）。"""
 
 
 def load_volc_config_from_env() -> dict[str, Any]:
@@ -83,8 +53,8 @@ def load_volc_config_from_env() -> dict[str, Any]:
         "model": os.environ.get("VOLCENGINE_MODEL", "Deepseek-v3").strip() or "Deepseek-v3",
         "model_version": os.environ.get("VOLCENGINE_MODEL_VERSION", "250324").strip() or "250324",
         "temperature": float(os.environ.get("VOLCENGINE_TEMPERATURE", "0.7") or "0.7"),
-        "max_tokens": int(os.environ.get("VOLCENGINE_MAX_TOKENS", "1024") or "1024"),
-        "search_limit": int(os.environ.get("VOLCENGINE_SEARCH_LIMIT", "8") or "8"),
+        "max_tokens": int(os.environ.get("VOLCENGINE_MAX_TOKENS", "250") or "250"),
+        "search_limit": int(os.environ.get("VOLCENGINE_SEARCH_LIMIT", "3") or "3"),
     }
     required = ["ak", "sk", "account_id", "collection"]
     missing = [key for key in required if not cfg[key]]
@@ -224,7 +194,30 @@ def get_content_for_prompt(point: dict[str, Any]) -> str:
     return content
 
 
-def generate_prompt(search_payload: dict[str, Any]) -> str:
+def is_greeting_or_short(text: str) -> bool:
+    """如果只是一些常规简短寒暄，则跳过知识库检索以提升响应速度。"""
+    cleaned = text.strip()
+    if not cleaned:
+        return True
+    
+    # 极短词汇且仅包含寒暄意图
+    if len(cleaned) <= 4:
+        # 直接匹配常见短语
+        common_phrases = {"你好", "在吗", "在不在", "有人吗", "谢谢", "好的", "好", "可以", "嗯", "嗯嗯", "ok", "OK", "哈喽", "hi", "hello"}
+        if cleaned.lower() in common_phrases:
+            return True
+            
+    # 正则匹配常见的开头寒暄 (不超过 6 个字)
+    if len(cleaned) <= 6:
+        patterns = ["^哈喽", "^hello", "^hi", "^你好", "^在吗", "^收到", "^谢谢"]
+        for p in patterns:
+            if re.match(p, cleaned, re.IGNORECASE):
+                return True
+                
+    return False
+
+
+def build_knowledge_context(search_payload: dict[str, Any]) -> str:
     rsp_data = search_payload.get("data") or {}
     points = rsp_data.get("result_list") or []
     prompt_parts: list[str] = []
@@ -244,7 +237,11 @@ def generate_prompt(search_payload: dict[str, Any]) -> str:
         else:
             prompt_parts.append(f"资料片段{idx}\n{body}")
 
-    return BASE_PROMPT.format("\n\n".join(prompt_parts))
+    if not prompt_parts:
+        return ""
+        
+    context_body = "\n\n".join(prompt_parts)
+    return f"# 参考资料\n<context>\n{context_body}\n</context>"
 
 
 def _extract_chat_content(payload: dict[str, Any]) -> str:
@@ -312,15 +309,51 @@ def chat_completion(messages: list[dict[str, Any]], cfg: dict[str, Any]) -> str:
     return reply
 
 
-def run_volc_knowledge_chat(*, user_text: str, contact_name: str) -> tuple[str, dict[str, Any]]:
+try:
+    from database import get_session_messages
+except ImportError:
+    pass
+
+MAX_HISTORY_TURNS = 5  # 保留最近5轮对话（10条消息）
+
+
+def run_volc_knowledge_chat(*, pure_user_text: str, wrapped_user_text: str, contact_name: str, session_id: str) -> tuple[str, dict[str, Any]]:
     cfg = load_volc_config_from_env()
-    search_payload = search_knowledge(user_text, cfg)
-    system_prompt = generate_prompt(search_payload)
+    
+    # 低价值短语直接拦截检索，压榨速度极限
+    if is_greeting_or_short(pure_user_text):
+        search_payload = {}
+        knowledge_context = ""
+    else:
+        search_payload = search_knowledge(pure_user_text, cfg)
+        knowledge_context = build_knowledge_context(search_payload)
+    
+    # 从数据库提取历史记录，并截取最近 MAX_HISTORY_TURNS 轮
+    try:
+        db_messages = get_session_messages(session_id)
+        # 获取最近 N 条记录，并且转化为模型可识别的 format
+        history = [
+            {"role": msg["role"], "content": msg["content"]} 
+            for msg in db_messages[-MAX_HISTORY_TURNS * 2:]
+            if msg["role"] in ["user", "assistant"]
+        ]
+    except Exception:
+        # 兼容未接入数据库的错误情况
+        history = []
+    
+    # 彻底拆分系统规则、知识库检索内容，把变动部分放在后面，确保深度命中 Prefix Caching
     messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_text},
+        {"role": "system", "content": BASE_PROMPT},
     ]
+    if knowledge_context:
+        messages.append({"role": "system", "content": knowledge_context})
+        
+    # 拼接历史记录和最新一条消息
+    messages.extend(history)
+    messages.append({"role": "user", "content": wrapped_user_text})
+    
     reply = chat_completion(messages, cfg)
+    
     return reply, {
         "provider": "volc_knowledge",
         "messages": messages,

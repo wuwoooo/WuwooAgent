@@ -197,12 +197,15 @@ class WechatAccessibilityService : AccessibilityService() {
         @Volatile
         private var lastEventPackage: String? = null
         @Volatile
-        private var lastForegroundTriggerAt: Long = 0L
+        private var lastScreenshotAnalysisTriggerAt: Long = 0L
+        @Volatile
+        private var lastDelayedScheduleAt: Long = 0L
 
         private val unreadCountRegex = Regex("""^\d+$""")
         private val unreadDescRegex = Regex("""未读|新消息""")
         private val timeLikeRegex = Regex("""^\d{1,2}:\d{2}$|^(昨天|前天)$|^\d{1,2}/\d{1,2}$""")
         private val listNoiseTexts = setOf("微信", "通讯录", "发现", "我", "搜索", "更多", "返回")
+        private const val SCREENSHOT_ANALYSIS_TRIGGER_COOLDOWN_MS = 2_500L
 
         fun launchWechat(context: Context): Boolean {
             val app = context.applicationContext
@@ -312,6 +315,12 @@ class WechatAccessibilityService : AccessibilityService() {
             return svc.tap(x, y)
         }
 
+        fun clickBack(): Boolean {
+            val svc = instance ?: return false
+            Log.i(TAG, "执行系统级返回动作 (GLOBAL_ACTION_BACK)")
+            return svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+        }
+
         /** 仅当对应 key 从未写入时，用屏幕比例作为默认坐标（像素默认值易在不同分辨率上失效）。 */
         private fun resolveTapPair(
             prefs: android.content.SharedPreferences,
@@ -352,7 +361,7 @@ class WechatAccessibilityService : AccessibilityService() {
         }
 
         private fun maybeTriggerForegroundAuto(event: AccessibilityEvent?) {
-            val svc = instance ?: return
+            instance ?: return
             val e = event ?: return
             val pkg = e.packageName?.toString() ?: return
             if (pkg != WECHAT_PACKAGE) return
@@ -365,6 +374,7 @@ class WechatAccessibilityService : AccessibilityService() {
         }
 
         private fun scanForegroundWechatUi(triggerSource: String, event: AccessibilityEvent? = null) {
+            if (triggerSource == "poll") return
             val svc = instance ?: return
             val root = resolveWechatRoot(svc, event)
             val rootPkg = root?.packageName?.toString().orEmpty()
@@ -380,79 +390,31 @@ class WechatAccessibilityService : AccessibilityService() {
             if (HostForegroundService.isBusyOrCoolingDown()) return
 
             val now = System.currentTimeMillis()
-            if (now - lastForegroundTriggerAt < 6_000L) return
-
-            fun triggerConversationListScreenshotAnalysis() {
-                lastForegroundTriggerAt = now
-                val intent = Intent(svc, HostForegroundService::class.java).apply {
-                    action = HostForegroundService.ACTION_SCAN_CONVERSATION_LIST
-                }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    svc.startForegroundService(intent)
-                } else {
-                    svc.startService(intent)
-                }
-                hostLog(svc, "前台扫描已降级为截图分析会话列表（source=$triggerSource）")
-            }
-
-            if (root == null) {
-                if (triggerSource == "poll") {
-                    triggerConversationListScreenshotAnalysis()
+            val runtimeStartedAt = prefs.getLong("runtime_started_at", 0L)
+            if (now - runtimeStartedAt < 6000L) {
+                // 忽略刚启动前 6 秒的事件（防止 MainActivity 弹出的 Toast 消失引起画面变化）
+                // 若期内有真实事件，我们只安排一次延后（6 秒后）的兜底扫描，避免漏掉期内的真实新消息
+                if (System.currentTimeMillis() - lastDelayedScheduleAt > 6000L) {
+                    lastDelayedScheduleAt = System.currentTimeMillis()
+                    val delay = 6000L - (now - runtimeStartedAt) + 200L
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        runCatching { scanForegroundWechatUi("delayed_startup_event", event) }
+                    }, delay)
                 }
                 return
             }
 
-            if (triggerSource == "poll") {
-                if (isConversationListPage(root)) {
-                    triggerConversationListScreenshotAnalysis()
-                    return
-                }
+            if (now - lastScreenshotAnalysisTriggerAt < SCREENSHOT_ANALYSIS_TRIGGER_COOLDOWN_MS) return
+            lastScreenshotAnalysisTriggerAt = now
+            val intent = Intent(svc, HostForegroundService::class.java).apply {
+                action = HostForegroundService.ACTION_SCAN_CONVERSATION_LIST
+                putExtra(HostForegroundService.EXTRA_SCAN_SOURCE, triggerSource)
             }
-
-            if (isConversationListPage(root)) {
-                hostLog(svc, "前台检测到微信会话列表页，开始扫描未读项（source=$triggerSource）")
-                val unread = findBestUnreadConversation(root)
-                if (unread != null) {
-                    lastForegroundTriggerAt = now
-                    val normalizedTitle = SessionIdentity.normalizeContactName(unread.title)
-                    if (normalizedTitle.isNotBlank()) {
-                        if (svc.tap(unread.tapX, unread.tapY)) {
-                            Log.i(TAG, "前台会话列表发现未读，已点击进入: ${unread.title}")
-                            hostLog(svc, "前台会话列表发现未读，已点击进入: ${unread.title}（source=$triggerSource）")
-                            Handler(Looper.getMainLooper()).postDelayed({
-                                val currentPrefs = svc.getSharedPreferences("host_config", Context.MODE_PRIVATE)
-                                if (!currentPrefs.getBoolean("runtime_enabled", false)) return@postDelayed
-                                startRunOnceForContact(svc, normalizedTitle)
-                                Log.i(TAG, "前台会话列表未读已自动触发 runOnce: ${SessionIdentity.buildSessionId(normalizedTitle)}/$normalizedTitle")
-                                hostLog(svc, "前台会话列表未读已自动触发 runOnce: ${SessionIdentity.buildSessionId(normalizedTitle)}/$normalizedTitle")
-                            }, 1300L)
-                        }
-                    }
-                } else {
-                    Log.i(TAG, "前台会话列表已识别，但未找到可处理的未读会话")
-                    hostLog(svc, "前台会话列表已识别，但未找到可处理的未读会话")
-                }
-                return
-            }
-
-            val cls = root.className?.toString().orEmpty()
-            val looksLikeChatPage = cls.contains("Chatting", ignoreCase = true) ||
-                cls.contains("ChatFooter", ignoreCase = true) ||
-                cls.contains("LauncherUIBottomTabView", ignoreCase = true) ||
-                cls.contains("RecyclerView", ignoreCase = true)
-            if (!looksLikeChatPage) {
-                if (triggerSource == "poll") {
-                    triggerConversationListScreenshotAnalysis()
-                }
-                return
-            }
-
-            val contactName = SessionIdentity.normalizeContactName(getCurrentChatContactName())
-            if (contactName.isBlank() || contactName == "当前联系人") return
-            lastForegroundTriggerAt = now
-            startRunOnceForContact(svc, contactName)
-            Log.i(TAG, "前台聊天内容变化，已自动触发 runOnce: ${SessionIdentity.buildSessionId(contactName)}/$contactName")
-            hostLog(svc, "前台聊天内容变化，已自动触发 runOnce: ${SessionIdentity.buildSessionId(contactName)}/$contactName（source=$triggerSource）")
+            svc.startService(intent)
+            hostLog(
+                svc,
+                "前台变化已触发截图分析当前微信页（source=$triggerSource root=${root?.className ?: "null"}）",
+            )
         }
 
         private fun resolveWechatRoot(
@@ -474,17 +436,13 @@ class WechatAccessibilityService : AccessibilityService() {
         }
 
         private fun startRunOnceForContact(context: Context, contactName: String) {
-            val sessionId = SessionIdentity.buildSessionId(contactName)
+            val sessionId = SessionIdentity.buildSessionId(context, contactName)
             val intent = Intent(context, HostForegroundService::class.java).apply {
                 action = HostForegroundService.ACTION_RUN_ONCE
                 putExtra(HostForegroundService.EXTRA_SESSION_ID, sessionId)
                 putExtra(HostForegroundService.EXTRA_CONTACT_NAME, contactName)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
+            context.startService(intent)
         }
 
         private fun findLikelyChatTitle(root: AccessibilityNodeInfo): String? {
@@ -517,20 +475,6 @@ class WechatAccessibilityService : AccessibilityService() {
 
             walk(root)
             return candidates.maxByOrNull { it.second }?.first
-        }
-
-        private fun isConversationListPage(root: AccessibilityNodeInfo): Boolean {
-            val texts = mutableSetOf<String>()
-            fun walk(node: AccessibilityNodeInfo?) {
-                if (node == null) return
-                node.text?.toString()?.trim()?.takeIf { it.isNotBlank() }?.let { texts += it }
-                node.contentDescription?.toString()?.trim()?.takeIf { it.isNotBlank() }?.let { texts += it }
-                for (i in 0 until node.childCount) walk(node.getChild(i))
-            }
-            walk(root)
-            val hasTabs = texts.contains("通讯录") && texts.contains("发现") && texts.contains("我")
-            val hasWechatTitle = texts.any { it == "微信" || it.startsWith("微信(") || it.startsWith("微信（") }
-            return hasTabs && hasWechatTitle
         }
 
         private fun findBestUnreadConversation(root: AccessibilityNodeInfo): UnreadConversationCandidate? {

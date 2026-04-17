@@ -32,6 +32,8 @@ rsync -avz \
   --exclude '__pycache__/' \
   --exclude 'uploads/' \
   --exclude '.git/' \
+  --exclude '*.db' \
+  --exclude '*.db-*' \
   --exclude 'log.txt' \
   ./ "${REMOTE_USER_HOST}:${REMOTE_DIR}/"
 
@@ -55,6 +57,19 @@ nohup venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 >> log.txt 2>&1 &
 echo \$! > uvicorn.pid
 echo "已启动 PID=\$(cat uvicorn.pid)，日志: ${REMOTE_DIR}/log.txt"
 EOF
+
+echo ""
+echo "==> 同步到 GitHub"
+(
+  cd "$SCRIPT_DIR/.."
+  git add .
+  if ! git diff-index --quiet HEAD --; then
+    git commit -m "Auto-commit from deploy.sh at $(date '+%Y-%m-%d %H:%M:%S')"
+    git push
+  else
+    echo "没有检测到需要提交的变更"
+  fi
+)
 
 echo ""
 echo "部署完成。"

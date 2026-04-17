@@ -7,17 +7,27 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, status, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.staticfiles import StaticFiles
 
 from adp_client import load_adp_config_from_env, run_adp_chat
 from volc_knowledge_client import run_volc_knowledge_chat
+import secrets
+
+try:
+    import database
+    from profile_extractor import async_extract_profile, check_and_trigger_profile_update
+except ImportError:
+    pass
 
 BASE_DIR = Path(__file__).resolve().parent
 # 先加载示例中的默认值，再由 .env 覆盖（与本地仅配置 .env.example 时的行为一致）
@@ -36,31 +46,63 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Initialize DB on startup
+try:
+    database.init_db()
+except Exception:
+    pass
 
-def _build_user_prompt(contact_name: str) -> str:
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+security = HTTPBasic()
+
+def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
+    admin_user = os.environ.get("ADMIN_USER", "admin").strip()
+    admin_pass = os.environ.get("ADMIN_PASSWORD", "admin123").strip()
+    
+    is_user_ok = secrets.compare_digest(credentials.username, admin_user)
+    is_pass_ok = secrets.compare_digest(credentials.password, admin_pass)
+    
+    if not (is_user_ok and is_pass_ok):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "CustomBasic"},
+        )
+    return credentials.username
+
+
+def get_current_time_str() -> str:
+    tz = datetime.timezone(datetime.timedelta(hours=8))
+    now = datetime.datetime.now(tz)
+    weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    weekday_str = weekdays[now.weekday()]
+    return now.strftime("%Y-%m-%d %H:%M") + f"（{weekday_str}）"
+
+def _build_user_prompt(contact_name: str) -> Tuple[str, str]:
     """未提供 ocr_text 时：仅截图场景，服务端不做 OCR，用占位描述发给智能体。"""
     name = (contact_name or "").strip() or "客户"
-    return (
-        f"当前微信会话联系人是「{name}」。用户上传了一张聊天截图，但服务端未能拿到具体聊天文字。"
-        "请作为旅游定制顾问，输出一句非常简短、自然、像真人微信聊天的回复建议。"
-        "不要自我介绍，不要索要微信，不要重复固定话术，不要输出多段。"
+    current_time = get_current_time_str()
+    pure_text = "[用户上传了一张聊天截图]"
+    wrapped_text = (
+        f"（系统提示：当前实际时间是 {current_time}，请以此作为判断今天、明天、下周等相对时间的基准。）\n\n"
+        f"当前微信会话联系人是「{name}」。用户上传了一张聊天截图，但服务端未能拿到具体聊天文字。\n"
+        "请作为旅游定制顾问，直接给出一句简短的回复建议。"
     )
+    return pure_text, wrapped_text
 
 
-def _build_user_prompt_from_ocr(contact_name: str, ocr_text: str) -> str:
+def _build_user_prompt_from_ocr(contact_name: str, ocr_text: str) -> Tuple[str, str]:
     """客户端已完成本地 OCR 时，仅把最新一条客户消息发给智能体。"""
     name = (contact_name or "").strip() or "客户"
     text = (ocr_text or "").strip()
-    return (
-        f"你正在代聊微信联系人「{name}」。\n"
-        f"下面是客户刚刚发来的最新一条消息，不是完整聊天记录：\n\n{text}\n\n"
-        "请只针对这条最新消息，生成一句适合直接微信发送的中文回复。\n"
-        "要求：\n"
-        "1. 像真人聊天，简短自然，1 到 2 句即可。\n"
-        "2. 严禁重复固定开场白，严禁重复自我介绍，严禁再次索要微信。\n"
-        "3. 如果客户是在拒绝、质疑、抱怨或表达不方便，要先顺着客户的话回应，不要答非所问。\n"
-        "4. 不要输出分析，不要输出标题，不要加括号说明，只输出最终要发给客户的话。"
+    current_time = get_current_time_str()
+    pure_text = text
+    wrapped_text = (
+        f"（系统提示：当前实际时间是 {current_time}。如果在聊天中客户提到诸如“下月”、“明天”等相对时间，请以此为基准推算。）\n\n"
+        f"代聊微信联系人「{name}」。对方刚刚发来的最新消息：\n\n{text}"
     )
+    return pure_text, wrapped_text
 
 
 def _provider_from_env() -> str:
@@ -106,9 +148,9 @@ async def wechat_chat(
 
     # 优先使用客户端本地 OCR 全文（与接口说明「构造 user 文本」一致）
     if ocr_ok:
-        user_text = _build_user_prompt_from_ocr(contact_name, ocr_text or "")
+        pure_user_text, wrapped_user_text = _build_user_prompt_from_ocr(contact_name, ocr_text or "")
     else:
-        user_text = _build_user_prompt(contact_name)
+        pure_user_text, wrapped_user_text = _build_user_prompt(contact_name)
 
     provider = _provider_from_env()
     try:
@@ -120,20 +162,22 @@ async def wechat_chat(
                 region=region,
                 bot_app_key=app_key,
                 session_id=session_id,
-                user_text=user_text,
+                user_text=wrapped_user_text,
             )
             messages = [
-                {"role": "user", "text": user_text},
+                {"role": "user", "text": pure_user_text},
                 {"role": "assistant", "text": reply_text},
             ]
         else:
             reply_text, debug_payload = await asyncio.to_thread(
                 run_volc_knowledge_chat,
-                user_text=user_text,
+                pure_user_text=pure_user_text,
+                wrapped_user_text=wrapped_user_text,
                 contact_name=contact_name,
+                session_id=session_id,
             )
             messages = [
-                {"role": "user", "text": user_text},
+                {"role": "user", "text": pure_user_text},
                 {"role": "assistant", "text": reply_text},
             ]
             if debug_payload.get("provider"):
@@ -149,6 +193,14 @@ async def wechat_chat(
             },
         )
 
+    # Save messages to database and trigger async profile check
+    try:
+        database.save_message(session_id, contact_name, "user", pure_user_text)
+        database.save_message(session_id, contact_name, "assistant", reply_text)
+        asyncio.create_task(check_and_trigger_profile_update(session_id))
+    except Exception as e:
+        pass # Ignore db errors to not fail the main chat
+
     return {
         "ok": True,
         "messages": messages,
@@ -159,3 +211,24 @@ async def wechat_chat(
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/admin", response_class=HTMLResponse)
+async def get_admin_page():
+    html_path = BASE_DIR / "static" / "admin" / "index.html"
+    return html_path.read_text(encoding="utf-8")
+
+@app.get("/api/admin/sessions")
+async def api_get_sessions(username: str = Depends(verify_admin)):
+    return database.get_all_sessions()
+
+@app.get("/api/admin/sessions/{session_id}")
+async def api_get_session_detail(session_id: str, username: str = Depends(verify_admin)):
+    messages = database.get_session_messages(session_id)
+    profile = database.get_session_profile(session_id)
+    return {"messages": messages, "profile": profile}
+
+@app.post("/api/admin/sessions/{session_id}/profile")
+async def api_extract_profile(session_id: str, username: str = Depends(verify_admin)):
+    profile = await async_extract_profile(session_id)
+    return {"profile": profile}

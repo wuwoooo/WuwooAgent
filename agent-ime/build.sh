@@ -18,7 +18,20 @@ fi
 find "$ROOT/app/build" -name '* 2.*' -type f -delete 2>/dev/null || true
 
 if [[ $# -eq 0 ]]; then
-  exec ./gradlew clean assembleDebug
+  ./gradlew clean assembleDebug
 else
-  exec ./gradlew "$@"
+  ./gradlew "$@"
 fi
+
+echo ""
+echo "==> 同步到 GitHub"
+(
+  cd "$ROOT/.."
+  git add .
+  if ! git diff-index --quiet HEAD --; then
+    git commit -m "Auto-commit from build.sh at $(date '+%Y-%m-%d %H:%M:%S')"
+    git push
+  else
+    echo "没有检测到需要提交的变更"
+  fi
+)

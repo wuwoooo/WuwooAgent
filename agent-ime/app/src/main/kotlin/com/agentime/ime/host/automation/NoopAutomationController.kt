@@ -8,4 +8,5 @@ class NoopAutomationController : AutomationController {
     override fun isWechatForeground(): Boolean = true
     override fun focusInputArea(): Boolean = true
     override fun clickSend(): Boolean = true
+    override fun clickBack(): Boolean = true
 }

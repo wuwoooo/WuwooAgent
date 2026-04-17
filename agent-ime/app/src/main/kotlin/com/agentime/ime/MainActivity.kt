@@ -102,9 +102,9 @@ class MainActivity : ComponentActivity() {
 
         val savedContact = prefs.getString("last_contact_name", "").orEmpty()
         val currentChatContact = WechatAccessibilityService.getCurrentChatContactName().orEmpty()
-        val effectiveContact = SessionIdentity.normalizeContactName(if (savedContact.isNotBlank()) savedContact else currentChatContact)
+        val effectiveContact = SessionIdentity.normalizeContactName(this, if (savedContact.isNotBlank()) savedContact else currentChatContact)
         val effectiveSession = prefs.getString("last_session_id", "").orEmpty()
-            .ifBlank { SessionIdentity.buildSessionId(effectiveContact) }
+            .ifBlank { SessionIdentity.buildSessionId(this, effectiveContact) }
 
         sessionInput.setText(effectiveSession)
         contactInput.setText(effectiveContact)
@@ -123,10 +123,11 @@ class MainActivity : ComponentActivity() {
         findViewById<Button>(R.id.btnDebugRunOnce).setOnClickListener {
             val rawContact = contactInput.text?.toString().orEmpty()
             val contactName = SessionIdentity.normalizeContactName(
+                this,
                 rawContact.ifBlank { WechatAccessibilityService.getCurrentChatContactName() },
             )
             val sessionId = sessionInput.text?.toString().orEmpty().ifBlank {
-                SessionIdentity.buildSessionId(contactName)
+                SessionIdentity.buildSessionId(this, contactName)
             }
             val endpoint = endpointInput.text?.toString().orEmpty().trim()
             prefs.edit()
@@ -144,11 +145,6 @@ class MainActivity : ComponentActivity() {
             } else {
                 startService(intent)
             }
-            Toast.makeText(
-                this,
-                "任务已启动，将分步提示进度（也可看下拉通知）",
-                Toast.LENGTH_SHORT,
-            ).show()
             logger.log("MainActivity", "主界面按钮已触发 runOnce")
             logView.text = "已发起 runOnce: $sessionId / $contactName\n" + logger.readRecent()
             refreshBackendStatus()
@@ -186,18 +182,26 @@ class MainActivity : ComponentActivity() {
                 .apply()
             WechatAccessibilityService.onRuntimeEnabledChanged(true)
 
-            val prepareIntent = Intent(this, HostForegroundService::class.java).apply {
-                action = HostForegroundService.ACTION_PREPARE_PROJECTION
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(prepareIntent)
-            } else {
-                startService(prepareIntent)
+            // 只有当截图管线未就绪时才发送 PREPARE；
+            // 如果已经初始化过（用户就是先授权再点开始），
+            // 重复发送会导致在同一 MediaProjection 上再次调用 createVirtualDisplay 而报错。
+            if (!ProjectionPermissionStore.hasPermission()) {
+                val prepareIntent = Intent(this, HostForegroundService::class.java).apply {
+                    action = HostForegroundService.ACTION_PREPARE_PROJECTION
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(prepareIntent)
+                } else {
+                    startService(prepareIntent)
+                }
             }
 
             launchWechatApp()
+            val runtimeIntent = Intent(this, HostForegroundService::class.java).apply {
+                action = HostForegroundService.ACTION_START_RUNTIME
+            }
+            startService(runtimeIntent)
             logger.log("MainActivity", "已开始运行，正在切到微信前台等待消息；已默认开启前台聊天自动触发和后台通知自动触发")
-            Toast.makeText(this, "已开始运行，请保持微信正常使用", Toast.LENGTH_SHORT).show()
             refreshExecutionModeStatus()
             refreshGuideStatus()
             refreshCapabilityStatus()

@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>云鹿旅行 - 客户后台</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .msg-enter-active, .msg-leave-active {
+            transition: all 0.3s ease;
+        }
+        .msg-enter-from, .msg-leave-to {
+            opacity: 0;
+            transform: translateY(20px);
+        }
+        /* Custom Scrollbar for sleek look */
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 10px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
+    </style>
+</head>
+<body class="bg-slate-50 h-screen overflow-hidden text-slate-800">
+    <div id="app" class="flex h-full relative">
+        
+        <!-- 登录层 -->
+        <div v-if="showLogin" class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-md transition-all duration-500">
+            <div class="bg-white/95 backdrop-blur-xl rounded-[2rem] shadow-2xl p-10 w-full max-w-sm border border-white/40 transform transition-all"
+                 :class="{'scale-100 opacity-100': loginAnimate, 'scale-95 opacity-0': !loginAnimate}">
+                <div class="text-center mb-8">
+                    <div class="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg shadow-indigo-600/30">
+                        <i class="fa-solid fa-plane-departure text-white text-2xl"></i>
+                    </div>
+                    <h2 class="text-2xl font-black text-slate-800 tracking-wide">云鹿客户管家</h2>
+                    <p class="text-sm text-slate-500 mt-2 font-medium">Please sign in to continue</p>
+                </div>
+                
+                <form @submit.prevent="handleLogin" class="space-y-5">
+                    <div>
+                        <div class="relative">
+                            <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                                <i class="fa-solid fa-user text-slate-400"></i>
+                            </div>
+                            <input v-model="loginForm.username" type="text" required
+                                   class="block w-full pl-11 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all text-sm font-medium outline-none text-slate-700 placeholder-slate-400"
+                                   placeholder="Username">
+                        </div>
+                    </div>
+                    <div>
+                        <div class="relative">
+                            <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                                <i class="fa-solid fa-lock text-slate-400"></i>
+                            </div>
+                            <input v-model="loginForm.password" type="password" required
+                                   class="block w-full pl-11 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all text-sm font-medium outline-none text-slate-700 placeholder-slate-400"
+                                   placeholder="Password">
+                        </div>
+                    </div>
+                    <div class="pt-2">
+                        <button type="submit" :disabled="isLoggingIn"
+                                class="w-full py-3 px-4 bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-700 hover:to-indigo-600 text-white rounded-xl font-bold shadow-lg shadow-indigo-500/30 transition-all active:scale-[0.98] flex justify-center items-center">
+                            <i v-if="isLoggingIn" class="fa-solid fa-circle-notch fa-spin mr-2"></i>
+                            {{ isLoggingIn ? 'Verifying...' : 'Sign In' }}
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- 左侧：会话列表 -->
+        <div class="w-80 bg-white border-r border-slate-200 flex flex-col shadow-sm z-10">
+            <div class="p-4 bg-indigo-600 text-white flex items-center justify-between shadow-md">
+                <h1 class="text-xl font-bold tracking-wider"><i class="fa-solid fa-plane-departure mr-2"></i>客户驾驶舱</h1>
+                <button @click="fetchSessions" class="hover:text-indigo-200 transition"><i class="fa-solid fa-rotate-right"></i></button>
+            </div>
+            
+            <div class="flex-1 overflow-y-auto p-2 space-y-2">
+                <div v-if="sessions.length === 0" class="text-center text-slate-400 mt-10">
+                    <i class="fa-regular fa-folder-open text-3xl mb-2"></i>
+                    <p>暂无会话记录</p>
+                </div>
+                
+                <div v-for="session in sessions" :key="session.session_id" 
+                     @click="selectSession(session)"
+                     class="p-3 rounded-xl cursor-pointer transition-all duration-200 border border-transparent hover:bg-indigo-50 hover:border-indigo-100"
+                     :class="{'bg-indigo-50 border-indigo-200 shadow-sm ring-1 ring-indigo-200': currentSession?.session_id === session.session_id}">
+                    <div class="flex justify-between items-center mb-1">
+                        <span class="font-bold text-slate-700 truncate mr-2">
+                            <i class="fa-regular fa-user text-indigo-400 mr-1"></i>
+                            {{ session.contact_name || '未知客户' }}
+                        </span>
+                        <span class="text-xs text-slate-400 whitespace-nowrap">{{ formatTime(session.updated_at) }}</span>
+                    </div>
+                    <div class="text-sm text-slate-500 truncate mt-1">
+                        {{ session.last_msg || '...' }}
+                    </div>
+                    <div class="mt-2 flex items-center justify-between">
+                        <span class="text-xs px-2 py-0.5 bg-slate-100 rounded-full text-slate-500">{{ session.msg_count }} 条记录</span>
+                        <span v-if="session.profile_json" class="text-xs px-2 py-0.5 bg-green-100 text-green-700 rounded-full">
+                            <i class="fa-solid fa-check mr-1"></i>已画像
+                        </span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 中间：聊天记录 -->
+        <div class="flex-1 flex flex-col bg-slate-50/50 backdrop-blur-sm relative">
+            <div v-if="currentSession" class="flex flex-col h-full">
+                <!-- 头部 -->
+                <div class="h-14 border-b border-slate-200 bg-white/80 flex items-center px-6 shadow-sm backdrop-blur-md">
+                    <h2 class="text-lg font-semibold text-slate-700">跟进记录：{{ currentSession.contact_name }}</h2>
+                    <span class="ml-4 text-xs text-slate-400">ID: {{ currentSession.session_id }}</span>
+                </div>
+                
+                <!-- 消息区 -->
+                <div class="flex-1 overflow-y-auto p-6 space-y-4" ref="messageBox">
+                    <TransitionGroup name="msg">
+                        <div v-for="(msg, index) in messages" :key="index" class="flex flex-col max-w-[85%]" 
+                             :class="msg.role === 'user' ? 'self-start' : 'self-end items-end ml-auto'">
+                            <span class="text-[11px] text-slate-400 mb-1 ml-1" :class="msg.role === 'user' ? '' : 'mr-1'">
+                                {{ msg.role === 'user' ? '客户' : '智能助理' }} • {{ formatTime(msg.created_at) }}
+                            </span>
+                            <div class="px-4 py-2.5 rounded-2xl shadow-sm text-sm leading-relaxed"
+                                 :class="msg.role === 'user' ? 'bg-white text-slate-700 rounded-tl-none border border-slate-100' : 'bg-indigo-500 text-white rounded-tr-none'">
+                                {{ msg.content }}
+                            </div>
+                        </div>
+                    </TransitionGroup>
+                </div>
+            </div>
+            
+            <div v-else class="flex-1 flex flex-col items-center justify-center text-slate-400">
+                <div class="w-32 h-32 bg-slate-100 rounded-full flex items-center justify-center mb-4">
+                    <i class="fa-regular fa-comments text-5xl text-slate-300"></i>
+                </div>
+                <p>请在左侧选择一个会话以查看详情</p>
+            </div>
+        </div>
+
+        <!-- 右侧：用户画像 -->
+        <div class="w-80 bg-white border-l border-slate-200 flex flex-col shadow-[-4px_0_15px_-3px_rgb(0,0,0,0.05)] z-10" v-if="currentSession">
+            <div class="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+                <h3 class="font-bold text-slate-700"><i class="fa-solid fa-id-card-clip text-indigo-500 mr-2"></i>客户画像透视</h3>
+                <button @click="extractProfile" :disabled="isExtracting" class="text-xs bg-indigo-100 text-indigo-600 px-3 py-1.5 rounded-full hover:bg-indigo-200 transition font-medium disabled:opacity-50 flex items-center">
+                    <i class="fa-solid fa-wand-magic-sparkles mr-1" :class="{'fa-spin': isExtracting}"></i>
+                    {{ isExtracting ? '提取中...' : '深度提取' }}
+                </button>
+            </div>
+            
+            <div class="p-5 flex-1 overflow-y-auto">
+                <div v-if="profile" class="space-y-5">
+                    
+                    <!-- 营销漏斗阶段 -->
+                    <div class="p-4 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl text-white shadow-md relative overflow-hidden">
+                        <i class="fa-solid fa-sack-dollar absolute -right-2 -bottom-2 text-6xl opacity-10"></i>
+                        <p class="text-indigo-100 text-xs mb-1 uppercase tracking-wider font-semibold">销售阶段</p>
+                        <p class="text-xl font-bold">{{ profile.sales_stage || '待确认' }}</p>
+                    </div>
+
+                    <!-- 属性卡片区 -->
+                    <div class="grid grid-cols-2 gap-3">
+                        <div class="bg-amber-50 rounded-xl p-3 border border-amber-100/50">
+                            <p class="text-[10px] text-amber-600/70 mb-1 flex items-center font-semibold"><i class="fa-solid fa-map-location-dot w-4"></i>目的地</p>
+                            <p class="font-medium text-slate-700 text-sm truncate" :title="profile.destination">{{ profile.destination || '未明确' }}</p>
+                        </div>
+                        <div class="bg-blue-50 rounded-xl p-3 border border-blue-100/50">
+                            <p class="text-[10px] text-blue-600/70 mb-1 flex items-center font-semibold"><i class="fa-solid fa-users w-4"></i>人数</p>
+                            <p class="font-medium text-slate-700 text-sm">{{ profile.people_count || '未知' }}</p>
+                        </div>
+                        <div class="bg-emerald-50 rounded-xl p-3 border border-emerald-100/50">
+                            <p class="text-[10px] text-emerald-600/70 mb-1 flex items-center font-semibold"><i class="fa-regular fa-calendar w-4"></i>时间</p>
+                            <p class="font-medium text-slate-700 text-sm truncate" :title="profile.travel_time">{{ profile.travel_time || '待定' }}</p>
+                        </div>
+                        <div class="bg-rose-50 rounded-xl p-3 border border-rose-100/50">
+                            <p class="text-[10px] text-rose-600/70 mb-1 flex items-center font-semibold"><i class="fa-solid fa-wallet w-4"></i>预算</p>
+                            <p class="font-medium text-slate-700 text-sm truncate" :title="profile.budget">{{ profile.budget || '待确认' }}</p>
+                        </div>
+                    </div>
+
+                    <!-- 客户偏好 -->
+                    <div>
+                        <p class="text-xs font-bold text-slate-500 mb-2 border-b border-slate-100 pb-2 flex items-center">
+                            <i class="fa-solid fa-heart text-rose-400 mr-1.5"></i>核心偏好点
+                        </p>
+                        <div class="flex flex-wrap gap-2" v-if="profile.preferences && getPreferencesList(profile.preferences).length">
+                            <span v-for="tag in getPreferencesList(profile.preferences)" :key="tag" 
+                                  class="px-2.5 py-1 bg-slate-100 text-slate-600 text-xs rounded-lg border border-slate-200">
+                                {{ tag }}
+                            </span>
+                        </div>
+                        <p v-else class="text-sm text-slate-400 italic px-1">尚未提取到明确偏好</p>
+                    </div>
+
+                </div>
+                <!-- 缺省状态 -->
+                <div v-else class="h-full flex flex-col items-center justify-center text-slate-400 text-center px-4 space-y-4 pt-10">
+                    <div class="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center border border-dashed border-slate-300">
+                        <i class="fa-solid fa-robot text-2xl text-slate-300"></i>
+                    </div>
+                    <p class="text-sm">尚未生成客户画像<br>点击右上角深度提取</p>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        const { createApp, ref, onMounted, nextTick } = Vue;
+
+        createApp({
+            setup() {
+                const sessions = ref([]);
+                const currentSession = ref(null);
+                const messages = ref([]);
+                const profile = ref(null);
+                const isExtracting = ref(false);
+                const messageBox = ref(null);
+
+                // Auth States
+                const showLogin = ref(false);
+                const loginAnimate = ref(false);
+                const isLoggingIn = ref(false);
+                const loginForm = ref({ username: '', password: '' });
+                const authToken = ref(localStorage.getItem('admin_token') || '');
+
+                const getAuthHeaders = () => {
+                    return authToken.value ? { 'Authorization': `Basic ${authToken.value}` } : {};
+                };
+
+                const triggerLogin = () => {
+                    showLogin.value = true;
+                    // Trigger animation next frame
+                    requestAnimationFrame(() => {
+                        requestAnimationFrame(() => {
+                            loginAnimate.value = true;
+                        });
+                    });
+                };
+
+                const handleLogin = async () => {
+                    if (!loginForm.value.username || !loginForm.value.password) return;
+                    isLoggingIn.value = true;
+                    try {
+                        const token = btoa(`${loginForm.value.username}:${loginForm.value.password}`);
+                        const res = await fetch('/api/admin/sessions', {
+                            headers: { 'Authorization': `Basic ${token}` }
+                        });
+                        
+                        if (res.ok) {
+                            authToken.value = token;
+                            localStorage.setItem('admin_token', token);
+                            loginAnimate.value = false;
+                            setTimeout(() => { showLogin.value = false; }, 500); 
+                            sessions.value = await res.json();
+                        } else {
+                            alert('用户名或密码错误！');
+                        }
+                    } catch (e) {
+                        alert('登录异常，请重试');
+                    } finally {
+                        isLoggingIn.value = false;
+                    }
+                };
+
+                const formatTime = (timeStr) => {
+                    if(!timeStr) return '';
+                    try {
+                        let d;
+                        if(timeStr.includes('Z') || timeStr.includes('T')) {
+                           d = new Date(timeStr);
+                        } else {
+                           // Try to parse basic SQL timestamp 
+                           // "2023-10-10 12:00:00"
+                           d = new Date(timeStr.replace(/-/g, '/')); 
+                        }
+                        if (isNaN(d.getTime())) {
+                            return timeStr;
+                        }
+                        return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+                    } catch(e) {
+                        return timeStr;
+                    }
+                };
+
+                const fetchSessions = async () => {
+                    if (showLogin.value) return; // Don't fetch if login is shown
+                    try {
+                        const res = await fetch('/api/admin/sessions', { headers: getAuthHeaders() });
+                        if(res.ok) {
+                            sessions.value = await res.json();
+                        } else if (res.status === 401) {
+                            triggerLogin();
+                        }
+                    } catch(e) {
+                        console.error('获取列表失败', e);
+                    }
+                };
+
+                const selectSession = async (session) => {
+                    currentSession.value = session;
+                    // 读取对应的流和画像
+                    try {
+                        const res = await fetch(`/api/admin/sessions/${session.session_id}`, { headers: getAuthHeaders() });
+                        if(res.ok) {
+                            const data = await res.json();
+                            messages.value = data.messages || [];
+                            profile.value = data.profile || null;
+                            scrollToBottom();
+                        } else if (res.status === 401) {
+                            triggerLogin();
+                        }
+                    } catch(e) {
+                        console.error('获取详情失败', e);
+                    }
+                };
+
+                const extractProfile = async () => {
+                    if(!currentSession.value || isExtracting.value) return;
+                    isExtracting.value = true;
+                    try {
+                        const sid = currentSession.value.session_id;
+                        const res = await fetch(`/api/admin/sessions/${sid}/profile`, { method: 'POST', headers: getAuthHeaders() });
+                        if(res.ok) {
+                            const data = await res.json();
+                            profile.value = data.profile;
+                            currentSession.value.profile_json = data.profile;
+                            // Update sessions list to reflect the badge
+                            fetchSessions();
+                        } else if (res.status === 401) {
+                            triggerLogin();
+                        } else {
+                            alert("提取失败：" + await res.text());
+                        }
+                    } catch(e) {
+                        console.error('提取失败', e);
+                        alert("提取失败，网络异常");
+                    } finally {
+                        isExtracting.value = false;
+                    }
+                };
+
+                const scrollToBottom = () => {
+                    nextTick(() => {
+                        if(messageBox.value) {
+                            messageBox.value.scrollTop = messageBox.value.scrollHeight;
+                        }
+                    });
+                };
+
+                const getPreferencesList = (pref) => {
+                    if (Array.isArray(pref)) return pref;
+                    if (typeof pref === 'string') {
+                        try {
+                            const arr = JSON.parse(pref);
+                            if (Array.isArray(arr)) return arr;
+                        }catch(e){}
+                        return pref.split(',').map(s=>s.trim()).filter(Boolean);
+                    }
+                    return [];
+                };
+
+                onMounted(() => {
+                    fetchSessions();
+                    // Optional polling
+                    setInterval(() => {
+                        fetchSessions();
+                        if(currentSession.value) {
+                            selectSession(currentSession.value);
+                        }
+                    }, 10000); // 10s poll to keep updated
+                });
+
+                return {
+                    sessions,
+                    currentSession,
+                    messages,
+                    profile,
+                    isExtracting,
+                    messageBox,
+                    showLogin,
+                    loginAnimate,
+                    isLoggingIn,
+                    loginForm,
+                    handleLogin,
+                    formatTime,
+                    fetchSessions,
+                    selectSession,
+                    extractProfile,
+                    getPreferencesList
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
