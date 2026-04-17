@@ -186,7 +186,6 @@ object MediaProjectionSession {
         val done = CountDownLatch(1)
         val maxBlankRejectBeforeForce = 36
         val maxAcquireAttempts = 170
-        val captureStartNs = System.nanoTime()
         var listenerTriggered = false
         var nullAcquireCount = 0
         var blankRejectCount = 0
@@ -207,33 +206,20 @@ object MediaProjectionSession {
         }
         reader.setOnImageAvailableListener(listener, h)
         Log.i(TAG, "已注册 OnImageAvailableListener")
-        val drainedBeforeStart = drainBufferedImages()
-        Log.i(TAG, "capture 开始前已清空旧帧数量=$drainedBeforeStart")
+        val drainedBeforeStart = 0
+        Log.i(TAG, "capture 开始前保留最近帧（不主动清空），以适配静止页面无新帧场景")
         if (ENABLE_SURFACE_REFRESH_PER_CAPTURE) {
             trace += "截图前已刷新 ImageReader Surface width=$width height=$height"
         } else {
             trace += "沿用既有 ImageReader Surface width=$width height=$height"
         }
         trace += "legacySingleShot=false"
-        trace += "capture 开始前已清空旧帧数量=$drainedBeforeStart"
+        trace += "capture 开始前保留最近帧（不主动清空）"
 
         lateinit var runAcquireLoop: (Int, Int) -> Unit
 
         fun handleImage(attempt: Int, blankRejections: Int, acquired: Image) {
             when {
-                acquired.timestamp < captureStartNs -> {
-                    staleFrameCount++
-                    Log.d(TAG, "捕获到旧帧 timestamp=${acquired.timestamp} < captureStartNs=$captureStartNs，丢弃 count=$staleFrameCount")
-                    if (staleFrameCount <= 3) {
-                        trace += "捕获旧帧并丢弃 count=$staleFrameCount"
-                        }
-                        acquired.close()
-                    if (attempt + 1 >= maxAcquireAttempts) {
-                        done.countDown()
-                    } else {
-                        h.postDelayed({ runAcquireLoop(attempt + 1, blankRejections) }, 55)
-                    }
-                }
                 previousAcceptedTimestampNs != null &&
                     acquired.timestamp - previousAcceptedTimestampNs!! < MIN_FRAME_SPACING_NS -> {
                     duplicateFrameCount++
@@ -383,8 +369,8 @@ object MediaProjectionSession {
         val trace = mutableListOf<String>()
         trace += "legacySingleShot=true"
         trace += "沿用既有 ImageReader Surface width=$width height=$height"
-        val drainedBeforeStart = drainBufferedImages()
-        trace += "capture 开始前已清空旧帧数量=$drainedBeforeStart"
+        val drainedBeforeStart = 0
+        trace += "capture 开始前保留最近帧（不主动清空）"
 
         var chosen: BitmapWithInfo? = null
         var attempts = 0
