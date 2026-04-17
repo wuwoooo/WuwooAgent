@@ -316,9 +316,18 @@ class WechatAccessibilityService : AccessibilityService() {
         }
 
         fun clickBack(): Boolean {
-            val svc = instance ?: return false
-            Log.i(TAG, "执行系统级返回动作 (GLOBAL_ACTION_BACK)")
-            return svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            val svc = instance ?: run {
+                Log.w(TAG, "clickBack 失败：无障碍服务实例为空")
+                return false
+            }
+            Log.i(TAG, "准备执行系统级返回动作 (GLOBAL_ACTION_BACK)")
+            // 连续执行两次返回：第一次可能是收起键盘，第二次才是退出聊天页
+            val ok1 = svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            if (ok1) {
+                Thread.sleep(200)
+                svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            }
+            return ok1
         }
 
         /** 仅当对应 key 从未写入时，用屏幕比例作为默认坐标（像素默认值易在不同分辨率上失效）。 */

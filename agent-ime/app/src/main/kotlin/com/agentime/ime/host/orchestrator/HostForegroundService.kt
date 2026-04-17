@@ -500,7 +500,8 @@ class HostForegroundService : Service() {
                 moveState(HostState.SENT, "发送完成")
                 // 发送完消息后，稍作停留(等待动画)即返回会话列表页
                 Thread.sleep(800)
-                automation.clickBack()
+                val backOk = automation.clickBack()
+                logger.log(TAG, "已触发自动返回动作，执行结果=$backOk")
             }
         } catch (e: Exception) {
             val msg = e.message.orEmpty()
