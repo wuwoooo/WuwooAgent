@@ -156,7 +156,8 @@ object ConversationListUnreadDetector {
                     trimmed == "微信" || trimmed.startsWith("微信(")
                 }
             val bottomTabHitCount = listOf("微信", "通讯录", "发现", "我").count { combinedText.contains(it) }
-            val inputBarSignals = listOf("按住说话", "切换到键盘", "发送", "表情", "更多功能", "更多")
+            // 列表页会出现“需要发送”等预览文案，不能把“发送”单字当输入栏强信号。
+            val inputBarSignals = listOf("按住说话", "切换到键盘", "表情", "更多功能", "更多")
             val inputBarHitCount = inputBarSignals.count { combinedText.contains(it) }
 
             val topHeaderLight = sampleLightRatio(
@@ -194,14 +195,23 @@ object ConversationListUnreadDetector {
                 (width * 0.20f).toInt(),
                 (height * 0.42f).toInt(),
             )
-            val looksLikeListPage =
-                (titleLooksLikeList || bottomTabHitCount >= 3) &&
-                    inputBarHitCount == 0 &&
-                    topHeaderLight >= 0.78 &&
+            // 列表页判定以视觉结构为主，OCR 文本只做弱约束。
+            val visualLooksLikeList =
+                topHeaderLight >= 0.78 &&
                     bottomBarLight >= 0.70 &&
                     bottomBarNonWhite >= 0.02 &&
-                    bottomCenterNonWhite >= 0.02 &&
+                    // 列表页底部中心通常接近纯白；聊天页输入栏通常更“实”。
+                    bottomCenterNonWhite <= 0.20 &&
                     leftAvatarNonWhite >= 0.10
+            val textLooksLikeList =
+                titleLooksLikeList || bottomTabHitCount >= 2
+            val notChatInputBar =
+                inputBarHitCount <= 1
+
+            val looksLikeListPage =
+                visualLooksLikeList &&
+                    textLooksLikeList &&
+                    notChatInputBar
 
             val summary =
                 "titleLooksLikeList=$titleLooksLikeList " +

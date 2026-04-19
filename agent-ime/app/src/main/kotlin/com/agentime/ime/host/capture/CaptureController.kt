@@ -10,6 +10,7 @@ data class CaptureResult(
     val headerCropPath: String? = null,
     val titleCropPath: String? = null,
     val chatCropPath: String? = null,
+    val sinceLastOutboundCropPath: String? = null,
     val leftMessageCropPath: String? = null,
     val recentLeftMessageCropPath: String? = null,
     val latestInboundBubbleCropPath: String? = null,

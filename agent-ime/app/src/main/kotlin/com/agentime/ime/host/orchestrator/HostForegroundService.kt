@@ -114,7 +114,8 @@ class HostForegroundService : Service() {
     }
 
     private fun scanConversationListAndRun(scanSource: String) {
-        if (running.get() || isBusyOrCoolingDown()) {
+        val bypassCoolingDown = scanSource.contains("urgent_chat_followup")
+        if (running.get() || (!bypassCoolingDown && isBusyOrCoolingDown())) {
             logger.log(TAG, "会话列表截图分析跳过：当前正忙或冷却中")
             return
         }
@@ -498,10 +499,27 @@ class HostForegroundService : Service() {
                     .putString("last_reply_text", reply.replyText)
                     .apply()
                 moveState(HostState.SENT, "发送完成")
-                // 发送完消息后，稍作停留(等待动画)即返回会话列表页
-                Thread.sleep(800)
-                val backOk = automation.clickBack()
-                logger.log(TAG, "已触发自动返回动作，执行结果=$backOk")
+                // 发送后先在当前会话内快速探测一次：若对方又发了新消息，先不返回列表页，
+                // 直接触发一次会话内补扫，避免“返回后无红点导致漏处理”。
+                val hasFreshInbound = detectFreshInboundAfterSend(
+                    sessionId = sessionId,
+                    contactName = contactName,
+                    capture = capture,
+                    ocr = ocr,
+                    prefs = prefs,
+                )
+                if (hasFreshInbound) {
+                    logger.log(TAG, "发送后检测到会话内新增客户消息，取消自动返回，触发紧急会话补扫")
+                    scheduleUrgentChatFollowupScan()
+                } else {
+                    // 发送完消息后，稍作停留(等待动画)即返回会话列表页
+                    Thread.sleep(800)
+                    val backOk = automation.clickBack()
+                    logger.log(TAG, "已触发自动返回动作，执行结果=$backOk")
+                    if (backOk) {
+                        schedulePostSendFollowupScan("post_send_back")
+                    }
+                }
             }
         } catch (e: Exception) {
             val msg = e.message.orEmpty()
@@ -602,6 +620,7 @@ class HostForegroundService : Service() {
         pageOcrText: String? = null,
     ): InboundCandidate {
         val candidates = buildList {
+            cap.sinceLastOutboundCropPath?.let { add("我方最后一条之后会话区" to it) }
             cap.latestInboundBubbleCropPath?.let { add("最近白气泡裁剪图" to it) }
         }
         val tierBuckets = linkedMapOf<Int, InboundCandidate>()
@@ -668,7 +687,8 @@ class HostForegroundService : Service() {
 
     private fun inboundSourceTier(label: String): Int {
         return when {
-            label.contains("最近白气泡") -> 0
+            label.contains("我方最后一条之后会话区") -> 0
+            label.contains("最近白气泡") -> 1
             else -> 5
         }
     }
@@ -689,6 +709,7 @@ class HostForegroundService : Service() {
             cap.headerCropPath,
             cap.titleCropPath,
             cap.chatCropPath,
+            cap.sinceLastOutboundCropPath,
             cap.leftMessageCropPath,
             cap.recentLeftMessageCropPath,
             cap.latestInboundBubbleCropPath,
@@ -713,6 +734,70 @@ class HostForegroundService : Service() {
             }
             target.absolutePath
         }.getOrNull()
+    }
+
+    private fun schedulePostSendFollowupScan(reason: String) {
+        val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("runtime_enabled", false)) return
+        if (prefs.getString("execution_mode", "auto").orEmpty() != "auto") return
+
+        val now = System.currentTimeMillis()
+        if (now - lastPostSendFollowupScheduledAt < POST_SEND_FOLLOWUP_DEBOUNCE_MS) {
+            logger.log(TAG, "发送后补扫已在防抖窗口内，跳过重复调度")
+            return
+        }
+        lastPostSendFollowupScheduledAt = now
+
+        val delaySec = POST_SEND_FOLLOWUP_DELAY_MS / 1000L
+        logger.log(TAG, "已安排发送后补扫，将在 ${delaySec}s 后执行（source=${reason}_followup）")
+        mainHandler.postDelayed({
+            io.execute { scanConversationListAndRun(scanSource = "${reason}_followup") }
+        }, POST_SEND_FOLLOWUP_DELAY_MS)
+    }
+
+    private fun scheduleUrgentChatFollowupScan() {
+        val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("runtime_enabled", false)) return
+        if (prefs.getString("execution_mode", "auto").orEmpty() != "auto") return
+        logger.log(TAG, "已安排紧急会话补扫，将在 ${URGENT_CHAT_FOLLOWUP_DELAY_MS / 1000.0}s 后执行")
+        mainHandler.postDelayed({
+            io.execute { scanConversationListAndRun(scanSource = "urgent_chat_followup") }
+        }, URGENT_CHAT_FOLLOWUP_DELAY_MS)
+    }
+
+    private fun detectFreshInboundAfterSend(
+        sessionId: String,
+        contactName: String,
+        capture: com.agentime.ime.host.capture.CaptureController,
+        ocr: FallbackOcrProvider,
+        prefs: android.content.SharedPreferences,
+    ): Boolean {
+        return runCatching {
+            startForegroundCompat("正在检查会话内是否有连续新消息", includeProjectionType = true)
+            val probeCap = capture.captureScreen("${sessionId}_postsend_probe")
+            val pageOcrText = recognizePageWithFallbacks(ocr, probeCap)
+            val inboundCandidate = extractInboundCandidate(
+                ocr = ocr,
+                cap = probeCap,
+                contactName = contactName,
+                lastReplyText = prefs.getString("last_reply_text", "").orEmpty(),
+                pageOcrText = pageOcrText,
+            )
+            cleanupIntermediateOcrCrops(probeCap, inboundCandidate.path)
+            val text = inboundCandidate.text
+            val sig = inboundCandidate.signature
+            val lastSig = prefs.getString("last_inbound_signature", "").orEmpty()
+            if (text.isBlank() || sig.isBlank()) return@runCatching false
+            if (sig == lastSig) return@runCatching false
+            if (ConversationTextExtractor.looksLikeAgentReplyCandidate(text, prefs.getString("last_reply_text", "").orEmpty())) {
+                return@runCatching false
+            }
+            logger.log(TAG, "发送后会话探测到新增客户消息候选: ${text.take(80)}")
+            true
+        }.getOrElse {
+            logger.log(TAG, "发送后会话内新消息探测失败: ${it.message}")
+            false
+        }
     }
 
     private fun moveState(state: HostState, detail: String) {
@@ -792,6 +877,7 @@ class HostForegroundService : Service() {
         private const val NOTIFICATION_ID = 1001
         private val running = AtomicBoolean(false)
         @Volatile private var lastFinishedAt: Long = 0L
+        @Volatile private var lastPostSendFollowupScheduledAt: Long = 0L
 
         const val ACTION_RUN_ONCE = "com.agentime.ime.action.RUN_ONCE"
         const val ACTION_PREPARE_PROJECTION = "com.agentime.ime.action.PREPARE_PROJECTION"
@@ -801,6 +887,9 @@ class HostForegroundService : Service() {
         const val EXTRA_SESSION_ID = "session_id"
         const val EXTRA_CONTACT_NAME = "contact_name"
         private const val PIPELINE_RETRY_DELAY_MS = 3_000L
+        private const val POST_SEND_FOLLOWUP_DELAY_MS = 9_000L
+        private const val POST_SEND_FOLLOWUP_DEBOUNCE_MS = 6_000L
+        private const val URGENT_CHAT_FOLLOWUP_DELAY_MS = 1_400L
 
         fun isBusyOrCoolingDown(): Boolean {
             val coolingDown = System.currentTimeMillis() - lastFinishedAt < 8_000L

@@ -67,6 +67,8 @@ object CaptureImageProcessor {
         val titleCropPath = saveBitmapIfPresent(context, titleCrop, outDir, fileName, "title")
         val chatCrop = createChatCrop(bitmap)
         val chatCropPath = saveBitmapIfPresent(context, chatCrop, outDir, fileName, "chatcrop")
+        val sinceLastOutboundCrop = chatCrop?.let(::createInboundSinceLastOutboundCrop)
+        val sinceLastOutboundCropPath = saveBitmapIfPresent(context, sinceLastOutboundCrop, outDir, fileName, "since_last_outbound")
         val leftMessageCrop = chatCrop?.let(::createLeftMessageCrop)
         val leftMessageCropPath = saveBitmapIfPresent(context, leftMessageCrop, outDir, fileName, "leftmsg")
         val recentLeftMessageCrop = leftMessageCrop?.let(::createRecentLeftMessageCrop)
@@ -76,6 +78,7 @@ object CaptureImageProcessor {
         headerCrop?.recycle()
         titleCrop?.recycle()
         chatCrop?.recycle()
+        sinceLastOutboundCrop?.recycle()
         leftMessageCrop?.recycle()
         recentLeftMessageCrop?.recycle()
         latestInboundBubbleCrop?.recycle()
@@ -90,6 +93,7 @@ object CaptureImageProcessor {
             headerCropPath = headerCropPath,
             titleCropPath = titleCropPath,
             chatCropPath = chatCropPath,
+            sinceLastOutboundCropPath = sinceLastOutboundCropPath,
             leftMessageCropPath = leftMessageCropPath,
             recentLeftMessageCropPath = recentLeftMessageCropPath,
             latestInboundBubbleCropPath = latestInboundBubbleCropPath,
@@ -191,6 +195,86 @@ object CaptureImageProcessor {
         val cropWidth = (right - left).coerceAtLeast(10)
         val cropHeight = (bottom - top).coerceAtLeast(10)
         return Bitmap.createBitmap(source, left, top, cropWidth, cropHeight)
+    }
+
+    private fun createInboundSinceLastOutboundCrop(source: Bitmap): Bitmap? {
+        val width = source.width
+        val height = source.height
+        if (width < 80 || height < 120) return null
+
+        val searchTop = (height * 0.10f).toInt().coerceAtLeast(0)
+        val searchBottom = (height * 0.98f).toInt().coerceAtMost(height)
+        if (searchBottom - searchTop < 40) return null
+
+        fun isNearWhite(pixel: Int): Boolean {
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            return r >= 238 && g >= 238 && b >= 238
+        }
+
+        fun rowDensity(y: Int, xStart: Int, xEnd: Int): Double {
+            var total = 0
+            var nonWhite = 0
+            var x = xStart
+            while (x < xEnd) {
+                if (!isNearWhite(source.getPixel(x, y))) nonWhite++
+                total++
+                x += 3
+            }
+            return if (total == 0) 0.0 else nonWhite.toDouble() / total
+        }
+
+        val rightStart = (width * 0.82f).toInt().coerceAtLeast(0)
+        val rightEnd = width
+        val rightBands = mutableListOf<AvatarBand>()
+        var top = -1
+        var bottom = -1
+        var peak = 0.0
+        var gap = 0
+        for (y in searchTop until searchBottom) {
+            val density = rowDensity(y, rightStart, rightEnd)
+            if (density >= 0.10) {
+                if (top < 0) {
+                    top = y
+                    bottom = y
+                    peak = density
+                } else {
+                    bottom = y
+                    if (density > peak) peak = density
+                }
+                gap = 0
+            } else if (top >= 0) {
+                gap++
+                if (gap >= 8) {
+                    val h = bottom - top + 1
+                    if (h in 36..190) {
+                        rightBands.add(AvatarBand(Side.RIGHT, top, bottom, peak))
+                    }
+                    top = -1
+                    bottom = -1
+                    peak = 0.0
+                    gap = 0
+                }
+            }
+        }
+        if (top >= 0) {
+            val h = bottom - top + 1
+            if (h in 36..190) {
+                rightBands.add(AvatarBand(Side.RIGHT, top, bottom, peak))
+            }
+        }
+
+        val latestRightAvatar = rightBands.maxByOrNull { it.bottom } ?: return null
+        val cropTop = (latestRightAvatar.bottom + maxOf((height * 0.012f).toInt(), 10)).coerceAtMost(searchBottom - 20)
+        val cropBottom = searchBottom
+        val cropHeight = cropBottom - cropTop
+        if (cropHeight < 40) return null
+
+        val cropLeft = 0
+        val cropRight = (width * 0.96f).toInt().coerceAtMost(width)
+        val cropWidth = (cropRight - cropLeft).coerceAtLeast(10)
+        return Bitmap.createBitmap(source, cropLeft, cropTop, cropWidth, cropHeight)
     }
 
     private fun createLatestInboundBubbleCrop(source: Bitmap): Bitmap? {
