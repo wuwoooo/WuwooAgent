@@ -69,6 +69,8 @@ object CaptureImageProcessor {
         val chatCropPath = saveBitmapIfPresent(context, chatCrop, outDir, fileName, "chatcrop")
         val sinceLastOutboundCrop = chatCrop?.let(::createInboundSinceLastOutboundCrop)
         val sinceLastOutboundCropPath = saveBitmapIfPresent(context, sinceLastOutboundCrop, outDir, fileName, "since_last_outbound")
+        val recentInboundClusterCrop = chatCrop?.let(::createRecentInboundClusterCrop)
+        val recentInboundClusterCropPath = saveBitmapIfPresent(context, recentInboundClusterCrop, outDir, fileName, "recent_inbound_cluster")
         val leftMessageCrop = chatCrop?.let(::createLeftMessageCrop)
         val leftMessageCropPath = saveBitmapIfPresent(context, leftMessageCrop, outDir, fileName, "leftmsg")
         val recentLeftMessageCrop = leftMessageCrop?.let(::createRecentLeftMessageCrop)
@@ -79,6 +81,7 @@ object CaptureImageProcessor {
         titleCrop?.recycle()
         chatCrop?.recycle()
         sinceLastOutboundCrop?.recycle()
+        recentInboundClusterCrop?.recycle()
         leftMessageCrop?.recycle()
         recentLeftMessageCrop?.recycle()
         latestInboundBubbleCrop?.recycle()
@@ -94,6 +97,7 @@ object CaptureImageProcessor {
             titleCropPath = titleCropPath,
             chatCropPath = chatCropPath,
             sinceLastOutboundCropPath = sinceLastOutboundCropPath,
+            recentInboundClusterCropPath = recentInboundClusterCropPath,
             leftMessageCropPath = leftMessageCropPath,
             recentLeftMessageCropPath = recentLeftMessageCropPath,
             latestInboundBubbleCropPath = latestInboundBubbleCropPath,
@@ -202,8 +206,9 @@ object CaptureImageProcessor {
         val height = source.height
         if (width < 80 || height < 120) return null
 
-        val searchTop = (height * 0.10f).toInt().coerceAtLeast(0)
-        val searchBottom = (height * 0.98f).toInt().coerceAtMost(height)
+        val searchTop = (height * 0.06f).toInt().coerceAtLeast(0)
+        // 避开最底部输入栏/按钮区域，减少把底部控件误识别为右侧头像的概率
+        val searchBottom = (height * 0.90f).toInt().coerceAtMost(height)
         if (searchBottom - searchTop < 40) return null
 
         fun isNearWhite(pixel: Int): Boolean {
@@ -225,8 +230,8 @@ object CaptureImageProcessor {
             return if (total == 0) 0.0 else nonWhite.toDouble() / total
         }
 
-        val rightStart = (width * 0.82f).toInt().coerceAtLeast(0)
-        val rightEnd = width
+        val rightStart = (width * 0.84f).toInt().coerceAtLeast(0)
+        val rightEnd = (width * 0.985f).toInt().coerceAtMost(width)
         val rightBands = mutableListOf<AvatarBand>()
         var top = -1
         var bottom = -1
@@ -234,7 +239,7 @@ object CaptureImageProcessor {
         var gap = 0
         for (y in searchTop until searchBottom) {
             val density = rowDensity(y, rightStart, rightEnd)
-            if (density >= 0.10) {
+            if (density >= 0.16) {
                 if (top < 0) {
                     top = y
                     bottom = y
@@ -248,7 +253,7 @@ object CaptureImageProcessor {
                 gap++
                 if (gap >= 8) {
                     val h = bottom - top + 1
-                    if (h in 36..190) {
+                    if (h in 34..160 && peak >= 0.22) {
                         rightBands.add(AvatarBand(Side.RIGHT, top, bottom, peak))
                     }
                     top = -1
@@ -260,21 +265,196 @@ object CaptureImageProcessor {
         }
         if (top >= 0) {
             val h = bottom - top + 1
-            if (h in 36..190) {
+            if (h in 34..160 && peak >= 0.22) {
                 rightBands.add(AvatarBand(Side.RIGHT, top, bottom, peak))
             }
         }
 
-        val latestRightAvatar = rightBands.maxByOrNull { it.bottom } ?: return null
-        val cropTop = (latestRightAvatar.bottom + maxOf((height * 0.012f).toInt(), 10)).coerceAtMost(searchBottom - 20)
-        val cropBottom = searchBottom
+        fun isLikelyGreenBubble(pixel: Int): Boolean {
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            return g >= 165 && r in 95..215 && b in 85..190 && (g - r) >= 18 && (g - b) >= 10
+        }
+
+        fun findLowestRightGreenBubbleBottom(): Int? {
+            val xStart = (width * 0.44f).toInt().coerceAtLeast(0)
+            val xEnd = (width * 0.90f).toInt().coerceAtMost(width)
+            var inBand = false
+            var bandTop = -1
+            var bandBottom = -1
+            var bestBottom = -1
+            var gap = 0
+            var bestPeakRatio = 0.0
+            var peakRatio = 0.0
+            for (y in searchTop until searchBottom) {
+                var green = 0
+                var total = 0
+                var x = xStart
+                while (x < xEnd) {
+                    if (isLikelyGreenBubble(source.getPixel(x, y))) green++
+                    total++
+                    x += 3
+                }
+                val ratio = if (total == 0) 0.0 else green.toDouble() / total
+                val rowIsGreen = ratio >= 0.08
+                if (rowIsGreen) {
+                    if (!inBand) {
+                        inBand = true
+                        bandTop = y
+                        bandBottom = y
+                        peakRatio = ratio
+                    } else {
+                        bandBottom = y
+                        if (ratio > peakRatio) peakRatio = ratio
+                    }
+                    gap = 0
+                } else if (inBand) {
+                    gap++
+                    if (gap >= 8) {
+                        if (bandBottom - bandTop >= 22 && peakRatio >= 0.10) {
+                            bestBottom = maxOf(bestBottom, bandBottom)
+                            bestPeakRatio = maxOf(bestPeakRatio, peakRatio)
+                        }
+                        inBand = false
+                        bandTop = -1
+                        bandBottom = -1
+                        peakRatio = 0.0
+                        gap = 0
+                    }
+                }
+            }
+            if (inBand && bandBottom - bandTop >= 22 && peakRatio >= 0.10) {
+                bestBottom = maxOf(bestBottom, bandBottom)
+                bestPeakRatio = maxOf(bestPeakRatio, peakRatio)
+            }
+            return if (bestBottom > 0 && bestPeakRatio >= 0.10) bestBottom else null
+        }
+
+        val latestRightAvatarBottom = rightBands.maxByOrNull { it.bottom }?.bottom
+        val latestRightGreenBottom = findLowestRightGreenBubbleBottom()
+        // 绿色气泡锚定优先，避免头像锚定被底部控件误触发
+        val anchorBottom = when {
+            latestRightGreenBottom != null -> latestRightGreenBottom
+            latestRightAvatarBottom != null -> latestRightAvatarBottom
+            else -> -1
+        }
+        if (anchorBottom < 0) return null
+        val cropTop = (anchorBottom + maxOf((height * 0.010f).toInt(), 8)).coerceAtMost(searchBottom - 24)
+        val cropBottom = (height * 0.985f).toInt().coerceAtMost(height)
         val cropHeight = cropBottom - cropTop
         if (cropHeight < 40) return null
 
         val cropLeft = 0
-        val cropRight = (width * 0.96f).toInt().coerceAtMost(width)
+        // 取整条消息横向区域（头像+气泡+尾部）
+        val cropRight = width
         val cropWidth = (cropRight - cropLeft).coerceAtLeast(10)
         return Bitmap.createBitmap(source, cropLeft, cropTop, cropWidth, cropHeight)
+    }
+
+    private fun createRecentInboundClusterCrop(source: Bitmap): Bitmap? {
+        val width = source.width
+        val height = source.height
+        if (width < 80 || height < 120) return null
+
+        val searchTop = (height * 0.06f).toInt().coerceAtLeast(0)
+        val searchBottom = (height * 0.90f).toInt().coerceAtMost(height)
+        if (searchBottom - searchTop < 60) return null
+
+        fun isNearWhite(pixel: Int): Boolean {
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            return r >= 238 && g >= 238 && b >= 238
+        }
+
+        fun nonWhiteRatio(y: Int, xStart: Int, xEnd: Int, step: Int = 3): Double {
+            var total = 0
+            var nonWhite = 0
+            var x = xStart.coerceAtLeast(0)
+            val end = xEnd.coerceAtMost(width)
+            while (x < end) {
+                if (!isNearWhite(source.getPixel(x, y))) nonWhite++
+                total++
+                x += step
+            }
+            return if (total == 0) 0.0 else nonWhite.toDouble() / total
+        }
+
+        fun isLikelyGreen(pixel: Int): Boolean {
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            return g >= 165 && r in 95..215 && b in 85..190 && (g - r) >= 18 && (g - b) >= 10
+        }
+
+        fun greenRatio(y: Int, xStart: Int, xEnd: Int, step: Int = 3): Double {
+            var total = 0
+            var green = 0
+            var x = xStart.coerceAtLeast(0)
+            val end = xEnd.coerceAtMost(width)
+            while (x < end) {
+                if (isLikelyGreen(source.getPixel(x, y))) green++
+                total++
+                x += step
+            }
+            return if (total == 0) 0.0 else green.toDouble() / total
+        }
+
+        var clusterBottom = -1
+        var clusterTop = -1
+        var inboundRows = 0
+        var gapRows = 0
+        var outboundRows = 0
+
+        for (y in (searchBottom - 1) downTo searchTop) {
+            val leftAvatar = nonWhiteRatio(y, (width * 0.00f).toInt(), (width * 0.16f).toInt())
+            val leftBody = nonWhiteRatio(y, (width * 0.12f).toInt(), (width * 0.82f).toInt())
+            val rightGreen = greenRatio(y, (width * 0.46f).toInt(), (width * 0.94f).toInt())
+
+            val inboundRow = (leftAvatar >= 0.10) || (leftBody >= 0.08 && rightGreen <= 0.04)
+            val outboundRow = rightGreen >= 0.08
+
+            if (clusterBottom < 0) {
+                if (inboundRow) {
+                    clusterBottom = y
+                    clusterTop = y
+                    inboundRows++
+                    gapRows = 0
+                    outboundRows = 0
+                }
+                continue
+            }
+
+            if (inboundRow) {
+                clusterTop = y
+                inboundRows++
+                gapRows = 0
+                outboundRows = 0
+            } else {
+                if (outboundRow) outboundRows++ else outboundRows = 0
+                gapRows++
+                if (outboundRows >= 5 || gapRows >= 24) break
+            }
+        }
+
+        if (clusterBottom < 0 || inboundRows < 6) return null
+
+        val topPadding = maxOf((height * 0.010f).toInt(), 8)
+        val bottomPadding = maxOf((height * 0.014f).toInt(), 10)
+        val cropTop = (clusterTop - topPadding).coerceAtLeast(searchTop)
+        val cropBottom = (clusterBottom + bottomPadding).coerceAtMost((height * 0.985f).toInt().coerceAtMost(height))
+        if (cropBottom - cropTop < 40) return null
+
+        val cropLeft = 0
+        val cropRight = width
+        return Bitmap.createBitmap(
+            source,
+            cropLeft,
+            cropTop,
+            (cropRight - cropLeft).coerceAtLeast(10),
+            (cropBottom - cropTop).coerceAtLeast(10),
+        )
     }
 
     private fun createLatestInboundBubbleCrop(source: Bitmap): Bitmap? {

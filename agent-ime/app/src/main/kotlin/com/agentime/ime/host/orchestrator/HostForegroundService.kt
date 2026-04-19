@@ -621,7 +621,7 @@ class HostForegroundService : Service() {
     ): InboundCandidate {
         val candidates = buildList {
             cap.sinceLastOutboundCropPath?.let { add("我方最后一条之后会话区" to it) }
-            cap.latestInboundBubbleCropPath?.let { add("最近白气泡裁剪图" to it) }
+            cap.recentInboundClusterCropPath?.let { add("最近连续入站消息块" to it) }
         }
         val tierBuckets = linkedMapOf<Int, InboundCandidate>()
 
@@ -688,7 +688,7 @@ class HostForegroundService : Service() {
     private fun inboundSourceTier(label: String): Int {
         return when {
             label.contains("我方最后一条之后会话区") -> 0
-            label.contains("最近白气泡") -> 1
+            label.contains("最近连续入站消息块") -> 1
             else -> 5
         }
     }
@@ -710,6 +710,7 @@ class HostForegroundService : Service() {
             cap.titleCropPath,
             cap.chatCropPath,
             cap.sinceLastOutboundCropPath,
+            cap.recentInboundClusterCropPath,
             cap.leftMessageCropPath,
             cap.recentLeftMessageCropPath,
             cap.latestInboundBubbleCropPath,
@@ -775,17 +776,29 @@ class HostForegroundService : Service() {
         return runCatching {
             startForegroundCompat("正在检查会话内是否有连续新消息", includeProjectionType = true)
             val probeCap = capture.captureScreen("${sessionId}_postsend_probe")
-            val pageOcrText = recognizePageWithFallbacks(ocr, probeCap)
-            val inboundCandidate = extractInboundCandidate(
-                ocr = ocr,
-                cap = probeCap,
+            val sinceLastOutboundPath = probeCap.sinceLastOutboundCropPath
+            if (sinceLastOutboundPath.isNullOrBlank()) {
+                cleanupIntermediateOcrCrops(probeCap, null)
+                return@runCatching false
+            }
+            val scopedOcrText = ocr.recognize(sinceLastOutboundPath).trim()
+            cleanupIntermediateOcrCrops(probeCap, sinceLastOutboundPath)
+            if (scopedOcrText.isBlank()) return@runCatching false
+            val lastReplySig = ConversationTextExtractor.signatureOf(
+                prefs.getString("last_reply_text", "").orEmpty(),
+            )
+            val scopedSig = ConversationTextExtractor.signatureOf(scopedOcrText)
+            // 发送后探测必须足够保守：若仍大量含有我方刚发内容，则判为未出现新的客户入站。
+            if (lastReplySig.isNotBlank() && scopedSig.contains(lastReplySig.take(8))) {
+                return@runCatching false
+            }
+            val extraction = ConversationTextExtractor.extractLatestInboundMessage(
+                ocrText = scopedOcrText,
                 contactName = contactName,
                 lastReplyText = prefs.getString("last_reply_text", "").orEmpty(),
-                pageOcrText = pageOcrText,
             )
-            cleanupIntermediateOcrCrops(probeCap, inboundCandidate.path)
-            val text = inboundCandidate.text
-            val sig = inboundCandidate.signature
+            val text = extraction.text
+            val sig = extraction.signature
             val lastSig = prefs.getString("last_inbound_signature", "").orEmpty()
             if (text.isBlank() || sig.isBlank()) return@runCatching false
             if (sig == lastSig) return@runCatching false
