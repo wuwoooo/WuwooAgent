@@ -101,8 +101,8 @@
                             {{ session.contact_name || '未知客户' }}
                         </span>
                         <div class="flex items-center space-x-2">
-                            <span v-if="session.status === 'manual'" class="animate-pulse bg-rose-100 text-rose-600 text-[10px] px-1.5 py-0.5 rounded shadow-sm border border-rose-200">
-                                🚨 请求排版
+                            <span v-if="session.status === 'manual'" class="animate-pulse bg-rose-500 text-white text-[10px] px-2 py-0.5 rounded-full shadow-md font-bold whitespace-nowrap shrink-0">
+                                🚨 请求接管
                             </span>
                             <span class="text-xs text-slate-400 whitespace-nowrap">{{ formatTime(session.updated_at) }}</span>
                             <button @click.stop="deleteSession(session.session_id)" 
@@ -259,6 +259,42 @@
                 const loginForm = ref({ username: '', password: '' });
                 const authToken = ref(localStorage.getItem('admin_token') || '');
 
+                // Audio Context for Alerts
+                let audioCtx = null;
+                const alertedSessions = new Set();
+                
+                const initAudio = () => {
+                    if (!audioCtx) {
+                        const AudioContext = window.AudioContext || window.webkitAudioContext;
+                        if (AudioContext) {
+                            audioCtx = new AudioContext();
+                        }
+                    }
+                    if (audioCtx && audioCtx.state === 'suspended') {
+                        audioCtx.resume();
+                    }
+                };
+
+                const playAlertSound = () => {
+                    if (!audioCtx) return;
+                    const oscillator = audioCtx.createOscillator();
+                    const gainNode = audioCtx.createGain();
+                    
+                    oscillator.type = 'sine';
+                    oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // A5
+                    oscillator.frequency.exponentialRampToValueAtTime(440, audioCtx.currentTime + 0.3);
+                    
+                    gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+                    gainNode.gain.linearRampToValueAtTime(0.5, audioCtx.currentTime + 0.05);
+                    gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.5);
+                    
+                    oscillator.connect(gainNode);
+                    gainNode.connect(audioCtx.destination);
+                    
+                    oscillator.start();
+                    oscillator.stop(audioCtx.currentTime + 0.5);
+                };
+
                 const getAuthHeaders = () => {
                     return authToken.value ? { 'Authorization': `Basic ${authToken.value}` } : {};
                 };
@@ -287,7 +323,8 @@
                             localStorage.setItem('admin_token', token);
                             loginAnimate.value = false;
                             setTimeout(() => { showLogin.value = false; }, 500); 
-                            sessions.value = await res.json();
+                            initAudio(); // Initialize audio on login interaction
+                            fetchSessions();
                         } else {
                             alert('用户名或密码错误！');
                         }
@@ -326,7 +363,24 @@
                     try {
                         const res = await fetch('/api/admin/sessions', { headers: getAuthHeaders() });
                         if(res.ok) {
-                            sessions.value = await res.json();
+                            const newSessions = await res.json();
+                            
+                            // Check for new manual sessions to trigger alert
+                            let shouldAlert = false;
+                            newSessions.forEach(s => {
+                                if (s.status === 'manual' && !alertedSessions.has(s.session_id)) {
+                                    shouldAlert = true;
+                                    alertedSessions.add(s.session_id);
+                                } else if (s.status !== 'manual') {
+                                    alertedSessions.delete(s.session_id);
+                                }
+                            });
+                            
+                            if (shouldAlert) {
+                                playAlertSound();
+                            }
+                            
+                            sessions.value = newSessions;
                         } else if (res.status === 401) {
                             triggerLogin();
                         }
@@ -456,6 +510,7 @@
                         });
                         if (res.ok) {
                             currentSession.value.status = 'auto';
+                            alertedSessions.delete(sid); // Reset alert state
                             fetchSessions();
                         } else if (res.status === 401) {
                             triggerLogin();
@@ -468,6 +523,9 @@
                 };
 
                 onMounted(() => {
+                    // Make sure audio is initialized on first user interaction anywhere on the document
+                    document.addEventListener('click', initAudio, { once: true });
+                    
                     fetchSessions();
                     // Optional polling
                     setInterval(() => {
