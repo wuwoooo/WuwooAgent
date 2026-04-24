@@ -101,6 +101,9 @@
                             {{ session.contact_name || '未知客户' }}
                         </span>
                         <div class="flex items-center space-x-2">
+                            <span v-if="session.status === 'manual'" class="animate-pulse bg-rose-100 text-rose-600 text-[10px] px-1.5 py-0.5 rounded shadow-sm border border-rose-200">
+                                🚨 请求排版
+                            </span>
                             <span class="text-xs text-slate-400 whitespace-nowrap">{{ formatTime(session.updated_at) }}</span>
                             <button @click.stop="deleteSession(session.session_id)" 
                                     class="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-rose-500 transition-all p-1"
@@ -126,9 +129,16 @@
         <div class="flex-1 flex flex-col bg-slate-50/50 backdrop-blur-sm relative">
             <div v-if="currentSession" class="flex flex-col h-full">
                 <!-- 头部 -->
-                <div class="h-14 border-b border-slate-200 bg-white/80 flex items-center px-6 shadow-sm backdrop-blur-md">
-                    <h2 class="text-lg font-semibold text-slate-700">跟进记录：{{ currentSession.contact_name }}</h2>
-                    <span class="ml-4 text-xs text-slate-400">ID: {{ currentSession.session_id }}</span>
+                <div class="h-14 border-b border-slate-200 bg-white/80 flex items-center px-6 shadow-sm backdrop-blur-md justify-between">
+                    <div class="flex items-center">
+                        <h2 class="text-lg font-semibold text-slate-700">跟进记录：{{ currentSession.contact_name }}</h2>
+                        <span class="ml-4 text-xs text-slate-400">ID: {{ currentSession.session_id }}</span>
+                    </div>
+                    <div>
+                        <button v-if="currentSession.status === 'manual'" @click="recoverAI" class="text-xs bg-rose-500 text-white px-3 py-1.5 rounded-full hover:bg-rose-600 transition shadow-sm font-medium animate-pulse flex items-center">
+                            <i class="fa-solid fa-headset mr-1"></i>标记为已处理 (恢复AI接管)
+                        </button>
+                    </div>
                 </div>
                 
                 <!-- 消息区 -->
@@ -432,6 +442,31 @@
                     return [];
                 };
 
+                const recoverAI = async () => {
+                    if(!currentSession.value) return;
+                    try {
+                        const sid = currentSession.value.session_id;
+                        const res = await fetch(`/api/admin/sessions/${sid}/status`, {
+                            method: 'POST',
+                            headers: {
+                                ...getAuthHeaders(),
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({status: 'auto'})
+                        });
+                        if (res.ok) {
+                            currentSession.value.status = 'auto';
+                            fetchSessions();
+                        } else if (res.status === 401) {
+                            triggerLogin();
+                        } else {
+                            alert('状态恢复失败');
+                        }
+                    } catch (e) {
+                        console.error('状态恢复异常', e);
+                    }
+                };
+
                 onMounted(() => {
                     fetchSessions();
                     // Optional polling
@@ -461,7 +496,8 @@
                     extractProfile,
                     getPreferencesList,
                     deleteSession,
-                    deleteMessage
+                    deleteMessage,
+                    recoverAI
                 };
             }
         }).mount('#app');

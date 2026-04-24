@@ -67,7 +67,9 @@ object CaptureImageProcessor {
         val titleCropPath = saveBitmapIfPresent(context, titleCrop, outDir, fileName, "title")
         val chatCrop = createChatCrop(bitmap)
         val chatCropPath = saveBitmapIfPresent(context, chatCrop, outDir, fileName, "chatcrop")
+        val latestVisibleMessageSide = chatCrop?.let(::detectLatestVisibleMessageSide)
         val sinceLastOutboundCrop = chatCrop?.let(::createInboundSinceLastOutboundCrop)
+        val hasInboundAfterLatestOutbound = sinceLastOutboundCrop?.let(::hasInboundSignalInCrop) ?: false
         val sinceLastOutboundCropPath = saveBitmapIfPresent(context, sinceLastOutboundCrop, outDir, fileName, "since_last_outbound")
         val recentInboundClusterCrop = chatCrop?.let(::createRecentInboundClusterCrop)
         val recentInboundClusterCropPath = saveBitmapIfPresent(context, recentInboundClusterCrop, outDir, fileName, "recent_inbound_cluster")
@@ -98,6 +100,8 @@ object CaptureImageProcessor {
             chatCropPath = chatCropPath,
             sinceLastOutboundCropPath = sinceLastOutboundCropPath,
             recentInboundClusterCropPath = recentInboundClusterCropPath,
+            latestVisibleMessageSide = latestVisibleMessageSide,
+            hasInboundAfterLatestOutbound = hasInboundAfterLatestOutbound,
             leftMessageCropPath = leftMessageCropPath,
             recentLeftMessageCropPath = recentLeftMessageCropPath,
             latestInboundBubbleCropPath = latestInboundBubbleCropPath,
@@ -406,6 +410,7 @@ object CaptureImageProcessor {
         var inboundRows = 0
         var gapRows = 0
         var outboundRows = 0
+        var leadingOutboundRows = 0
 
         for (y in (searchBottom - 1) downTo searchTop) {
             val leftAvatar = nonWhiteRatio(y, (width * 0.00f).toInt(), (width * 0.16f).toInt())
@@ -422,6 +427,11 @@ object CaptureImageProcessor {
                     inboundRows++
                     gapRows = 0
                     outboundRows = 0
+                    leadingOutboundRows = 0
+                } else if (outboundRow) {
+                    leadingOutboundRows++
+                    // 底部先连续出现己方消息，说明当前最新消息是己方，不能再往上捞旧入站消息
+                    if (leadingOutboundRows >= 8) return null
                 }
                 continue
             }
@@ -455,6 +465,45 @@ object CaptureImageProcessor {
             (cropRight - cropLeft).coerceAtLeast(10),
             (cropBottom - cropTop).coerceAtLeast(10),
         )
+    }
+
+    private fun hasInboundSignalInCrop(source: Bitmap): Boolean {
+        val width = source.width
+        val height = source.height
+        if (width < 60 || height < 40) return false
+
+        fun isNearWhite(pixel: Int): Boolean {
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            return r >= 238 && g >= 238 && b >= 238
+        }
+
+        fun nonWhiteRatio(y: Int, xStart: Int, xEnd: Int): Double {
+            var total = 0
+            var nonWhite = 0
+            var x = xStart.coerceAtLeast(0)
+            val end = xEnd.coerceAtMost(width)
+            while (x < end) {
+                if (!isNearWhite(source.getPixel(x, y))) nonWhite++
+                total++
+                x += 3
+            }
+            return if (total == 0) 0.0 else nonWhite.toDouble() / total
+        }
+
+        val top = (height * 0.02f).toInt().coerceAtLeast(0)
+        val bottom = (height * 0.88f).toInt().coerceAtMost(height)
+        var hitRows = 0
+        var sampled = 0
+        for (y in top until bottom step 2) {
+            val leftAvatar = nonWhiteRatio(y, 0, (width * 0.18f).toInt())
+            val centerBody = nonWhiteRatio(y, (width * 0.12f).toInt(), (width * 0.84f).toInt())
+            if (leftAvatar >= 0.10 || centerBody >= 0.09) hitRows++
+            sampled++
+        }
+        if (sampled <= 0) return false
+        return hitRows >= 8 && hitRows.toDouble() / sampled >= 0.20
     }
 
     private fun createLatestInboundBubbleCrop(source: Bitmap): Bitmap? {
@@ -578,6 +627,79 @@ object CaptureImageProcessor {
             cropWidth,
             cropHeight
         )
+    }
+
+    private fun detectLatestVisibleMessageSide(source: Bitmap): String {
+        val width = source.width
+        val height = source.height
+        if (width < 80 || height < 120) return "unknown"
+
+        val searchTop = (height * 0.10f).toInt().coerceAtLeast(0)
+        val searchBottom = (height * 0.90f).toInt().coerceAtMost(height)
+        if (searchBottom - searchTop < 40) return "unknown"
+
+        fun isNearWhite(pixel: Int): Boolean {
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            return r >= 238 && g >= 238 && b >= 238
+        }
+
+        fun nonWhiteRatio(y: Int, xStart: Int, xEnd: Int): Double {
+            var total = 0
+            var nonWhite = 0
+            var x = xStart.coerceAtLeast(0)
+            val end = xEnd.coerceAtMost(width)
+            while (x < end) {
+                if (!isNearWhite(source.getPixel(x, y))) nonWhite++
+                total++
+                x += 3
+            }
+            return if (total == 0) 0.0 else nonWhite.toDouble() / total
+        }
+
+        fun isLikelyGreen(pixel: Int): Boolean {
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            return g >= 165 && r in 95..215 && b in 85..190 && (g - r) >= 18 && (g - b) >= 10
+        }
+
+        fun greenRatio(y: Int, xStart: Int, xEnd: Int): Double {
+            var total = 0
+            var green = 0
+            var x = xStart.coerceAtLeast(0)
+            val end = xEnd.coerceAtMost(width)
+            while (x < end) {
+                if (isLikelyGreen(source.getPixel(x, y))) green++
+                total++
+                x += 3
+            }
+            return if (total == 0) 0.0 else green.toDouble() / total
+        }
+
+        var outboundHits = 0
+        var inboundHits = 0
+        var inspected = 0
+        for (y in (searchBottom - 1) downTo searchTop) {
+            val rightGreen = greenRatio(y, (width * 0.46f).toInt(), (width * 0.94f).toInt())
+            val leftAvatar = nonWhiteRatio(y, 0, (width * 0.16f).toInt())
+            val centerBody = nonWhiteRatio(y, (width * 0.12f).toInt(), (width * 0.82f).toInt())
+
+            if (rightGreen >= 0.09) {
+                outboundHits++
+                inspected++
+            } else if (leftAvatar >= 0.11 || centerBody >= 0.09) {
+                inboundHits++
+                inspected++
+            }
+            if (inspected >= 24) break
+        }
+        return when {
+            outboundHits >= 8 && outboundHits >= inboundHits + 3 -> "outbound"
+            inboundHits >= 8 && inboundHits >= outboundHits + 3 -> "inbound"
+            else -> "unknown"
+        }
     }
 
 

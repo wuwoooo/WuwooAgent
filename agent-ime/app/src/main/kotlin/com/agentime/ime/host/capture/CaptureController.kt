@@ -12,6 +12,8 @@ data class CaptureResult(
     val chatCropPath: String? = null,
     val sinceLastOutboundCropPath: String? = null,
     val recentInboundClusterCropPath: String? = null,
+    val latestVisibleMessageSide: String? = null,
+    val hasInboundAfterLatestOutbound: Boolean = false,
     val leftMessageCropPath: String? = null,
     val recentLeftMessageCropPath: String? = null,
     val latestInboundBubbleCropPath: String? = null,

@@ -22,9 +22,16 @@ def init_db():
             contact_name TEXT,
             profile_json TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status TEXT DEFAULT 'auto'
         )
     """)
+    # Add status column if it doesn't exist (for older DBs)
+    try:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN status TEXT DEFAULT 'auto'")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
     # Create messages table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS messages (
@@ -74,7 +81,7 @@ def get_all_sessions() -> List[Dict[str, Any]]:
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT s.session_id, s.contact_name, s.updated_at, s.profile_json,
+        SELECT s.session_id, s.contact_name, s.updated_at, s.profile_json, s.status,
                (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.session_id) as msg_count,
                (SELECT content FROM messages m WHERE m.session_id = s.session_id ORDER BY created_at DESC LIMIT 1) as last_msg
         FROM sessions s
@@ -132,5 +139,25 @@ def delete_message(message_id: int):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+    conn.commit()
+    conn.close()
+
+def get_session_status(session_id: str) -> str:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT status FROM sessions WHERE session_id = ?", (session_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row and row['status']:
+        return row['status']
+    return 'auto'
+
+def update_session_status(session_id: str, status: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE sessions SET status = ? WHERE session_id = ?",
+        (status, session_id)
+    )
     conn.commit()
     conn.close()

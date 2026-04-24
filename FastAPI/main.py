@@ -85,7 +85,8 @@ def _build_user_prompt(contact_name: str) -> Tuple[str, str]:
     current_time = get_current_time_str()
     pure_text = "[用户上传了一张聊天截图]"
     wrapped_text = (
-        f"（系统提示：当前实际时间是 {current_time}，请以此作为判断今天、明天、下周等相对时间的基准。）\n\n"
+        f"（系统提示：当前实际时间是 {current_time}，请以此作为判断今天、明天、下周等相对时间的基准。\n"
+        "【重要覆盖规则】当你判断已经获取了足够的信息（如目的地、天数、人数等），到了需要给客户制作具体行程方案或下单的阶段时，请务必在你的回复最后加上 [HANDOFF] 标记。这会通知后台中止自动回复。在触发这个标记时，你的回复内容应该类似于‘我这就去为您整理具体的行程方案和报价，请稍等’，绝对不能说‘转交给人工’或‘转交给定制师’，因为你此时的角色本身就是这位专属的定制师小鹿。）\n\n"
         f"当前微信会话联系人是「{name}」。用户上传了一张聊天截图，但服务端未能拿到具体聊天文字。\n"
         "请作为旅游定制顾问，直接给出一句简短的回复建议。"
     )
@@ -99,7 +100,8 @@ def _build_user_prompt_from_ocr(contact_name: str, ocr_text: str) -> Tuple[str, 
     current_time = get_current_time_str()
     pure_text = text
     wrapped_text = (
-        f"（系统提示：当前实际时间是 {current_time}。如果在聊天中客户提到诸如“下月”、“明天”等相对时间，请以此为基准推算。）\n\n"
+        f"（系统提示：当前实际时间是 {current_time}。如果在聊天中客户提到诸如“下月”、“明天”等相对时间，请以此为基准推算。\n"
+        "【重要覆盖规则】当你判断已经获取了足够的信息（如目的地、天数、人数等），到了需要给客户制作具体行程方案或下单的阶段时，请务必在你的回复最后加上 [HANDOFF] 标记。这会通知后台中止自动回复。在触发这个标记时，你的回复内容应该类似于‘我这就去为您整理具体的行程方案和报价，请稍等’，绝对不能说‘转交给人工’或‘转交给定制师’，因为你此时的角色本身就是这位专属的定制师小鹿。）\n\n"
         f"代聊微信联系人「{name}」。对方刚刚发来的最新消息：\n\n{text}"
     )
     return pure_text, wrapped_text
@@ -145,6 +147,19 @@ async def wechat_chat(
         safe_name = (image.filename or "upload.bin").replace("/", "_")[:200]
         dest = UPLOAD_DIR / safe_name
         dest.write_bytes(image_bytes)
+        
+    try:
+        current_status = database.get_session_status(session_id)
+        if current_status == "manual":
+            # 如果是人工接管状态，Agent 保持静默
+            # 不保存静默消息，直接返回
+            return {
+                "ok": True,
+                "messages": [{"role": "assistant", "text": ""}],
+                "reply_text": "",
+            }
+    except Exception:
+        pass
 
     # 优先使用客户端本地 OCR 全文（与接口说明「构造 user 文本」一致）
     if ocr_ok:
@@ -192,6 +207,14 @@ async def wechat_chat(
                 "reply_text": "",
             },
         )
+        
+    # Check for handoff
+    if "[HANDOFF]" in reply_text:
+        reply_text = reply_text.replace("[HANDOFF]", "").strip()
+        try:
+            database.update_session_status(session_id, "manual")
+        except Exception:
+            pass
 
     # Save messages to database and trigger async profile check
     try:
@@ -247,4 +270,14 @@ async def api_delete_session(session_id: str, username: str = Depends(verify_adm
 @app.delete("/api/admin/messages/{message_id}")
 async def api_delete_message(message_id: int, username: str = Depends(verify_admin)):
     database.delete_message(message_id)
+    return {"ok": True}
+
+from pydantic import BaseModel
+
+class StatusUpdate(BaseModel):
+    status: str
+
+@app.post("/api/admin/sessions/{session_id}/status")
+async def api_update_session_status(session_id: str, payload: StatusUpdate, username: str = Depends(verify_admin)):
+    database.update_session_status(session_id, payload.status)
     return {"ok": True}

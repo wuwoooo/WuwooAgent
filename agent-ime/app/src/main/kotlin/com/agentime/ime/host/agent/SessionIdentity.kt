@@ -36,7 +36,11 @@ object SessionIdentity {
         return dp[a.length][b.length]
     }
 
-    fun normalizeContactName(context: Context, raw: String?): String {
+    fun normalizeContactName(
+        context: Context,
+        raw: String?,
+        useFuzzyMatch: Boolean = true,
+    ): String {
         val trimmed = raw.orEmpty().trim().ifBlank { "当前联系人" }
         if (trimmed == "当前联系人") return trimmed
 
@@ -48,20 +52,22 @@ object SessionIdentity {
             return trimmed
         }
 
-        var bestMatch: String? = null
-        var bestDistance = Int.MAX_VALUE
-        for (known in knownNames) {
-            if (kotlin.math.abs(known.length - trimmed.length) > 2) continue
-            val dist = getLevenshteinDistance(known, trimmed)
-            if (dist < bestDistance) {
-                bestDistance = dist
-                bestMatch = known
+        if (useFuzzyMatch) {
+            var bestMatch: String? = null
+            var bestDistance = Int.MAX_VALUE
+            for (known in knownNames) {
+                if (kotlin.math.abs(known.length - trimmed.length) > 2) continue
+                val dist = getLevenshteinDistance(known, trimmed)
+                if (dist < bestDistance) {
+                    bestDistance = dist
+                    bestMatch = known
+                }
             }
-        }
 
-        val threshold = if (trimmed.length <= 4) 1 else 2
-        if (bestMatch != null && bestDistance <= threshold) {
-            return bestMatch
+            val threshold = if (trimmed.length <= 4) 1 else 2
+            if (bestMatch != null && bestDistance <= threshold) {
+                return bestMatch
+            }
         }
 
         knownNames.add(trimmed)
@@ -77,7 +83,7 @@ object SessionIdentity {
     }
 
     fun buildSessionId(context: Context, contactName: String): String {
-        val normalized = normalizeContactName(context, contactName)
+        val normalized = normalizeContactName(context, contactName, useFuzzyMatch = true)
         val deviceId = getDeviceId(context)
         val hashStr = "$deviceId-$normalized"
         

@@ -7,6 +7,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -114,7 +116,9 @@ class HostForegroundService : Service() {
     }
 
     private fun scanConversationListAndRun(scanSource: String) {
-        val bypassCoolingDown = scanSource.contains("urgent_chat_followup")
+        val bypassCoolingDown =
+            scanSource.contains("urgent_chat_followup") ||
+                scanSource.contains("post_send_back_followup")
         if (running.get() || (!bypassCoolingDown && isBusyOrCoolingDown())) {
             logger.log(TAG, "会话列表截图分析跳过：当前正忙或冷却中")
             return
@@ -161,6 +165,15 @@ class HostForegroundService : Service() {
                     )
                     val latestInbound = inboundCandidate.text
                     val inboundSignature = inboundCandidate.signature
+                    logger.log(
+                        TAG,
+                        "聊天页触发门槛检测: latestSide=${cap.latestVisibleMessageSide} hasInboundAfterLatestOutbound=${cap.hasInboundAfterLatestOutbound} source=${inboundCandidate.sourceLabel}",
+                    )
+                    if (shouldSkipBecauseLatestVisibleIsOutbound(cap, inboundCandidate)) {
+                        cleanupIntermediateOcrCrops(cap, inboundCandidate.path)
+                        logger.log(TAG, "截图分析结果：当前聊天页最新可见消息疑似己方发送，且未检测到己方之后新入站，跳过本轮")
+                        return
+                    }
                     inboundCandidate.path?.let {
                         exportFinalInboundOcrSnapshot(it, SessionIdentity.buildSessionId(this@HostForegroundService, contactName))
                         val pngFileName = File(it).name
@@ -201,7 +214,14 @@ class HostForegroundService : Service() {
             //logger.log(TAG, "红点扫描诊断: $badgeDebugLog")
             if (hit == null) {
                 logger.log(TAG, "截图分析结果：已识别为会话列表页，但未识别到可点击的未读红点")
+                if (scanSource.startsWith("post_send_back_followup")) {
+                    schedulePostSendAdaptiveRetry(scanSource)
+                }
                 return
+            }
+            val listRowContactHint = extractListRowContactHint(cap.imagePath, hit.tapY, ocr)
+            if (listRowContactHint.isNotBlank()) {
+                logger.log(TAG, "列表页点击目标联系人提示: $listRowContactHint")
             }
             logger.log(TAG, "截图分析识别到未读会话，准备点击 tap=(${hit.tapX.toInt()},${hit.tapY.toInt()}) score=${hit.redScore}")
             if (!com.agentime.ime.host.automation.WechatAccessibilityService.tapConversationAt(hit.tapX, hit.tapY)) {
@@ -224,15 +244,42 @@ class HostForegroundService : Service() {
                 logger.log(TAG, "点击未读会话后，页面仍未稳定进入聊天页，取消本轮")
                 return
             }
-            val contactName = SessionIdentity.normalizeContactName(
+            val headerRawName = ConversationListUnreadDetector.extractChatContactNameFromOcr(postClickHeaderOcr)
+            val headerScore = ConversationListUnreadDetector.scoreHeaderOcrCandidate(postClickHeaderOcr)
+            val listHintStrict = SessionIdentity.normalizeContactName(
                 this@HostForegroundService,
-                ConversationListUnreadDetector.extractChatContactNameFromOcr(postClickHeaderOcr)
-                    .ifBlank { postClickChatAnalysis.contactName }
-                    .ifBlank { "当前联系人" },
+                listRowContactHint,
+                useFuzzyMatch = false,
+            ).takeIf { it.isNotBlank() && it != "当前联系人" }.orEmpty()
+            val headerResolvedName = SessionIdentity.normalizeContactName(
+                this@HostForegroundService,
+                headerRawName,
+                useFuzzyMatch = true,
+            )
+            val contactName = when {
+                listHintStrict.isNotBlank() -> listHintStrict
+                headerScore >= 80 &&
+                    headerResolvedName.isNotBlank() &&
+                    headerResolvedName != "当前联系人" -> headerResolvedName
+                else -> "当前联系人"
+            }
+            logger.log(
+                TAG,
+                "点击入会话联系人绑定: listHint=$listHintStrict header=$headerResolvedName headerScore=$headerScore",
             )
             if (contactName.isBlank() || contactName == "当前联系人") {
-                logger.log(TAG, "点击未读会话后，仍无法识别聊天页联系人，取消本轮")
+                logger.log(TAG, "点击未读会话后，联系人绑定置信度不足，取消本轮（避免串会话）")
                 return
+            }
+            if (listRowContactHint.isNotBlank() &&
+                headerResolvedName.isNotBlank() &&
+                headerResolvedName != "当前联系人" &&
+                headerResolvedName != contactName
+            ) {
+                logger.log(
+                    TAG,
+                    "点击入会话联系人校验不一致：listHint=$listRowContactHint header=$headerResolvedName；已采用 listHint 作为会话主键",
+                )
             }
             logger.log(TAG, "截图分析进入会话成功，联系人=$contactName")
             val prefsReply = getSharedPreferences("host_config", Context.MODE_PRIVATE)
@@ -246,6 +293,15 @@ class HostForegroundService : Service() {
             )
             val latestInbound = inboundCandidate.text
             val inboundSignature = inboundCandidate.signature
+            logger.log(
+                TAG,
+                "点击入会话门槛检测: latestSide=${postClickCap.latestVisibleMessageSide} hasInboundAfterLatestOutbound=${postClickCap.hasInboundAfterLatestOutbound} source=${inboundCandidate.sourceLabel}",
+            )
+            if (shouldSkipBecauseLatestVisibleIsOutbound(postClickCap, inboundCandidate)) {
+                cleanupIntermediateOcrCrops(postClickCap, inboundCandidate.path)
+                logger.log(TAG, "点击进入聊天后，最新可见消息疑似己方发送，且未检测到己方之后新入站，取消本轮")
+                return
+            }
             inboundCandidate.path?.let {
                 exportFinalInboundOcrSnapshot(it, SessionIdentity.buildSessionId(this@HostForegroundService, contactName))
                 val pngFileName = File(it).name
@@ -612,6 +668,55 @@ class HostForegroundService : Service() {
         return ""
     }
 
+    private fun extractListRowContactHint(
+        imagePath: String,
+        tapY: Float,
+        ocr: FallbackOcrProvider,
+    ): String {
+        return runCatching {
+            val bitmap = BitmapFactory.decodeFile(imagePath) ?: return@runCatching ""
+            try {
+                val width = bitmap.width
+                val height = bitmap.height
+                if (width < 200 || height < 400) return@runCatching ""
+
+                val rowHeight = (height * 0.094f).toInt().coerceAtLeast(130)
+                val centerY = tapY.toInt().coerceIn(0, height - 1)
+                val top = (centerY - rowHeight / 2).coerceAtLeast((height * 0.10f).toInt())
+                val bottom = (centerY + rowHeight / 2).coerceAtMost((height * 0.88f).toInt())
+                val left = (width * 0.16f).toInt().coerceAtLeast(0)
+                val right = (width * 0.92f).toInt().coerceAtMost(width)
+                if (bottom - top < 24 || right - left < 40) return@runCatching ""
+
+                val rowCrop = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
+                val tempFile = File(filesDir, "captures").apply { mkdirs() }
+                    .resolve("cap_list_row_hint_${System.currentTimeMillis()}.png")
+                try {
+                    FileOutputStream(tempFile).use { fos ->
+                        rowCrop.compress(Bitmap.CompressFormat.PNG, 100, fos)
+                    }
+                    val rowOcr = ocr.recognize(tempFile.absolutePath).trim()
+                    val extracted = ConversationListUnreadDetector.extractChatContactNameFromOcr(rowOcr)
+                    SessionIdentity.normalizeContactName(
+                        this@HostForegroundService,
+                        extracted,
+                        useFuzzyMatch = false,
+                    )
+                        .takeIf { it.isNotBlank() && it != "当前联系人" }
+                        .orEmpty()
+                } finally {
+                    rowCrop.recycle()
+                    runCatching { tempFile.delete() }
+                }
+            } finally {
+                bitmap.recycle()
+            }
+        }.getOrElse {
+            logger.log(TAG, "列表页联系人提示提取失败: ${it.message}")
+            ""
+        }
+    }
+
     private fun extractInboundCandidate(
         ocr: FallbackOcrProvider,
         cap: com.agentime.ime.host.capture.CaptureResult,
@@ -701,6 +806,17 @@ class HostForegroundService : Service() {
         val score: Int = Int.MIN_VALUE,
     )
 
+    private fun shouldSkipBecauseLatestVisibleIsOutbound(
+        cap: com.agentime.ime.host.capture.CaptureResult,
+        candidate: InboundCandidate,
+    ): Boolean {
+        val latestSide = cap.latestVisibleMessageSide.orEmpty()
+        if (latestSide != "outbound") return false
+        // 防误触发优先：当“最新可见消息”仍是己方时，一律不自动回复。
+        // 若对方真有新消息，应在下一次页面变化中表现为 latestSide=inbound 再触发。
+        return true
+    }
+
     private fun cleanupIntermediateOcrCrops(
         cap: com.agentime.ime.host.capture.CaptureResult,
         keepPath: String?,
@@ -756,6 +872,27 @@ class HostForegroundService : Service() {
         }, POST_SEND_FOLLOWUP_DELAY_MS)
     }
 
+    private fun schedulePostSendAdaptiveRetry(scanSource: String) {
+        val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("runtime_enabled", false)) return
+        if (prefs.getString("execution_mode", "auto").orEmpty() != "auto") return
+        if (!scanSource.startsWith("post_send_back_followup")) return
+
+        val (nextSource, delayMs) = when {
+            scanSource.endsWith("_r2") -> return
+            scanSource.endsWith("_r1") -> "post_send_back_followup_r2" to POST_SEND_FOLLOWUP_RETRY2_DELAY_MS
+            else -> "post_send_back_followup_r1" to POST_SEND_FOLLOWUP_RETRY1_DELAY_MS
+        }
+
+        logger.log(
+            TAG,
+            "发送后补扫未命中未读，安排分级重试：source=$nextSource delay=${"%.1f".format(delayMs / 1000.0)}s",
+        )
+        mainHandler.postDelayed({
+            io.execute { scanConversationListAndRun(scanSource = nextSource) }
+        }, delayMs)
+    }
+
     private fun scheduleUrgentChatFollowupScan() {
         val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
         if (!prefs.getBoolean("runtime_enabled", false)) return
@@ -776,6 +913,12 @@ class HostForegroundService : Service() {
         return runCatching {
             startForegroundCompat("正在检查会话内是否有连续新消息", includeProjectionType = true)
             val probeCap = capture.captureScreen("${sessionId}_postsend_probe")
+            val probeSide = probeCap.latestVisibleMessageSide.orEmpty()
+            if (probeSide != "inbound") {
+                cleanupIntermediateOcrCrops(probeCap, null)
+                logger.log(TAG, "发送后会话探测跳过：latestSide=$probeSide（仅当 inbound 才继续）")
+                return@runCatching false
+            }
             val sinceLastOutboundPath = probeCap.sinceLastOutboundCropPath
             if (sinceLastOutboundPath.isNullOrBlank()) {
                 cleanupIntermediateOcrCrops(probeCap, null)
@@ -900,8 +1043,11 @@ class HostForegroundService : Service() {
         const val EXTRA_SESSION_ID = "session_id"
         const val EXTRA_CONTACT_NAME = "contact_name"
         private const val PIPELINE_RETRY_DELAY_MS = 3_000L
-        private const val POST_SEND_FOLLOWUP_DELAY_MS = 9_000L
-        private const val POST_SEND_FOLLOWUP_DEBOUNCE_MS = 6_000L
+        // 发送并返回列表页后，尽快处理下一位未读联系人
+        private const val POST_SEND_FOLLOWUP_DELAY_MS = 2_200L
+        private const val POST_SEND_FOLLOWUP_DEBOUNCE_MS = 1_500L
+        private const val POST_SEND_FOLLOWUP_RETRY1_DELAY_MS = 3_500L
+        private const val POST_SEND_FOLLOWUP_RETRY2_DELAY_MS = 7_000L
         private const val URGENT_CHAT_FOLLOWUP_DELAY_MS = 1_400L
 
         fun isBusyOrCoolingDown(): Boolean {
