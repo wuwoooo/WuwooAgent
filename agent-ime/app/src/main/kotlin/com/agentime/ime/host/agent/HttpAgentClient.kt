@@ -12,7 +12,7 @@ class HttpAgentClient(private val context: Context) : AgentClient {
         const val DEFAULT_ENDPOINT = "http://118.24.71.189/api/wechat/chat"
     }
 
-    override fun chat(imagePath: String, ocrText: String, sessionId: String, contactName: String): AgentReply {
+    override fun chat(imagePath: String, ocrText: String, sessionId: String, contactName: String, isHumanReply: Boolean): AgentReply {
         val prefs = context.getSharedPreferences("host_config", Context.MODE_PRIVATE)
         val endpoint = prefs.getString("agent_chat_endpoint", "")?.trim().orEmpty().ifBlank { DEFAULT_ENDPOINT }
 
@@ -29,6 +29,9 @@ class HttpAgentClient(private val context: Context) : AgentClient {
             writeMultipartField(out, boundary, "ocr_text", ocrText)
             writeMultipartField(out, boundary, "session_id", sessionId)
             writeMultipartField(out, boundary, "contact_name", contactName)
+            if (isHumanReply) {
+                writeMultipartField(out, boundary, "is_human_reply", "true")
+            }
             val end = "--$boundary--\r\n"
             out.write(end.toByteArray(Charsets.UTF_8))
         }
@@ -39,8 +42,12 @@ class HttpAgentClient(private val context: Context) : AgentClient {
             .orEmpty()
 
         if (code !in 200..299) throw IllegalStateException("Agent 请求失败($code): $text")
-        val json = JSONObject(text)
-        val replyText = json.optString("reply_text", "").trim()
+        val replyText = if (text.isBlank()) "" else try {
+            val json = JSONObject(text)
+            json.optString("reply_text", "").trim()
+        } catch (e: Exception) {
+            ""
+        }
         return AgentReply(replyText = replyText, raw = text)
     }
 

@@ -39,6 +39,7 @@ class HostForegroundService : Service() {
     private val io = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var logger: HostLogger
+    private var lastReportedOutboundText: String = ""
     private val startupScanRunnable = Runnable {
         val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
         if (!prefs.getBoolean("runtime_enabled", false)) return@Runnable
@@ -170,6 +171,18 @@ class HostForegroundService : Service() {
                         "聊天页触发门槛检测: latestSide=${cap.latestVisibleMessageSide} hasInboundAfterLatestOutbound=${cap.hasInboundAfterLatestOutbound} source=${inboundCandidate.sourceLabel}",
                     )
                     if (shouldSkipBecauseLatestVisibleIsOutbound(cap, inboundCandidate)) {
+                        val currentOutboundText = cap.latestOutboundCropPath?.let { ocr.recognize(it).trim() } ?: ""
+                        if (currentOutboundText.isNotEmpty() && currentOutboundText != lastReportedOutboundText) {
+                            val agentClient = HttpAgentClient(this@HostForegroundService)
+                            val sessionId = SessionIdentity.buildSessionId(this@HostForegroundService, contactName)
+                            try {
+                                agentClient.chat(cap.imagePath, currentOutboundText, sessionId, contactName, isHumanReply = true)
+                                lastReportedOutboundText = currentOutboundText
+                                logger.log(TAG, "检测到真人介入并发送消息: [${currentOutboundText.take(20)}]，已同步至后台接管流程")
+                            } catch (e: Exception) {
+                                logger.log(TAG, "同步真人介入状态失败: ${e.message}")
+                            }
+                        }
                         cleanupIntermediateOcrCrops(cap, inboundCandidate.path)
                         logger.log(TAG, "截图分析结果：当前聊天页最新可见消息疑似己方发送，且未检测到己方之后新入站，跳过本轮")
                         return
@@ -298,6 +311,18 @@ class HostForegroundService : Service() {
                 "点击入会话门槛检测: latestSide=${postClickCap.latestVisibleMessageSide} hasInboundAfterLatestOutbound=${postClickCap.hasInboundAfterLatestOutbound} source=${inboundCandidate.sourceLabel}",
             )
             if (shouldSkipBecauseLatestVisibleIsOutbound(postClickCap, inboundCandidate)) {
+                val currentOutboundText = postClickCap.latestOutboundCropPath?.let { ocr.recognize(it).trim() } ?: ""
+                if (currentOutboundText.isNotEmpty() && currentOutboundText != lastReportedOutboundText) {
+                    val agentClient = HttpAgentClient(this@HostForegroundService)
+                    val sessionId = SessionIdentity.buildSessionId(this@HostForegroundService, contactName)
+                    try {
+                        agentClient.chat(postClickCap.imagePath, currentOutboundText, sessionId, contactName, isHumanReply = true)
+                        lastReportedOutboundText = currentOutboundText
+                        logger.log(TAG, "检测到真人介入并发送消息: [${currentOutboundText.take(20)}]，已同步至后台接管流程")
+                    } catch (e: Exception) {
+                        logger.log(TAG, "同步真人介入状态失败: ${e.message}")
+                    }
+                }
                 cleanupIntermediateOcrCrops(postClickCap, inboundCandidate.path)
                 logger.log(TAG, "点击进入聊天后，最新可见消息疑似己方发送，且未检测到己方之后新入站，取消本轮")
                 return

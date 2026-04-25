@@ -79,6 +79,8 @@ object CaptureImageProcessor {
         val recentLeftMessageCropPath = saveBitmapIfPresent(context, recentLeftMessageCrop, outDir, fileName, "leftmsg_recent")
         val latestInboundBubbleCrop = createLatestInboundBubbleCrop(bitmap)
         val latestInboundBubbleCropPath = saveBitmapIfPresent(context, latestInboundBubbleCrop, outDir, fileName, "leftmsg_latest_bubble")
+        val latestOutboundCrop = chatCrop?.let(::createLatestOutboundCrop)
+        val latestOutboundCropPath = saveBitmapIfPresent(context, latestOutboundCrop, outDir, fileName, "latest_outbound")
         headerCrop?.recycle()
         titleCrop?.recycle()
         chatCrop?.recycle()
@@ -87,6 +89,7 @@ object CaptureImageProcessor {
         leftMessageCrop?.recycle()
         recentLeftMessageCrop?.recycle()
         latestInboundBubbleCrop?.recycle()
+        latestOutboundCrop?.recycle()
 
         return CaptureResult(
             imagePath = out.absolutePath,
@@ -105,6 +108,7 @@ object CaptureImageProcessor {
             leftMessageCropPath = leftMessageCropPath,
             recentLeftMessageCropPath = recentLeftMessageCropPath,
             latestInboundBubbleCropPath = latestInboundBubbleCropPath,
+            latestOutboundCropPath = latestOutboundCropPath,
             acceptableForOcr = acceptableForOcr,
             sharpnessScore = sharpnessScore,
             totalScore = totalScore,
@@ -701,6 +705,101 @@ object CaptureImageProcessor {
             inboundHits >= 8 && inboundHits >= outboundHits + 3 -> "inbound"
             else -> "unknown"
         }
+    }
+
+    private fun createLatestOutboundCrop(source: Bitmap): Bitmap? {
+        val width = source.width
+        val height = source.height
+        if (width < 80 || height < 120) return null
+
+        val searchTop = (height * 0.10f).toInt().coerceAtLeast(0)
+        val searchBottom = (height * 0.95f).toInt().coerceAtMost(height)
+        if (searchBottom - searchTop < 40) return null
+
+        fun isLikelyGreen(pixel: Int): Boolean {
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            return g >= 165 && r in 95..215 && b in 85..190 && (g - r) >= 18 && (g - b) >= 10
+        }
+
+        fun greenRatio(y: Int, xStart: Int, xEnd: Int): Double {
+            var green = 0
+            var total = 0
+            var x = xStart.coerceAtLeast(0)
+            val end = xEnd.coerceAtMost(width)
+            while (x < end) {
+                if (isLikelyGreen(source.getPixel(x, y))) green++
+                total++
+                x += 3
+            }
+            return if (total == 0) 0.0 else green.toDouble() / total
+        }
+
+        var blockTop = -1
+        var blockBottom = -1
+        var inBlock = false
+        var gap = 0
+
+        val rightStart = (width * 0.45f).toInt()
+        val rightEnd = (width * 0.95f).toInt()
+
+        for (y in searchBottom downTo searchTop) {
+            val ratio = greenRatio(y, rightStart, rightEnd)
+            if (ratio >= 0.05) {
+                if (!inBlock) {
+                    inBlock = true
+                    blockBottom = y
+                    blockTop = y
+                } else {
+                    blockTop = y
+                }
+                gap = 0
+            } else if (inBlock) {
+                gap++
+                if (gap >= 12) {
+                    val h = blockBottom - blockTop
+                    if (h >= 15) {
+                        break
+                    } else {
+                        inBlock = false
+                        blockBottom = -1
+                        blockTop = -1
+                        gap = 0
+                    }
+                }
+            }
+        }
+        
+        if (inBlock) {
+            val h = blockBottom - blockTop
+            if (h < 15) {
+                blockBottom = -1
+                blockTop = -1
+            }
+        }
+
+        if (blockBottom < 0 || blockTop < 0) return null
+
+        val topPadding = maxOf((height * 0.010f).toInt(), 6)
+        val bottomPadding = maxOf((height * 0.014f).toInt(), 10)
+        val cropTop = (blockTop - topPadding).coerceAtLeast(searchTop)
+        val cropBottom = (blockBottom + bottomPadding).coerceAtMost(searchBottom)
+
+        if (cropBottom - cropTop < 10) return null
+
+        val cropLeft = (width * 0.15f).toInt().coerceAtLeast(0)
+        val cropRight = width
+        val cropWidth = (cropRight - cropLeft).coerceAtLeast(10)
+        val cropHeight = (cropBottom - cropTop).coerceAtLeast(10)
+
+        return Bitmap.createBitmap(
+            source,
+            cropLeft,
+            cropTop,
+            cropWidth,
+            cropHeight
+        )
     }
 
 

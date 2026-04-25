@@ -17,6 +17,7 @@ data class CaptureResult(
     val leftMessageCropPath: String? = null,
     val recentLeftMessageCropPath: String? = null,
     val latestInboundBubbleCropPath: String? = null,
+    val latestOutboundCropPath: String? = null,
     val acceptableForOcr: Boolean = false,
     val sharpnessScore: Double = 0.0,
     val totalScore: Double = 0.0,

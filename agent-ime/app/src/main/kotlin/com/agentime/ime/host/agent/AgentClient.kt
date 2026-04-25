@@ -6,5 +6,5 @@ data class AgentReply(
 )
 
 interface AgentClient {
-    fun chat(imagePath: String, ocrText: String, sessionId: String, contactName: String): AgentReply
+    fun chat(imagePath: String, ocrText: String, sessionId: String, contactName: String, isHumanReply: Boolean = false): AgentReply
 }
