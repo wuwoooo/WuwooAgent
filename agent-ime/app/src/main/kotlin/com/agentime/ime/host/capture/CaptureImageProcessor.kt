@@ -417,8 +417,9 @@ object CaptureImageProcessor {
             val leftBody = nonWhiteRatio(y, (width * 0.12f).toInt(), (width * 0.82f).toInt())
             val rightGreen = greenRatio(y, (width * 0.46f).toInt(), (width * 0.94f).toInt())
 
-            val inboundRow = (leftAvatar >= 0.10) || (leftBody >= 0.08 && rightGreen <= 0.04)
             val outboundRow = rightGreen >= 0.08
+            // 当存在绿色气泡时，强制排除 inbound 判定，避免自定义聊天背景导致 leftAvatar 大面积非白被误判为入站
+            val inboundRow = !outboundRow && ((leftAvatar >= 0.10) || (leftBody >= 0.08 && rightGreen <= 0.04))
 
             if (clusterBottom < 0) {
                 if (inboundRow) {

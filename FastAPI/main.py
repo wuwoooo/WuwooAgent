@@ -79,29 +79,41 @@ def get_current_time_str() -> str:
     weekday_str = weekdays[now.weekday()]
     return now.strftime("%Y-%m-%d %H:%M") + f"（{weekday_str}）"
 
-def _build_user_prompt(contact_name: str) -> Tuple[str, str]:
+def _build_user_prompt(contact_name: str, current_status: str = "auto") -> Tuple[str, str]:
     """未提供 ocr_text 时：仅截图场景，服务端不做 OCR，用占位描述发给智能体。"""
     name = (contact_name or "").strip() or "客户"
     current_time = get_current_time_str()
     pure_text = "[用户上传了一张聊天截图]"
+    
+    receptionist_rule = ""
+    if current_status == "manual":
+        receptionist_rule = "【当前状态：等候人工接管】你已将具体的定制方案和报价任务交给了资深定制师，定制师正在后台核算。对于客户的新消息，请充当接待员：如果客户询问普通问题，可正常解答；如果客户催促方案/报价，必须使用安抚话术（例如：‘定制师正在快马加鞭为您核算报价和行程呢，请您稍等片刻哦～’），绝对不要自己编造方案或报价。\n"
+
     wrapped_text = (
-        f"（系统提示：当前实际时间是 {current_time}。你在问候客户时必须以此为准判断今天是星期几，绝对不要参考下方文本中可能出现的旧时间标签（如“周一16:40”等是微信界面上旧消息的时间戳，不代表当前时间）。请以此作为判断今天、明天、下周等相对时间的基准。\n"
+        f"（系统提示：当前实际时间是 {current_time}。注意：仅在第一轮对话或主动打招呼时才进行时间问候，在后续连续的对话中直接回答用户的问题，绝对不要重复问候！你在问候客户时必须以此为准判断今天是星期几，绝对不要参考下方文本中可能出现的旧时间标签（如“周一16:40”等是微信界面上旧消息的时间戳，不代表当前时间）。请以此作为判断今天、明天、下周等相对时间的基准。\n"
         "【HANDOFF 规则】仅当客户在本轮消息中**明确表达了要你出方案/报价/下单的意图**（例如‘帮我安排一下’、‘出个方案吧’、‘可以报价了’、‘定了就这样吧’）时，才可在回复末尾加上 [HANDOFF] 标记。如果客户只是打招呼、问问题、或者你自己还在提问收集信息，**绝对不要**加 [HANDOFF]。触发 [HANDOFF] 时，你的回复**必须是一句确认性的过渡话术**（例如‘好的，我这就给您整理具体的行程方案和报价～’），**绝对不能是提问句**。也绝对不能说‘转交给人工’或‘转交给定制师’，因为你本身就是这位专属的定制师小鹿。）\n\n"
+        f"{receptionist_rule}"
         f"当前微信会话联系人是「{name}」。用户上传了一张聊天截图，但服务端未能拿到具体聊天文字。\n"
         "请作为旅游定制顾问，直接给出一句简短的回复建议。"
     )
     return pure_text, wrapped_text
 
 
-def _build_user_prompt_from_ocr(contact_name: str, ocr_text: str) -> Tuple[str, str]:
+def _build_user_prompt_from_ocr(contact_name: str, ocr_text: str, current_status: str = "auto") -> Tuple[str, str]:
     """客户端已完成本地 OCR 时，仅把最新一条客户消息发给智能体。"""
     name = (contact_name or "").strip() or "客户"
     text = (ocr_text or "").strip()
     current_time = get_current_time_str()
     pure_text = text
+    
+    receptionist_rule = ""
+    if current_status == "manual":
+        receptionist_rule = "【当前状态：等候人工接管】你已将具体的定制方案和报价任务交给了资深定制师，定制师正在后台核算。对于客户的新消息，请充当接待员：如果客户询问普通问题，可正常解答；如果客户催促方案/报价，必须使用安抚话术（例如：‘定制师正在快马加鞭为您核算报价和行程呢，请您稍等片刻哦～’），绝对不要自己编造方案或报价。\n"
+
     wrapped_text = (
-        f"（系统提示：当前实际时间是 {current_time}。你在问候客户时必须以此为准判断今天是星期几，绝对不要参考下方 OCR 文本中可能出现的旧时间标签（如“周一16:40”等是微信界面上旧消息的时间戳，不代表当前时间）。如果在聊天中客户提到诸如“下月”、“明天”等相对时间，也请以此为基准推算。\n"
+        f"（系统提示：当前实际时间是 {current_time}。注意：仅在第一轮对话或主动打招呼时才进行时间问候，在后续连续的对话中直接回答用户的问题，绝对不要重复问候！你在问候客户时必须以此为准判断今天是星期几，绝对不要参考下方 OCR 文本中可能出现的旧时间标签（如“周一16:40”等是微信界面上旧消息的时间戳，不代表当前时间）。如果在聊天中客户提到诸如“下月”、“明天”等相对时间，也请以此为基准推算。\n"
         "【HANDOFF 规则】仅当客户在本轮消息中**明确表达了要你出方案/报价/下单的意图**（例如‘帮我安排一下’、‘出个方案吧’、‘可以报价了’、‘定了就这样吧’）时，才可在回复末尾加上 [HANDOFF] 标记。如果客户只是打招呼、问问题、或者你自己还在提问收集信息，**绝对不要**加 [HANDOFF]。触发 [HANDOFF] 时，你的回复**必须是一句确认性的过渡话术**（例如‘好的，我这就给您整理具体的行程方案和报价～’），**绝对不能是提问句**。也绝对不能说‘转交给人工’或‘转交给定制师’，因为你本身就是这位专属的定制师小鹿。）\n\n"
+        f"{receptionist_rule}"
         f"代聊微信联系人「{name}」。对方刚刚发来的最新消息：\n\n{text}"
     )
     return pure_text, wrapped_text
@@ -117,12 +129,14 @@ async def wechat_chat(
     contact_name: str = Form(...),
     ocr_text: Optional[str] = Form(None),
     image: Optional[UploadFile] = File(default=None),
+    is_human_reply: bool = Form(False),
 ):
     """接收本地 OCR 文本（推荐）或截图（兼容），返回 reply_text。
 
     - 仅传 ocr_text：Agent IME 等客户端本地 OCR，不上传图片（推荐）。
     - 仅传 image：兼容旧版；服务端保存图片，智能体使用占位描述（不做 OCR）。
     - 若两者同时提供：按接口说明优先使用 ocr_text。
+    - is_human_reply：标识此条消息是否为真人客服手动发出的回复。
     """
     ocr_ok = bool((ocr_text or "").strip())
     image_bytes: bytes | None = None
@@ -150,22 +164,40 @@ async def wechat_chat(
         
     try:
         current_status = database.get_session_status(session_id)
-        if current_status == "manual":
-            # 如果是人工接管状态，Agent 保持静默
-            # 不保存静默消息，直接返回
-            return {
-                "ok": True,
-                "messages": [{"role": "assistant", "text": ""}],
-                "reply_text": "",
-            }
     except Exception:
-        pass
+        current_status = "auto"
+        
+    if is_human_reply:
+        # 真人发出了回复
+        pure_user_text = (ocr_text or "").strip()
+        if pure_user_text:
+            try:
+                # 记录真人的回复，role为assistant，表示我方发出的消息
+                database.save_message(session_id, contact_name, "assistant", pure_user_text)
+                # 将状态更新为彻底静音，这样后续再有用户消息，Agent也不会回复了
+                database.update_session_status(session_id, "silence")
+            except Exception:
+                pass
+        
+        return {
+            "ok": True,
+            "messages": [{"role": "assistant", "text": ""}],
+            "reply_text": "",
+        }
+
+    if current_status == "silence":
+        # 如果是彻底静音状态，直接返回空
+        return {
+            "ok": True,
+            "messages": [{"role": "assistant", "text": ""}],
+            "reply_text": "",
+        }
 
     # 优先使用客户端本地 OCR 全文（与接口说明「构造 user 文本」一致）
     if ocr_ok:
-        pure_user_text, wrapped_user_text = _build_user_prompt_from_ocr(contact_name, ocr_text or "")
+        pure_user_text, wrapped_user_text = _build_user_prompt_from_ocr(contact_name, ocr_text or "", current_status)
     else:
-        pure_user_text, wrapped_user_text = _build_user_prompt(contact_name)
+        pure_user_text, wrapped_user_text = _build_user_prompt(contact_name, current_status)
 
     provider = _provider_from_env()
     try:
