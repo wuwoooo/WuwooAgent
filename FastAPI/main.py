@@ -9,8 +9,12 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 import datetime
+import logging
 import os
 from pathlib import Path
+import shlex
+import subprocess
+import sys
 import time
 from typing import Optional, Tuple
 
@@ -40,6 +44,21 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 LOCAL_TZ = datetime.timezone(datetime.timedelta(hours=8))
 APP_STARTED_AT = datetime.datetime.now(LOCAL_TZ)
 APP_STARTED_MONOTONIC = time.monotonic()
+LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S %z"
+
+
+def _configure_logging_timestamps() -> None:
+    formatter = logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT)
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
+    for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logger = logging.getLogger(logger_name)
+        for handler in logger.handlers:
+            handler.setFormatter(formatter)
+
+
+_configure_logging_timestamps()
+logger = logging.getLogger("fastapi-admin")
 
 app = FastAPI(title="微信聊天分析", version="0.3.0")
 
@@ -112,6 +131,40 @@ def _read_recent_log_lines(log_path: Path, limit: int) -> list[str]:
     except OSError:
         return []
     return list(lines)
+
+
+def _build_restart_script(current_pid: int, log_path: Path, pid_path: Path) -> str:
+    uvicorn_path = BASE_DIR / "venv" / "bin" / "uvicorn"
+    if uvicorn_path.exists():
+        uvicorn_cmd = shlex.quote(str(uvicorn_path))
+    else:
+        uvicorn_cmd = f"{shlex.quote(sys.executable)} -m uvicorn"
+
+    base_dir = shlex.quote(str(BASE_DIR))
+    log_file = shlex.quote(str(log_path))
+    pid_file = shlex.quote(str(pid_path))
+    return f"""
+set -e
+cd {base_dir}
+echo "$(date '+%Y-%m-%d %H:%M:%S %z') INFO [admin.restart] restart requested; old_pid={current_pid}" >> {log_file}
+sleep 1
+kill -TERM {current_pid} 2>/dev/null || true
+for i in $(seq 1 20); do
+  if kill -0 {current_pid} 2>/dev/null; then
+    sleep 0.5
+  else
+    break
+  fi
+done
+if kill -0 {current_pid} 2>/dev/null; then
+  echo "$(date '+%Y-%m-%d %H:%M:%S %z') WARNING [admin.restart] old process did not exit after timeout; forcing stop" >> {log_file}
+  kill -KILL {current_pid} 2>/dev/null || true
+  sleep 1
+fi
+nohup {uvicorn_cmd} main:app --host 0.0.0.0 --port 8000 >> {log_file} 2>&1 &
+echo $! > {pid_file}
+echo "$(date '+%Y-%m-%d %H:%M:%S %z') INFO [admin.restart] restarted; new_pid=$(cat {pid_file})" >> {log_file}
+"""
 
 def _build_user_prompt(contact_name: str, current_status: str = "auto") -> Tuple[str, str]:
     """未提供 ocr_text 时：仅截图场景，服务端不做 OCR，用占位描述发给智能体。"""
@@ -330,6 +383,23 @@ async def api_get_admin_status(limit: int = 200, username: str = Depends(verify_
         "log_file": log_stat,
         "logs": _read_recent_log_lines(log_path, limit),
     }
+
+
+@app.post("/api/admin/restart")
+async def api_restart_service(username: str = Depends(verify_admin)):
+    log_path = BASE_DIR / os.environ.get("APP_LOG_FILE", "log.txt")
+    pid_path = BASE_DIR / "uvicorn.pid"
+    current_pid = os.getpid()
+    script = _build_restart_script(current_pid, log_path, pid_path)
+    logger.warning("管理员 %s 请求重启 FastAPI 服务，当前 PID=%s", username, current_pid)
+    subprocess.Popen(
+        ["/bin/bash", "-lc", script],
+        cwd=BASE_DIR,
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return {"ok": True, "message": "FastAPI 重启已触发，请稍后刷新状态", "old_pid": current_pid}
 
 
 @app.get("/admin", response_class=HTMLResponse)

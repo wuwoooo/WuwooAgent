@@ -87,6 +87,10 @@
                         <p class="text-xs text-slate-500 mt-1">显示当前进程状态、运行时长和最近服务日志</p>
                     </div>
                     <div class="flex items-center gap-2">
+                        <button @click="restartService" :disabled="isRestarting"
+                                class="text-xs bg-rose-100 text-rose-600 px-3 py-1.5 rounded-full hover:bg-rose-200 transition font-bold disabled:opacity-60">
+                            <i class="fa-solid fa-power-off mr-1" :class="{'fa-spin': isRestarting}"></i>{{ isRestarting ? '重启中...' : '重启 FastAPI' }}
+                        </button>
                         <button @click="fetchServiceStatus" class="text-xs bg-indigo-100 text-indigo-600 px-3 py-1.5 rounded-full hover:bg-indigo-200 transition font-bold">
                             <i class="fa-solid fa-rotate-right mr-1" :class="{'fa-spin': isLoadingStatus}"></i>刷新
                         </button>
@@ -138,6 +142,7 @@
                             <h3 class="font-bold text-slate-700"><i class="fa-solid fa-terminal text-slate-400 mr-2"></i>最近日志</h3>
                             <span class="text-xs text-slate-400">{{ serviceStatus?.logs?.length || 0 }} 行</span>
                         </div>
+                        <p class="text-xs text-slate-400 mb-2">旧日志可能没有时间戳；服务用新版代码重启后，新写入日志会带北京时间。</p>
                         <pre class="bg-slate-950 text-slate-100 rounded-2xl p-4 overflow-auto text-xs leading-5 max-h-[42vh] whitespace-pre-wrap">{{ (serviceStatus?.logs || []).join('\n') || '暂无日志' }}</pre>
                     </div>
                 </div>
@@ -339,6 +344,7 @@
                 const showStatusPanel = ref(false);
                 const serviceStatus = ref(null);
                 const isLoadingStatus = ref(false);
+                const isRestarting = ref(false);
                 const statusError = ref('');
 
                 // Audio Context for Alerts
@@ -472,6 +478,34 @@
                 const openStatusPanel = async () => {
                     showStatusPanel.value = true;
                     await fetchServiceStatus();
+                };
+
+                const restartService = async () => {
+                    if (isRestarting.value) return;
+                    if (!confirm('确定要重启 FastAPI 服务吗？重启期间会有几秒钟不可用。')) return;
+                    isRestarting.value = true;
+                    statusError.value = '';
+                    try {
+                        const res = await fetch('/api/admin/restart', {
+                            method: 'POST',
+                            headers: getAuthHeaders()
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if (res.ok && data.ok) {
+                            statusError.value = '重启已触发，正在等待服务恢复...';
+                            setTimeout(fetchServiceStatus, 5000);
+                            setTimeout(fetchServiceStatus, 10000);
+                        } else if (res.status === 401) {
+                            triggerLogin();
+                        } else {
+                            statusError.value = data.error || `重启接口返回异常：HTTP ${res.status}`;
+                        }
+                    } catch(e) {
+                        console.error('重启服务失败', e);
+                        statusError.value = '重启请求发送失败，请稍后手动刷新确认服务状态。';
+                    } finally {
+                        setTimeout(() => { isRestarting.value = false; }, 10000);
+                    }
                 };
 
                 const fetchSessions = async () => {
@@ -668,6 +702,7 @@
                     showStatusPanel,
                     serviceStatus,
                     isLoadingStatus,
+                    isRestarting,
                     statusError,
                     handleLogin,
                     formatTime,
@@ -675,6 +710,7 @@
                     fetchSessions,
                     fetchServiceStatus,
                     openStatusPanel,
+                    restartService,
                     selectSession,
                     extractProfile,
                     getPreferencesList,
