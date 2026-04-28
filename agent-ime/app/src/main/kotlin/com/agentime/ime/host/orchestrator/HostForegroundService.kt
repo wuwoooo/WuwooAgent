@@ -172,7 +172,11 @@ class HostForegroundService : Service() {
                     )
                     if (shouldSkipBecauseLatestVisibleIsOutbound(cap, inboundCandidate)) {
                         val currentOutboundText = cap.latestOutboundCropPath?.let { ocr.recognize(it).trim() } ?: ""
-                        if (currentOutboundText.isNotEmpty() && currentOutboundText != lastReportedOutboundText) {
+                        val lastReplyForCompare = prefsReply.getString("last_reply_text", "").orEmpty()
+                        // 判断 outbound 文本是否为 AI 自动发出的回复（与上次 AI 回复高度相似时跳过上报）
+                        val looksLikeAiReply = lastReplyForCompare.isNotBlank() &&
+                            ConversationTextExtractor.looksLikeAgentReplyCandidate(currentOutboundText, lastReplyForCompare)
+                        if (currentOutboundText.isNotEmpty() && currentOutboundText != lastReportedOutboundText && !looksLikeAiReply) {
                             val agentClient = HttpAgentClient(this@HostForegroundService)
                             val sessionId = SessionIdentity.buildSessionId(this@HostForegroundService, contactName)
                             try {
@@ -182,6 +186,9 @@ class HostForegroundService : Service() {
                             } catch (e: Exception) {
                                 logger.log(TAG, "同步真人介入状态失败: ${e.message}")
                             }
+                        } else if (looksLikeAiReply) {
+                            lastReportedOutboundText = currentOutboundText
+                            logger.log(TAG, "检测到 outbound 文本与 AI 上次回复高度相似，跳过真人介入上报")
                         }
                         cleanupIntermediateOcrCrops(cap, inboundCandidate.path)
                         logger.log(TAG, "截图分析结果：当前聊天页最新可见消息疑似己方发送，且未检测到己方之后新入站，跳过本轮")
@@ -312,7 +319,10 @@ class HostForegroundService : Service() {
             )
             if (shouldSkipBecauseLatestVisibleIsOutbound(postClickCap, inboundCandidate)) {
                 val currentOutboundText = postClickCap.latestOutboundCropPath?.let { ocr.recognize(it).trim() } ?: ""
-                if (currentOutboundText.isNotEmpty() && currentOutboundText != lastReportedOutboundText) {
+                // 判断 outbound 文本是否为 AI 自动发出的回复（与上次 AI 回复高度相似时跳过上报）
+                val looksLikeAiReply = lastReplyText.isNotBlank() &&
+                    ConversationTextExtractor.looksLikeAgentReplyCandidate(currentOutboundText, lastReplyText)
+                if (currentOutboundText.isNotEmpty() && currentOutboundText != lastReportedOutboundText && !looksLikeAiReply) {
                     val agentClient = HttpAgentClient(this@HostForegroundService)
                     val sessionId = SessionIdentity.buildSessionId(this@HostForegroundService, contactName)
                     try {
@@ -322,6 +332,9 @@ class HostForegroundService : Service() {
                     } catch (e: Exception) {
                         logger.log(TAG, "同步真人介入状态失败: ${e.message}")
                     }
+                } else if (looksLikeAiReply) {
+                    lastReportedOutboundText = currentOutboundText
+                    logger.log(TAG, "检测到 outbound 文本与 AI 上次回复高度相似，跳过真人介入上报")
                 }
                 cleanupIntermediateOcrCrops(postClickCap, inboundCandidate.path)
                 logger.log(TAG, "点击进入聊天后，最新可见消息疑似己方发送，且未检测到己方之后新入站，取消本轮")
@@ -579,6 +592,9 @@ class HostForegroundService : Service() {
                     .putString("last_inbound_signature", inboundSignature)
                     .putString("last_reply_text", reply.replyText)
                     .apply()
+                // 将 AI 自动发出的回复记录到 lastReportedOutboundText，
+                // 防止后续截屏检测时将 AI 回复误判为真人手动介入。
+                lastReportedOutboundText = reply.replyText
                 moveState(HostState.SENT, "发送完成")
                 // 发送后先在当前会话内快速探测一次：若对方又发了新消息，先不返回列表页，
                 // 直接触发一次会话内补扫，避免“返回后无红点导致漏处理”。

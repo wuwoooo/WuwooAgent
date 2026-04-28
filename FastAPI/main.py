@@ -168,14 +168,18 @@ async def wechat_chat(
         current_status = "auto"
         
     if is_human_reply:
-        # 真人发出了回复
+        # 真人客服发出了回复
         pure_user_text = (ocr_text or "").strip()
         if pure_user_text:
             try:
                 # 记录真人的回复，role为assistant，表示我方发出的消息
                 database.save_message(session_id, contact_name, "assistant", pure_user_text)
-                # 将状态更新为彻底静音，这样后续再有用户消息，Agent也不会回复了
-                database.update_session_status(session_id, "silence")
+                # 状态流转：
+                #   auto    + is_human_reply → takeover（真人介入，AI 静音）
+                #   manual  + is_human_reply → takeover（从"请求接管"推进到"正在接管"）
+                #   takeover + is_human_reply → 保持 takeover（已在接管中，无需变更）
+                if current_status != "takeover":
+                    database.update_session_status(session_id, "takeover")
             except Exception:
                 pass
         
@@ -185,8 +189,8 @@ async def wechat_chat(
             "reply_text": "",
         }
 
-    if current_status == "silence":
-        # 如果是彻底静音状态，直接返回空
+    if current_status == "takeover":
+        # 真人客服正在接管中，AI 完全静音，不生成回复
         return {
             "ok": True,
             "messages": [{"role": "assistant", "text": ""}],
