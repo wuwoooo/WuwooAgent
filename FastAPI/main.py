@@ -22,8 +22,9 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, status, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.security import HTTPBasic, HTTPBasicCredentials, HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from adp_client import load_adp_config_from_env, run_adp_chat
 from volc_knowledge_client import run_volc_knowledge_chat
@@ -79,6 +80,7 @@ except Exception:
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 security = HTTPBasic()
+agent_security = HTTPBearer(auto_error=False)
 
 def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
     admin_user = os.environ.get("ADMIN_USER", "admin").strip()
@@ -94,6 +96,47 @@ def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
             headers={"WWW-Authenticate": "CustomBasic"},
         )
     return credentials.username
+
+
+def verify_agent(credentials: HTTPAuthorizationCredentials | None = Depends(agent_security)):
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="请先登录 Agent 账号",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    agent = database.get_agent_by_token(credentials.credentials)
+    if not agent:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Agent 登录已失效或账号已禁用",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return agent
+
+
+class AgentLoginRequest(BaseModel):
+    username: str
+    password: str
+    device_id: str = ""
+
+
+class AdminAgentCreateRequest(BaseModel):
+    username: str
+    password: str
+    display_name: str = ""
+    note: str = ""
+
+
+class AdminAgentUpdateRequest(BaseModel):
+    display_name: str
+    status: str = "active"
+    note: str = ""
+
+
+class AdminAgentPasswordRequest(BaseModel):
+    password: str
 
 
 def get_current_time_str() -> str:
@@ -210,6 +253,19 @@ def _provider_from_env() -> str:
     return (os.environ.get("CHAT_PROVIDER", "volc_knowledge").strip() or "volc_knowledge").lower()
 
 
+@app.post("/api/agent/login")
+async def api_agent_login(payload: AgentLoginRequest):
+    agent = database.authenticate_agent(payload.username, payload.password, payload.device_id)
+    if not agent:
+        return JSONResponse(
+            status_code=401,
+            content={"ok": False, "error": "用户名或密码错误，或账号已被禁用"},
+        )
+    token = agent.pop("access_token")
+    return {"ok": True, "access_token": token, "agent": agent}
+
+
+@app.post("/api/wechat/chat")
 @app.post("/wechat/chat")
 async def wechat_chat(
     session_id: str = Form(...),
@@ -217,6 +273,7 @@ async def wechat_chat(
     ocr_text: Optional[str] = Form(None),
     image: Optional[UploadFile] = File(default=None),
     is_human_reply: bool = Form(False),
+    agent: dict = Depends(verify_agent),
 ):
     """接收本地 OCR 文本（推荐）或截图（兼容），返回 reply_text。
 
@@ -249,14 +306,16 @@ async def wechat_chat(
         dest = UPLOAD_DIR / safe_name
         dest.write_bytes(image_bytes)
 
+    agent_id = int(agent["id"])
     raw_session_id = session_id
     raw_contact_name = contact_name
     contact_name = database.canonicalize_contact_name(contact_name)
     try:
-        session_id = database.resolve_session_id(session_id, contact_name)
+        session_id = database.resolve_session_id(session_id, contact_name, agent_id=agent_id)
         if session_id != raw_session_id:
             logger.info(
-                "复用规范化联系人已有会话: raw_session_id=%s resolved_session_id=%s raw_contact=%s canonical_contact=%s",
+                "复用规范化联系人已有会话: agent_id=%s raw_session_id=%s resolved_session_id=%s raw_contact=%s canonical_contact=%s",
+                agent_id,
                 raw_session_id,
                 session_id,
                 raw_contact_name,
@@ -277,9 +336,10 @@ async def wechat_chat(
         if pure_user_text:
             try:
                 # 记录真人的回复，role为assistant，表示我方发出的消息
-                database.save_message(session_id, contact_name, "assistant", pure_user_text)
+                database.save_message(session_id, contact_name, "assistant", pure_user_text, agent_id=agent_id)
                 logger.info(
-                    "记录真人回复，不自动切换接管状态: session_id=%s contact=%s status=%s text=%s",
+                    "记录真人回复，不自动切换接管状态: agent_id=%s session_id=%s contact=%s status=%s text=%s",
+                    agent_id,
                     session_id,
                     contact_name,
                     current_status,
@@ -301,7 +361,7 @@ async def wechat_chat(
         pure_user_text = (ocr_text or "").strip()
         if pure_user_text:
             try:
-                database.save_message(session_id, contact_name, "user", pure_user_text)
+                database.save_message(session_id, contact_name, "user", pure_user_text, agent_id=agent_id)
             except Exception as e:
                 logger.warning(
                     "静音期间保存客户消息失败: session_id=%s contact=%s status=%s error=%s",
@@ -377,20 +437,23 @@ async def wechat_chat(
     if "[HANDOFF]" in reply_text:
         reply_text = reply_text.replace("[HANDOFF]", "").strip()
         try:
-            database.update_session_status(session_id, "handoff_requested")
+            database.update_session_status(session_id, "handoff_requested", agent_id=agent_id)
         except Exception:
             pass
 
     # Save messages to database and trigger async profile check
     try:
-        database.save_message(session_id, contact_name, "user", pure_user_text)
-        database.save_message(session_id, contact_name, "assistant", reply_text)
+        database.save_message(session_id, contact_name, "user", pure_user_text, agent_id=agent_id)
+        database.save_message(session_id, contact_name, "assistant", reply_text, agent_id=agent_id)
         asyncio.create_task(check_and_trigger_profile_update(session_id))
     except Exception as e:
         pass # Ignore db errors to not fail the main chat
 
     return {
         "ok": True,
+        "agent_id": agent_id,
+        "agent_display_name": agent.get("display_name") or agent.get("username"),
+        "session_id": session_id,
         "messages": messages,
         "reply_text": reply_text,
     }
@@ -450,8 +513,8 @@ async def get_admin_page():
     return html_path.read_text(encoding="utf-8")
 
 @app.get("/api/admin/sessions")
-async def api_get_sessions(username: str = Depends(verify_admin)):
-    return database.get_all_sessions()
+async def api_get_sessions(agent_id: Optional[int] = None, username: str = Depends(verify_admin)):
+    return database.get_all_sessions(agent_id=agent_id)
 
 @app.get("/api/admin/sessions/{session_id}")
 async def api_get_session_detail(session_id: str, username: str = Depends(verify_admin)):
@@ -459,6 +522,48 @@ async def api_get_session_detail(session_id: str, username: str = Depends(verify
     messages = database.get_session_messages(session_id)
     profile = database.get_session_profile(session_id)
     return {"session": session, "messages": messages, "profile": profile}
+
+
+@app.get("/api/admin/agents")
+async def api_admin_list_agents(username: str = Depends(verify_admin)):
+    return database.list_agents()
+
+
+@app.post("/api/admin/agents")
+async def api_admin_create_agent(payload: AdminAgentCreateRequest, username: str = Depends(verify_admin)):
+    try:
+        agent = database.create_agent(
+            username=payload.username,
+            password=payload.password,
+            display_name=payload.display_name,
+            note=payload.note,
+        )
+        logger.info("管理员 %s 创建 Agent 账号: agent_id=%s username=%s", username, agent.get("id"), agent.get("username"))
+        return {"ok": True, "agent": agent}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"ok": False, "error": str(e)})
+
+
+@app.put("/api/admin/agents/{agent_id}")
+async def api_admin_update_agent(agent_id: int, payload: AdminAgentUpdateRequest, username: str = Depends(verify_admin)):
+    try:
+        agent = database.update_agent(agent_id, payload.display_name, payload.status, payload.note)
+        if not agent:
+            return JSONResponse(status_code=404, content={"ok": False, "error": "Agent 不存在"})
+        logger.info("管理员 %s 更新 Agent 账号: agent_id=%s status=%s", username, agent_id, payload.status)
+        return {"ok": True, "agent": agent}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"ok": False, "error": str(e)})
+
+
+@app.post("/api/admin/agents/{agent_id}/password")
+async def api_admin_set_agent_password(agent_id: int, payload: AdminAgentPasswordRequest, username: str = Depends(verify_admin)):
+    try:
+        database.set_agent_password(agent_id, payload.password)
+        logger.info("管理员 %s 重置 Agent 密码并清空旧 token: agent_id=%s", username, agent_id)
+        return {"ok": True}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"ok": False, "error": str(e)})
 
 @app.post("/api/admin/sessions/{session_id}/profile")
 async def api_extract_profile(session_id: str, username: str = Depends(verify_admin)):
@@ -480,8 +585,6 @@ async def api_delete_session(session_id: str, username: str = Depends(verify_adm
 async def api_delete_message(message_id: int, username: str = Depends(verify_admin)):
     database.delete_message(message_id)
     return {"ok": True}
-
-from pydantic import BaseModel
 
 class StatusUpdate(BaseModel):
     status: str

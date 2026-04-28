@@ -69,8 +69,7 @@ class WechatNotificationListenerService : NotificationListenerService() {
 
         logger.log(TAG, "捕获微信通知：title=$title text=${text.take(40)}")
         if (WechatAccessibilityService.isLikelyOnChatPage()) {
-            logger.log(TAG, "当前已处于微信聊天页，跳过通知点击以避免切换到其它会话：$title")
-            triggerCurrentPageScan("notification_chat_page_skip")
+            logger.log(TAG, "当前已处于微信聊天页，忽略通知触发以避免通知横幅干扰识别或切换会话：$title")
             return
         }
 
@@ -106,18 +105,6 @@ class WechatNotificationListenerService : NotificationListenerService() {
             }
             logger.log(TAG, "已根据微信通知触发 runOnce: $sessionId/$title")
         }, 1800L)
-    }
-
-    private fun triggerCurrentPageScan(source: String) {
-        val intent = Intent(this, HostForegroundService::class.java).apply {
-            action = HostForegroundService.ACTION_SCAN_CONVERSATION_LIST
-            putExtra(HostForegroundService.EXTRA_SCAN_SOURCE, source)
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
-        }
     }
 
     companion object {

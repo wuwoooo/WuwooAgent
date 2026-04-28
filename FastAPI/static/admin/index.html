@@ -149,6 +149,69 @@
             </div>
         </div>
 
+        <!-- Agent 账号管理弹窗 -->
+        <div v-if="showAgentPanel" class="fixed inset-0 z-40 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-6">
+            <div class="bg-white rounded-3xl shadow-2xl w-full max-w-5xl max-h-[88vh] flex flex-col overflow-hidden border border-white/60">
+                <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+                    <div>
+                        <h2 class="text-lg font-black text-slate-800"><i class="fa-solid fa-users-gear text-indigo-500 mr-2"></i>Agent 身份管理</h2>
+                        <p class="text-xs text-slate-500 mt-1">后台创建用户名/密码，手机端登录后会话自动归属到对应 Agent。</p>
+                    </div>
+                    <button @click="showAgentPanel = false" class="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500">
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
+                </div>
+
+                <div class="p-6 overflow-y-auto grid md:grid-cols-[320px_1fr] gap-5">
+                    <form @submit.prevent="createAgent" class="space-y-3 p-4 rounded-2xl bg-slate-50 border border-slate-100">
+                        <h3 class="font-bold text-slate-700">新建 Agent 账号</h3>
+                        <input v-model="agentForm.username" required class="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" placeholder="用户名，例如 guide_zhangsan">
+                        <input v-model="agentForm.display_name" class="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" placeholder="显示名称，例如 张三导游">
+                        <input v-model="agentForm.password" required type="password" class="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" placeholder="初始密码">
+                        <textarea v-model="agentForm.note" class="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" rows="3" placeholder="备注，可选"></textarea>
+                        <button :disabled="isSavingAgent" class="w-full py-2.5 rounded-xl bg-indigo-600 text-white font-bold hover:bg-indigo-700 disabled:opacity-60">
+                            {{ isSavingAgent ? '保存中...' : '创建账号' }}
+                        </button>
+                    </form>
+
+                    <div class="space-y-3">
+                        <div v-if="agents.length === 0" class="p-8 text-center text-slate-400 rounded-2xl border border-dashed border-slate-200">
+                            暂无 Agent 账号，请先创建。
+                        </div>
+                        <div v-for="agent in agents" :key="agent.id" class="p-4 rounded-2xl border border-slate-100 bg-white shadow-sm">
+                            <div class="flex items-start justify-between gap-3">
+                                <div>
+                                    <div class="flex items-center gap-2">
+                                        <span class="font-black text-slate-800">{{ agent.display_name || agent.username }}</span>
+                                        <span class="text-xs px-2 py-0.5 rounded-full" :class="agent.status === 'active' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'">
+                                            {{ agent.status === 'active' ? '启用' : '禁用' }}
+                                        </span>
+                                    </div>
+                                    <p class="text-xs text-slate-400 mt-1">@{{ agent.username }} · {{ agent.session_count || 0 }} 个会话</p>
+                                    <p class="text-xs text-slate-500 mt-1">最近登录：{{ formatTime(agent.last_login_at) || '暂无' }}；最近活跃：{{ formatTime(agent.last_seen_at) || '暂无' }}</p>
+                                    <p v-if="agent.note" class="text-xs text-slate-500 mt-1">{{ agent.note }}</p>
+                                </div>
+                                <div class="flex flex-wrap justify-end gap-2">
+                                    <button @click="selectAgentFilter(agent.id)" class="text-xs bg-indigo-100 text-indigo-600 px-3 py-1.5 rounded-full hover:bg-indigo-200 font-bold">
+                                        查看会话
+                                    </button>
+                                    <button @click="toggleAgentStatus(agent)" class="text-xs px-3 py-1.5 rounded-full font-bold" :class="agent.status === 'active' ? 'bg-slate-100 text-slate-600 hover:bg-slate-200' : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'">
+                                        {{ agent.status === 'active' ? '禁用' : '启用' }}
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="mt-3 flex gap-2">
+                                <input v-model="agent.newPassword" type="password" class="flex-1 px-3 py-2 rounded-xl border border-slate-200 text-sm" placeholder="输入新密码后可重置">
+                                <button @click="resetAgentPassword(agent)" class="text-xs bg-amber-100 text-amber-700 px-3 py-1.5 rounded-xl hover:bg-amber-200 font-bold">
+                                    重置密码
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- 左侧：会话列表 -->
         <div class="w-80 bg-white border-r border-slate-200 flex flex-col shadow-sm z-10">
             <div class="p-4 bg-indigo-600 text-white flex items-center justify-between shadow-md">
@@ -167,6 +230,18 @@
                 </div>
                 <p class="text-[11px] text-emerald-600 mt-1 truncate">点击查看最近日志和进程信息</p>
             </button>
+            <div class="mx-3 mb-3 p-3 rounded-2xl border border-indigo-100 bg-indigo-50">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-sm font-bold text-indigo-700"><i class="fa-solid fa-user-shield mr-1"></i>Agent 身份</span>
+                    <button @click="openAgentPanel" class="text-xs text-indigo-600 hover:text-indigo-800 font-bold">管理</button>
+                </div>
+                <select v-model="selectedAgentId" @change="onAgentFilterChange" class="w-full px-3 py-2 rounded-xl border border-indigo-100 bg-white text-sm text-slate-700 outline-none">
+                    <option value="">全部 Agent</option>
+                    <option v-for="agent in agents" :key="agent.id" :value="String(agent.id)">
+                        {{ agent.display_name || agent.username }}
+                    </option>
+                </select>
+            </div>
             
             <div class="flex-1 overflow-y-auto p-2 space-y-2">
                 <div v-if="sessions.length === 0" class="text-center text-slate-400 mt-10">
@@ -200,6 +275,9 @@
                     </div>
                     <div class="mt-2 flex items-center justify-between">
                         <span class="text-xs px-2 py-0.5 bg-slate-100 rounded-full text-slate-500">{{ session.msg_count }} 条记录</span>
+                        <span class="text-xs px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full truncate max-w-[120px]">
+                            {{ session.agent_display_name || session.agent_username || '未归属' }}
+                        </span>
                         <span v-if="session.profile_json" class="text-xs px-2 py-0.5 bg-green-100 text-green-700 rounded-full">
                             <i class="fa-solid fa-check mr-1"></i>已画像
                         </span>
@@ -215,6 +293,9 @@
                 <div class="h-14 border-b border-slate-200 bg-white/80 flex items-center px-6 shadow-sm backdrop-blur-md justify-between">
                     <div class="flex items-center">
                         <h2 class="text-lg font-semibold text-slate-700">跟进记录：{{ currentSession.contact_name }}</h2>
+                        <span class="ml-3 text-xs px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full">
+                            {{ currentSession.agent_display_name || currentSession.agent_username || '未归属' }}
+                        </span>
                         <span v-if="currentSession.status && currentSession.status !== 'auto'" :class="statusBadgeClass(currentSession.status)" class="ml-3">
                             {{ statusLabel(currentSession.status) }}
                         </span>
@@ -355,6 +436,11 @@
                 const isLoadingStatus = ref(false);
                 const isRestarting = ref(false);
                 const statusError = ref('');
+                const agents = ref([]);
+                const selectedAgentId = ref(localStorage.getItem('selected_agent_id') || '');
+                const showAgentPanel = ref(false);
+                const isSavingAgent = ref(false);
+                const agentForm = ref({ username: '', display_name: '', password: '', note: '' });
 
                 // Audio Context for Alerts
                 let audioCtx = null;
@@ -439,6 +525,7 @@
                             loginAnimate.value = false;
                             setTimeout(() => { showLogin.value = false; }, 500); 
                             initAudio(); // Initialize audio on login interaction
+                            fetchAgents();
                             fetchSessions();
                             fetchServiceStatus();
                         } else {
@@ -507,6 +594,131 @@
                     await fetchServiceStatus();
                 };
 
+                const openAgentPanel = async () => {
+                    showAgentPanel.value = true;
+                    await fetchAgents();
+                };
+
+                const fetchAgents = async () => {
+                    if (showLogin.value) return;
+                    try {
+                        const res = await fetch('/api/admin/agents', { headers: getAuthHeaders() });
+                        if (res.ok) {
+                            agents.value = await res.json();
+                        } else if (res.status === 401) {
+                            triggerLogin();
+                        }
+                    } catch (e) {
+                        console.error('获取 Agent 列表失败', e);
+                    }
+                };
+
+                const createAgent = async () => {
+                    if (isSavingAgent.value) return;
+                    isSavingAgent.value = true;
+                    try {
+                        const res = await fetch('/api/admin/agents', {
+                            method: 'POST',
+                            headers: {
+                                ...getAuthHeaders(),
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify(agentForm.value)
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if (res.ok && data.ok) {
+                            agentForm.value = { username: '', display_name: '', password: '', note: '' };
+                            await fetchAgents();
+                        } else if (res.status === 401) {
+                            triggerLogin();
+                        } else {
+                            alert(data.error || '创建 Agent 失败');
+                        }
+                    } catch (e) {
+                        console.error('创建 Agent 失败', e);
+                        alert('创建 Agent 请求失败');
+                    } finally {
+                        isSavingAgent.value = false;
+                    }
+                };
+
+                const toggleAgentStatus = async (agent) => {
+                    const nextStatus = agent.status === 'active' ? 'disabled' : 'active';
+                    try {
+                        const res = await fetch(`/api/admin/agents/${agent.id}`, {
+                            method: 'PUT',
+                            headers: {
+                                ...getAuthHeaders(),
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                display_name: agent.display_name || agent.username,
+                                status: nextStatus,
+                                note: agent.note || ''
+                            })
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if (res.ok && data.ok) {
+                            await fetchAgents();
+                            await fetchSessions();
+                        } else if (res.status === 401) {
+                            triggerLogin();
+                        } else {
+                            alert(data.error || '更新 Agent 状态失败');
+                        }
+                    } catch (e) {
+                        console.error('更新 Agent 状态失败', e);
+                    }
+                };
+
+                const resetAgentPassword = async (agent) => {
+                    const password = (agent.newPassword || '').trim();
+                    if (!password) {
+                        alert('请先输入新密码');
+                        return;
+                    }
+                    if (!confirm(`确定要重置 ${agent.display_name || agent.username} 的密码吗？旧登录凭证会失效。`)) return;
+                    try {
+                        const res = await fetch(`/api/admin/agents/${agent.id}/password`, {
+                            method: 'POST',
+                            headers: {
+                                ...getAuthHeaders(),
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({ password })
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if (res.ok && data.ok) {
+                            agent.newPassword = '';
+                            alert('密码已重置');
+                        } else if (res.status === 401) {
+                            triggerLogin();
+                        } else {
+                            alert(data.error || '重置密码失败');
+                        }
+                    } catch (e) {
+                        console.error('重置密码失败', e);
+                    }
+                };
+
+                const selectAgentFilter = async (agentId) => {
+                    selectedAgentId.value = String(agentId);
+                    localStorage.setItem('selected_agent_id', selectedAgentId.value);
+                    showAgentPanel.value = false;
+                    currentSession.value = null;
+                    messages.value = [];
+                    profile.value = null;
+                    await fetchSessions();
+                };
+
+                const onAgentFilterChange = () => {
+                    localStorage.setItem('selected_agent_id', selectedAgentId.value || '');
+                    currentSession.value = null;
+                    messages.value = [];
+                    profile.value = null;
+                    fetchSessions();
+                };
+
                 const restartService = async () => {
                     if (isRestarting.value) return;
                     if (!confirm('确定要重启 FastAPI 服务吗？重启期间会有几秒钟不可用。')) return;
@@ -538,7 +750,8 @@
                 const fetchSessions = async () => {
                     if (showLogin.value) return; // Don't fetch if login is shown
                     try {
-                        const res = await fetch('/api/admin/sessions', { headers: getAuthHeaders() });
+                        const query = selectedAgentId.value ? `?agent_id=${encodeURIComponent(selectedAgentId.value)}` : '';
+                        const res = await fetch(`/api/admin/sessions${query}`, { headers: getAuthHeaders() });
                         if(res.ok) {
                             const newSessions = await res.json();
                             
@@ -708,6 +921,7 @@
                     // Make sure audio is initialized on first user interaction anywhere on the document
                     document.addEventListener('click', initAudio, { once: true });
                     
+                    fetchAgents();
                     fetchSessions();
                     fetchServiceStatus();
                     // Optional polling
@@ -736,12 +950,24 @@
                     isLoadingStatus,
                     isRestarting,
                     statusError,
+                    agents,
+                    selectedAgentId,
+                    showAgentPanel,
+                    isSavingAgent,
+                    agentForm,
                     handleLogin,
                     formatTime,
                     formatFileSize,
                     fetchSessions,
                     fetchServiceStatus,
                     openStatusPanel,
+                    openAgentPanel,
+                    fetchAgents,
+                    createAgent,
+                    toggleAgentStatus,
+                    resetAgentPassword,
+                    selectAgentFilter,
+                    onAgentFilterChange,
                     restartService,
                     selectSession,
                     extractProfile,

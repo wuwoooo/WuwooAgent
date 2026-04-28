@@ -35,6 +35,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var captureProviderView: TextView
     private lateinit var executionModeView: TextView
     private lateinit var backendStatusView: TextView
+    private lateinit var agentAuthStatusView: TextView
     private lateinit var currentStatusView: TextView
     private lateinit var accessibilityStatusView: TextView
     private lateinit var imeStatusView: TextView
@@ -43,6 +44,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var advancedLayout: LinearLayout
     private lateinit var toggleAdvancedButton: Button
     private lateinit var runButton: Button
+    private lateinit var agentLoginButton: Button
+    private lateinit var agentLogoutButton: Button
     private lateinit var projectionButton: Button
     private lateinit var accessibilityButton: Button
     private lateinit var imeButton: Button
@@ -81,10 +84,13 @@ class MainActivity : ComponentActivity() {
         val sessionInput = findViewById<EditText>(R.id.inputSessionId)
         val contactInput = findViewById<EditText>(R.id.inputContactName)
         val endpointInput = findViewById<EditText>(R.id.inputAgentEndpoint)
+        val usernameInput = findViewById<EditText>(R.id.inputAgentUsername)
+        val passwordInput = findViewById<EditText>(R.id.inputAgentPassword)
         logView = findViewById(R.id.textLog)
         captureProviderView = findViewById(R.id.textCaptureProvider)
         executionModeView = findViewById(R.id.textExecutionMode)
         backendStatusView = findViewById(R.id.textBackendStatus)
+        agentAuthStatusView = findViewById(R.id.textAgentAuthStatus)
         currentStatusView = findViewById(R.id.textCurrentStatus)
         accessibilityStatusView = findViewById(R.id.textAccessibilityStatus)
         imeStatusView = findViewById(R.id.textImeStatus)
@@ -93,6 +99,8 @@ class MainActivity : ComponentActivity() {
         advancedLayout = findViewById(R.id.layoutAdvanced)
         toggleAdvancedButton = findViewById(R.id.btnToggleAdvanced)
         runButton = findViewById(R.id.btnStartRunOnce)
+        agentLoginButton = findViewById(R.id.btnAgentLogin)
+        agentLogoutButton = findViewById(R.id.btnAgentLogout)
         projectionButton = findViewById(R.id.btnGrantProjection)
         accessibilityButton = findViewById(R.id.btnAccessibilitySettings)
         imeButton = findViewById(R.id.btnImeSettings)
@@ -113,6 +121,60 @@ class MainActivity : ComponentActivity() {
                 .orEmpty()
                 .ifBlank { HttpAgentClient.DEFAULT_ENDPOINT },
         )
+        usernameInput.setText(prefs.getString("agent_username", "").orEmpty())
+
+        agentLoginButton.setOnClickListener {
+            val endpoint = endpointInput.text?.toString().orEmpty().trim().ifBlank { HttpAgentClient.DEFAULT_ENDPOINT }
+            val username = usernameInput.text?.toString().orEmpty().trim()
+            val password = passwordInput.text?.toString().orEmpty()
+            if (username.isBlank() || password.isBlank()) {
+                Toast.makeText(this, "请输入 Agent 用户名和密码", Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
+
+            agentLoginButton.isEnabled = false
+            agentAuthStatusView.text = "Agent 账号：正在登录..."
+            Thread {
+                try {
+                    val result = HttpAgentClient.login(this, endpoint, username, password)
+                    runOnUiThread {
+                        passwordInput.setText("")
+                        Toast.makeText(this, "已登录：${result.displayName}", Toast.LENGTH_SHORT).show()
+                        logger.log("MainActivity", "Agent 登录成功：${result.displayName}")
+                        refreshBackendStatus()
+                        refreshAgentAuthStatus()
+                        refreshGuideStatus()
+                        refreshCapabilityStatus()
+                        logView.text = logger.readRecent()
+                    }
+                } catch (e: Exception) {
+                    runOnUiThread {
+                        Toast.makeText(this, "Agent 登录失败：${e.message}", Toast.LENGTH_LONG).show()
+                        logger.log("MainActivity", "Agent 登录失败：${e.message}")
+                        refreshAgentAuthStatus()
+                        logView.text = logger.readRecent()
+                    }
+                } finally {
+                    runOnUiThread {
+                        agentLoginButton.isEnabled = true
+                    }
+                }
+            }.start()
+        }
+
+        agentLogoutButton.setOnClickListener {
+            prefs.edit()
+                .remove("agent_access_token")
+                .remove("agent_id")
+                .remove("agent_display_name")
+                .apply()
+            Toast.makeText(this, "已退出 Agent 账号", Toast.LENGTH_SHORT).show()
+            logger.log("MainActivity", "已退出 Agent 账号")
+            refreshAgentAuthStatus()
+            refreshGuideStatus()
+            refreshCapabilityStatus()
+            logView.text = logger.readRecent()
+        }
 
         toggleAdvancedButton.setOnClickListener {
             val expanded = advancedLayout.visibility == View.VISIBLE
@@ -300,6 +362,7 @@ class MainActivity : ComponentActivity() {
         refreshCaptureProviderStatus()
         refreshExecutionModeStatus()
         refreshBackendStatus()
+        refreshAgentAuthStatus()
         refreshGuideStatus()
         refreshCapabilityStatus()
         logView.text = logger.readRecent()
@@ -310,6 +373,7 @@ class MainActivity : ComponentActivity() {
         refreshCaptureProviderStatus()
         refreshExecutionModeStatus()
         refreshBackendStatus()
+        refreshAgentAuthStatus()
         refreshGuideStatus()
         refreshCapabilityStatus()
         logView.text = logger.readRecent()
@@ -347,13 +411,33 @@ class MainActivity : ComponentActivity() {
             }
     }
 
+    private fun refreshAgentAuthStatus() {
+        val prefs = getSharedPreferences("host_config", MODE_PRIVATE)
+        val token = prefs.getString("agent_access_token", "").orEmpty()
+        val displayName = prefs.getString("agent_display_name", "").orEmpty()
+        val username = prefs.getString("agent_username", "").orEmpty()
+        val agentId = prefs.getInt("agent_id", 0)
+        val loggedIn = token.isNotBlank()
+        agentAuthStatusView.text =
+            if (loggedIn) {
+                "Agent 账号：已登录 ${displayName.ifBlank { username }}（ID: $agentId）"
+            } else {
+                "Agent 账号：未登录，请使用后台创建的用户名/密码登录"
+            }
+        agentAuthStatusView.setTextColor(Color.parseColor(if (loggedIn) "#FF1B5E20" else "#FF795548"))
+        agentAuthStatusView.setBackgroundColor(Color.parseColor(if (loggedIn) "#FFF1F8E9" else "#FFFFF8E1"))
+    }
+
     private fun refreshGuideStatus() {
         val prefs = getSharedPreferences("host_config", MODE_PRIVATE)
         val mode = prefs
             .getString("execution_mode", "auto")
             .orEmpty()
         val endpoint = prefs.getString("agent_chat_endpoint", "").orEmpty().trim()
+        val loggedIn = prefs.getString("agent_access_token", "").orEmpty().isNotBlank()
+        val agentName = prefs.getString("agent_display_name", "").orEmpty()
         val endpointText = if (endpoint.isBlank()) "默认地址" else "已配置"
+        val agentText = if (loggedIn) agentName.ifBlank { "已登录" } else "未登录"
         val modeText = if (mode == "manual") "手动模式" else "自动模式"
         val notifyAutoEnabled = prefs.getBoolean("notification_auto_enabled", false)
         val foregroundAutoEnabled = prefs.getBoolean("foreground_auto_enabled", false)
@@ -363,6 +447,7 @@ class MainActivity : ComponentActivity() {
             if (running) {
                 "当前状态：正在运行中\n" +
                     "• 执行模式：$modeText\n" +
+                    "• Agent 账号：$agentText\n" +
                     "• 后端接口：$endpointText\n" +
                     "• 前台聊天触发：" + if (foregroundAutoEnabled) "已开启" else "未开启" + "\n" +
                     "• 后台通知触发：" + if (notifyAutoEnabled) "已开启" else "未开启" + "\n" +
@@ -370,6 +455,7 @@ class MainActivity : ComponentActivity() {
             } else {
                 "当前状态：" + if (readiness.readyToRun) "已就绪，可以开始运行" else "尚未就绪" + "\n" +
                     "• 执行模式：$modeText\n" +
+                    "• Agent 账号：$agentText\n" +
                     "• 后端接口：$endpointText\n" +
                     "• 提示：把下面所有红叉项处理成绿勾后，再点击“开始运行”"
             }
@@ -438,6 +524,7 @@ class MainActivity : ComponentActivity() {
 
     private fun computeReadiness(): Readiness {
         val prefs = getSharedPreferences("host_config", MODE_PRIVATE)
+        val agentLoggedIn = prefs.getString("agent_access_token", "").orEmpty().isNotBlank()
         val projectionReady = ProjectionPermissionStore.hasPermission()
         val accessibilityConnected = com.agentime.ime.host.automation.WechatAccessibilityService
             .getForegroundDebugInfo()
@@ -452,6 +539,7 @@ class MainActivity : ComponentActivity() {
             (foregroundAutoEnabled && accessibilityConnected) ||
                 (notifyAutoEnabled && notifyPermission && notifyConnected)
         val firstBlockingReason = when {
+            !agentLoggedIn -> "请先登录 Agent 账号"
             !projectionReady -> "请先完成截图授权"
             !accessibilityConnected -> "请先连接无障碍服务"
             !imeEnabled -> "请先把默认输入法切换为 Agent IME"
@@ -459,9 +547,10 @@ class MainActivity : ComponentActivity() {
             else -> null
         }
         return Readiness(
-            readyToRun = projectionReady && accessibilityConnected && imeEnabled && triggerReady,
+            readyToRun = agentLoggedIn && projectionReady && accessibilityConnected && imeEnabled && triggerReady,
             firstBlockingReason = firstBlockingReason,
             blockingStep = when {
+                !agentLoggedIn -> BlockingStep.AGENT_LOGIN
                 !projectionReady -> BlockingStep.PROJECTION
                 !accessibilityConnected -> BlockingStep.ACCESSIBILITY
                 !imeEnabled -> BlockingStep.IME
@@ -488,6 +577,7 @@ class MainActivity : ComponentActivity() {
 
         val all = listOf(
             projectionButton,
+            agentLoginButton,
             accessibilityButton,
             imeButton,
             notificationButton,
@@ -499,6 +589,7 @@ class MainActivity : ComponentActivity() {
             it.setTextColor(normalText)
         }
         val target = when (step) {
+            BlockingStep.AGENT_LOGIN -> agentLoginButton
             BlockingStep.PROJECTION -> projectionButton
             BlockingStep.ACCESSIBILITY -> accessibilityButton
             BlockingStep.IME -> imeButton
@@ -528,6 +619,7 @@ class MainActivity : ComponentActivity() {
     )
 
     private enum class BlockingStep {
+        AGENT_LOGIN,
         PROJECTION,
         ACCESSIBILITY,
         IME,

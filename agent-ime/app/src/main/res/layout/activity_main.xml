@@ -29,6 +29,48 @@
             android:textSize="14sp" />
 
         <TextView
+            android:id="@+id/textAgentAuthStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:background="#FFFFF8E1"
+            android:padding="12dp"
+            android:text="Agent 账号：未登录"
+            android:textColor="#FF795548"
+            android:textSize="13sp" />
+
+        <EditText
+            android:id="@+id/inputAgentUsername"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:hint="Agent 用户名"
+            android:singleLine="true" />
+
+        <EditText
+            android:id="@+id/inputAgentPassword"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:hint="Agent 密码"
+            android:inputType="textPassword"
+            android:singleLine="true" />
+
+        <Button
+            android:id="@+id/btnAgentLogin"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="登录 Agent 账号" />
+
+        <Button
+            android:id="@+id/btnAgentLogout"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="退出当前 Agent 账号" />
+
+        <TextView
             android:id="@+id/textCurrentStatus"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

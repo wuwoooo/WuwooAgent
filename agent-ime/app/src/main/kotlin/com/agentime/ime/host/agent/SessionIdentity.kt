@@ -10,7 +10,7 @@ object SessionIdentity {
 
     private var cachedDeviceId: String? = null
 
-    private fun getDeviceId(context: Context): String {
+    fun getDeviceId(context: Context): String {
         cachedDeviceId?.let { return it }
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         var id = prefs.getString(KEY_DEVICE_ID, null)
