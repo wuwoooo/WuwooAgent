@@ -7,6 +7,7 @@ import java.util.UUID
 object SessionIdentity {
     private const val PREFS_NAME = "agent_identity_prefs"
     private const val KEY_DEVICE_ID = "device_id"
+    private val transientWechatTitleTokens = setOf("对方正在输入", "正在输入")
 
     private var cachedDeviceId: String? = null
 
@@ -42,6 +43,7 @@ object SessionIdentity {
             .trim()
 
         if (normalized.isBlank()) return "当前联系人"
+        if (isTransientContactTitle(normalized)) return "当前联系人"
 
         while (true) {
             val before = normalized
@@ -49,9 +51,20 @@ object SessionIdentity {
             normalized = removeTrailingEmojiCodePoints(normalized).trim()
             if (normalized == before) break
             if (normalized.isBlank()) return "当前联系人"
+            if (isTransientContactTitle(normalized)) return "当前联系人"
         }
 
         return normalized.ifBlank { "当前联系人" }
+    }
+
+    internal fun isTransientContactTitle(raw: String?): Boolean {
+        val normalized = raw.orEmpty()
+            .replace("（", "(")
+            .replace("）", ")")
+            .replace(Regex("""\s+"""), "")
+            .replace(Regex("""[.。…:：,，;；!！?？~～-]+$"""), "")
+            .trim()
+        return normalized in transientWechatTitleTokens
     }
 
     private fun removeTrailingEmojiPlaceholder(value: String): String {

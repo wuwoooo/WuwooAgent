@@ -9,66 +9,105 @@
         android:layout_height="wrap_content"
         android:orientation="vertical">
 
-        <TextView
-            android:id="@+id/textGuideTitle"
+        <LinearLayout
+            android:id="@+id/layoutLoginPanel"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Wuwoo Agent"
-            android:textColor="#FF102027"
-            android:textSize="22sp"
-            android:textStyle="bold" />
+            android:background="#FFFFFFFF"
+            android:elevation="2dp"
+            android:orientation="vertical"
+            android:padding="20dp">
 
-        <TextView
-            android:id="@+id/textGuideSummary"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:lineSpacingExtra="2dp"
-            android:text="先把下面的红叉项全部处理完成；全部就绪后，点击“开始运行”，App 会切到微信并进入自动监听状态。"
-            android:textColor="#FF455A64"
-            android:textSize="14sp" />
+            <TextView
+                android:id="@+id/textGuideTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:text="Wuwoo Agent"
+                android:textColor="#FF102027"
+                android:textSize="24sp"
+                android:textStyle="bold" />
 
-        <TextView
-            android:id="@+id/textAgentAuthStatus"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:background="#FFFFF8E1"
-            android:padding="12dp"
-            android:text="Agent 账号：未登录"
-            android:textColor="#FF795548"
-            android:textSize="13sp" />
+            <TextView
+                android:id="@+id/textGuideSummary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center"
+                android:lineSpacingExtra="2dp"
+                android:text="请输入后台创建的 Agent 账号。登录成功后才能进入运行与权限设置。"
+                android:textColor="#FF607D8B"
+                android:textSize="14sp" />
 
-        <EditText
-            android:id="@+id/inputAgentUsername"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:hint="Agent 用户名"
-            android:singleLine="true" />
+            <TextView
+                android:id="@+id/textLoginStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                android:background="#FFFFF8E1"
+                android:padding="12dp"
+                android:text="Agent 账号：未登录"
+                android:textColor="#FF795548"
+                android:textSize="13sp" />
 
-        <EditText
-            android:id="@+id/inputAgentPassword"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:hint="Agent 密码"
-            android:inputType="textPassword"
-            android:singleLine="true" />
+            <EditText
+                android:id="@+id/inputAgentUsername"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:hint="Agent 用户名"
+                android:singleLine="true" />
 
-        <Button
-            android:id="@+id/btnAgentLogin"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="登录 Agent 账号" />
+            <EditText
+                android:id="@+id/inputAgentPassword"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:hint="Agent 密码"
+                android:inputType="textPassword"
+                android:singleLine="true" />
 
-        <Button
-            android:id="@+id/btnAgentLogout"
+            <EditText
+                android:id="@+id/inputAgentEndpoint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:hint="后端接口地址（通常无需修改）"
+                android:inputType="textUri"
+                android:singleLine="true" />
+
+            <Button
+                android:id="@+id/btnAgentLogin"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:text="登录 Agent 账号" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/layoutMainContent"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:text="退出当前 Agent 账号" />
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/textAgentAuthStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="#FFF1F8E9"
+                android:padding="12dp"
+                android:text="Agent 账号：已登录"
+                android:textColor="#FF1B5E20"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/btnAgentLogout"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="退出当前 Agent 账号" />
 
         <TextView
             android:id="@+id/textCurrentStatus"
@@ -233,21 +272,12 @@
                 android:hint="contact_name（可选）"
                 android:singleLine="true" />
 
-            <EditText
-                android:id="@+id/inputAgentEndpoint"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:hint="后端接口地址（agent_chat_endpoint）"
-                android:inputType="textUri"
-                android:singleLine="true" />
-
             <TextView
                 android:id="@+id/textAdvancedHint"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
-                android:text="session/contact 一般可留空；后端默认接口已经内置，通常不需要改。"
+                android:text="session/contact 一般可留空；后端接口地址在登录页配置，通常不需要改。"
                 android:textColor="#FF607D8B"
                 android:textSize="12sp" />
 
@@ -325,6 +355,7 @@
                 android:textColor="#FF263238"
                 android:textSize="12sp"
                 android:textIsSelectable="true" />
+        </LinearLayout>
         </LinearLayout>
 
         <TextView

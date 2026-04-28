@@ -1,6 +1,7 @@
 package com.agentime.ime.host.automation
 
 import android.graphics.BitmapFactory
+import com.agentime.ime.host.agent.SessionIdentity
 
 object ConversationListUnreadDetector {
     data class ChatPageAnalysis(
@@ -424,6 +425,7 @@ object ConversationListUnreadDetector {
                     fileSizeRegex.matches(line) ||
                     attachmentNameRegex.matches(line) ||
                     fullTimestampRegex.matches(line) ||
+                    SessionIdentity.isTransientContactTitle(line) ||
                     line.length < 2 ||
                     line.length > 24 ||
                     !contactLikeCharRegex.containsMatchIn(line) ||

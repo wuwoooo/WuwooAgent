@@ -36,12 +36,15 @@ class MainActivity : ComponentActivity() {
     private lateinit var executionModeView: TextView
     private lateinit var backendStatusView: TextView
     private lateinit var agentAuthStatusView: TextView
+    private lateinit var loginStatusView: TextView
     private lateinit var currentStatusView: TextView
     private lateinit var accessibilityStatusView: TextView
     private lateinit var imeStatusView: TextView
     private lateinit var notificationStatusView: TextView
     private lateinit var foregroundAutoStatusView: TextView
     private lateinit var advancedLayout: LinearLayout
+    private lateinit var loginPanel: LinearLayout
+    private lateinit var mainContentLayout: LinearLayout
     private lateinit var toggleAdvancedButton: Button
     private lateinit var runButton: Button
     private lateinit var agentLoginButton: Button
@@ -91,12 +94,15 @@ class MainActivity : ComponentActivity() {
         executionModeView = findViewById(R.id.textExecutionMode)
         backendStatusView = findViewById(R.id.textBackendStatus)
         agentAuthStatusView = findViewById(R.id.textAgentAuthStatus)
+        loginStatusView = findViewById(R.id.textLoginStatus)
         currentStatusView = findViewById(R.id.textCurrentStatus)
         accessibilityStatusView = findViewById(R.id.textAccessibilityStatus)
         imeStatusView = findViewById(R.id.textImeStatus)
         notificationStatusView = findViewById(R.id.textNotificationStatus)
         foregroundAutoStatusView = findViewById(R.id.textForegroundAutoStatus)
         advancedLayout = findViewById(R.id.layoutAdvanced)
+        loginPanel = findViewById(R.id.layoutLoginPanel)
+        mainContentLayout = findViewById(R.id.layoutMainContent)
         toggleAdvancedButton = findViewById(R.id.btnToggleAdvanced)
         runButton = findViewById(R.id.btnStartRunOnce)
         agentLoginButton = findViewById(R.id.btnAgentLogin)
@@ -133,7 +139,7 @@ class MainActivity : ComponentActivity() {
             }
 
             agentLoginButton.isEnabled = false
-            agentAuthStatusView.text = "Agent 账号：正在登录..."
+            loginStatusView.text = "Agent 账号：正在登录..."
             Thread {
                 try {
                     val result = HttpAgentClient.login(this, endpoint, username, password)
@@ -418,6 +424,16 @@ class MainActivity : ComponentActivity() {
         val username = prefs.getString("agent_username", "").orEmpty()
         val agentId = prefs.getInt("agent_id", 0)
         val loggedIn = token.isNotBlank()
+        loginPanel.visibility = if (loggedIn) View.GONE else View.VISIBLE
+        mainContentLayout.visibility = if (loggedIn) View.VISIBLE else View.GONE
+        loginStatusView.text =
+            if (loggedIn) {
+                "Agent 账号：已登录 ${displayName.ifBlank { username }}（ID: $agentId）"
+            } else {
+                "Agent 账号：未登录，请输入后台创建的用户名和密码"
+            }
+        loginStatusView.setTextColor(Color.parseColor(if (loggedIn) "#FF1B5E20" else "#FF795548"))
+        loginStatusView.setBackgroundColor(Color.parseColor(if (loggedIn) "#FFF1F8E9" else "#FFFFF8E1"))
         agentAuthStatusView.text =
             if (loggedIn) {
                 "Agent 账号：已登录 ${displayName.ifBlank { username }}（ID: $agentId）"
