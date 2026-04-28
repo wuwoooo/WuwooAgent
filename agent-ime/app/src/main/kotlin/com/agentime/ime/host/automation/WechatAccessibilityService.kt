@@ -258,6 +258,48 @@ class WechatAccessibilityService : AccessibilityService() {
             return findLikelyChatTitle(root)
         }
 
+        fun isLikelyOnChatPage(): Boolean {
+            val svc = instance ?: return false
+            val root = svc.rootInActiveWindow ?: return false
+            if (root.packageName?.toString() != WECHAT_PACKAGE) return false
+
+            val screen = Rect().also { root.getBoundsInScreen(it) }
+            val height = screen.height().coerceAtLeast(1)
+            var inputSignalCount = 0
+            var bottomTabHitCount = 0
+            var hasTopBackSignal = false
+            val bottomTabs = setOf("微信", "通讯录", "发现", "我")
+            val inputSignals = listOf("按住说话", "切换到键盘", "切换到语音", "表情", "更多功能")
+
+            fun walk(node: AccessibilityNodeInfo?) {
+                if (node == null) return
+                val label = listOf(
+                    node.text?.toString()?.trim().orEmpty(),
+                    node.contentDescription?.toString()?.trim().orEmpty(),
+                ).filter { it.isNotBlank() }.joinToString(" ")
+                if (label.isNotBlank()) {
+                    val bounds = Rect().also { node.getBoundsInScreen(it) }
+                    if (bounds.top < height * 0.18f && label.contains("返回")) {
+                        hasTopBackSignal = true
+                    }
+                    if (bounds.top > height * 0.72f && inputSignals.any { label.contains(it) }) {
+                        inputSignalCount += 1
+                    }
+                    if (bounds.top > height * 0.72f && bottomTabs.any { it == label }) {
+                        bottomTabHitCount += 1
+                    }
+                }
+                for (i in 0 until node.childCount) {
+                    walk(node.getChild(i))
+                }
+            }
+
+            walk(root)
+            return inputSignalCount > 0 &&
+                bottomTabHitCount < 2 &&
+                (hasTopBackSignal || !findLikelyChatTitle(root).isNullOrBlank())
+        }
+
         fun onRuntimeEnabledChanged(enabled: Boolean) {
             val svc = instance ?: return
             Handler(Looper.getMainLooper()).post {

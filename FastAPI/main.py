@@ -248,6 +248,23 @@ async def wechat_chat(
         safe_name = (image.filename or "upload.bin").replace("/", "_")[:200]
         dest = UPLOAD_DIR / safe_name
         dest.write_bytes(image_bytes)
+
+    raw_session_id = session_id
+    raw_contact_name = contact_name
+    contact_name = database.canonicalize_contact_name(contact_name)
+    try:
+        session_id = database.resolve_session_id(session_id, contact_name)
+        if session_id != raw_session_id:
+            logger.info(
+                "复用规范化联系人已有会话: raw_session_id=%s resolved_session_id=%s raw_contact=%s canonical_contact=%s",
+                raw_session_id,
+                session_id,
+                raw_contact_name,
+                contact_name,
+            )
+    except Exception as e:
+        logger.warning("联系人会话归一化失败，沿用客户端 session_id: session_id=%s error=%s", raw_session_id, e)
+        session_id = raw_session_id
         
     try:
         current_status = database.get_session_status(session_id)

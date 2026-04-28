@@ -2,6 +2,7 @@ import sqlite3
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 import json
+import re
 from datetime import datetime, timezone, timedelta
 
 def get_beijing_time() -> str:
@@ -19,6 +20,27 @@ LEGACY_STATUS_MAP = {
 }
 
 VALID_SESSION_STATUSES = {"auto", "handoff_requested", "human_takeover", "muted"}
+
+TRAILING_EMOJI_RE = re.compile(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\u200D\uFE0F\U000E0020-\U000E007F]+$")
+TRAILING_EMOJI_PLACEHOLDER_RE = re.compile(r"\s*[\[(](?:表情|动画表情|emoji)[\])]$", re.IGNORECASE)
+
+
+def canonicalize_contact_name(raw: str | None, default: str = "客户") -> str:
+    """去掉联系人名尾部的装饰 emoji，避免同一客户被拆成多个会话。"""
+    normalized = (raw or "").replace("（", "(").replace("）", ")").strip()
+    if not normalized:
+        return default
+
+    while True:
+        before = normalized
+        normalized = TRAILING_EMOJI_PLACEHOLDER_RE.sub("", normalized).rstrip()
+        normalized = TRAILING_EMOJI_RE.sub("", normalized).strip()
+        if normalized == before:
+            break
+        if not normalized:
+            return default
+
+    return normalized or default
 
 
 def normalize_session_status(status: str | None) -> str:
@@ -65,9 +87,57 @@ def get_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
+
+def resolve_session_id(session_id: str, contact_name: str) -> str:
+    """优先复用同一规范化联系人已有的后端会话，兼容旧客户端的不同 session_id。"""
+    incoming_session_id = (session_id or "").strip()
+    canonical_name = canonicalize_contact_name(contact_name)
+    if not incoming_session_id:
+        return incoming_session_id
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT contact_name FROM sessions WHERE session_id = ?", (incoming_session_id,))
+        exact_row = cursor.fetchone()
+
+        if canonical_name not in {"客户", "当前联系人"}:
+            cursor.execute("SELECT session_id, contact_name FROM sessions ORDER BY updated_at DESC")
+            matching_rows = [
+                row
+                for row in cursor.fetchall()
+                if canonicalize_contact_name(row["contact_name"]) == canonical_name
+            ]
+            preferred_row = next(
+                (row for row in matching_rows if row["contact_name"] == canonical_name),
+                matching_rows[0] if matching_rows else None,
+            )
+            if preferred_row:
+                if preferred_row["contact_name"] != canonical_name:
+                    cursor.execute(
+                        "UPDATE sessions SET contact_name = ? WHERE session_id = ?",
+                        (canonical_name, preferred_row["session_id"]),
+                    )
+                    conn.commit()
+                return preferred_row["session_id"]
+
+        if exact_row:
+            if exact_row["contact_name"] != canonical_name:
+                cursor.execute(
+                    "UPDATE sessions SET contact_name = ? WHERE session_id = ?",
+                    (canonical_name, incoming_session_id),
+                )
+                conn.commit()
+            return incoming_session_id
+    finally:
+        conn.close()
+
+    return incoming_session_id
+
 def save_message(session_id: str, contact_name: str, role: str, content: str):
     conn = get_connection()
     cursor = conn.cursor()
+    contact_name = canonicalize_contact_name(contact_name)
     
     # Ensure session exists
     now_bj = get_beijing_time()

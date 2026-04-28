@@ -67,13 +67,19 @@ class WechatNotificationListenerService : NotificationListenerService() {
             .putLong(PREF_LAST_NOTIFY_TS, now)
             .apply()
 
+        logger.log(TAG, "捕获微信通知：title=$title text=${text.take(40)}")
+        if (WechatAccessibilityService.isLikelyOnChatPage()) {
+            logger.log(TAG, "当前已处于微信聊天页，跳过通知点击以避免切换到其它会话：$title")
+            triggerCurrentPageScan("notification_chat_page_skip")
+            return
+        }
+
         val contentIntent = sbn.notification.contentIntent
         if (contentIntent == null) {
             logger.log(TAG, "微信通知缺少 contentIntent，无法自动打开会话：$title")
             return
         }
 
-        logger.log(TAG, "捕获微信通知：title=$title text=${text.take(40)}")
         runCatching { contentIntent.send() }
             .onFailure {
                 logger.log(TAG, "打开微信通知会话失败：${it.message}")
@@ -100,6 +106,18 @@ class WechatNotificationListenerService : NotificationListenerService() {
             }
             logger.log(TAG, "已根据微信通知触发 runOnce: $sessionId/$title")
         }, 1800L)
+    }
+
+    private fun triggerCurrentPageScan(source: String) {
+        val intent = Intent(this, HostForegroundService::class.java).apply {
+            action = HostForegroundService.ACTION_SCAN_CONVERSATION_LIST
+            putExtra(HostForegroundService.EXTRA_SCAN_SOURCE, source)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
     }
 
     companion object {

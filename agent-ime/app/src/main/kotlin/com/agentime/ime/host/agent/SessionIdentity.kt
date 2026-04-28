@@ -2,7 +2,6 @@ package com.agentime.ime.host.agent
 
 import android.content.Context
 import java.security.MessageDigest
-import java.util.Locale
 import java.util.UUID
 
 object SessionIdentity {
@@ -36,17 +35,72 @@ object SessionIdentity {
         return dp[a.length][b.length]
     }
 
+    internal fun canonicalizeContactName(raw: String?): String {
+        var normalized = raw.orEmpty()
+            .replace("（", "(")
+            .replace("）", ")")
+            .trim()
+
+        if (normalized.isBlank()) return "当前联系人"
+
+        while (true) {
+            val before = normalized
+            normalized = removeTrailingEmojiPlaceholder(normalized)
+            normalized = removeTrailingEmojiCodePoints(normalized).trim()
+            if (normalized == before) break
+            if (normalized.isBlank()) return "当前联系人"
+        }
+
+        return normalized.ifBlank { "当前联系人" }
+    }
+
+    private fun removeTrailingEmojiPlaceholder(value: String): String {
+        return value
+            .replace(Regex("""\s*[\[(](?:表情|动画表情|emoji|Emoji|EMOJI)[\])]$"""), "")
+            .trimEnd()
+    }
+
+    private fun removeTrailingEmojiCodePoints(value: String): String {
+        var end = value.length
+        while (end > 0) {
+            val codePoint = value.codePointBefore(end)
+            if (!isTrailingEmojiPart(codePoint)) break
+            end -= Character.charCount(codePoint)
+        }
+        return value.substring(0, end)
+    }
+
+    private fun isTrailingEmojiPart(codePoint: Int): Boolean {
+        return codePoint == 0x200D ||
+            codePoint == 0xFE0F ||
+            codePoint in 0x1F000..0x1FAFF ||
+            codePoint in 0x2600..0x27BF ||
+            codePoint in 0xE0020..0xE007F
+    }
+
     fun normalizeContactName(
         context: Context,
         raw: String?,
         useFuzzyMatch: Boolean = true,
     ): String {
-        val trimmed = raw.orEmpty().trim().ifBlank { "当前联系人" }
+        val trimmed = canonicalizeContactName(raw)
         if (trimmed == "当前联系人") return trimmed
 
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val knownContactsStr = prefs.getString("known_contacts_list", "") ?: ""
-        val knownNames = if (knownContactsStr.isEmpty()) mutableSetOf<String>() else knownContactsStr.split(",,").toMutableSet()
+        val knownNames = if (knownContactsStr.isEmpty()) {
+            mutableSetOf()
+        } else {
+            knownContactsStr
+                .split(",,")
+                .map { canonicalizeContactName(it) }
+                .filter { it != "当前联系人" }
+                .toMutableSet()
+        }
+        val canonicalKnownContactsStr = knownNames.joinToString(",,")
+        if (canonicalKnownContactsStr != knownContactsStr) {
+            prefs.edit().putString("known_contacts_list", canonicalKnownContactsStr).apply()
+        }
 
         if (knownNames.contains(trimmed)) {
             return trimmed
@@ -92,7 +146,7 @@ object SessionIdentity {
             val bytes = md.digest(hashStr.toByteArray())
             bytes.joinToString("") { "%02x".format(it) }
         } catch (e: Exception) {
-            // Fallback just in case MD5 is unavailable (unlikely)
+            // 极少数情况下 MD5 不可用时，仍然生成一个稳定的本机会话标识。
             hashStr.hashCode().toString(16).trim('-')
         }
         

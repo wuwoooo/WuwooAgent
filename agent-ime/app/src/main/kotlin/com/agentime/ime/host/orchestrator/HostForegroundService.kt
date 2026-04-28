@@ -154,6 +154,7 @@ class HostForegroundService : Service() {
                     )
                     if (contactName.isBlank() || contactName == "当前联系人") {
                         logger.log(TAG, "截图分析结果：当前是聊天页，但联系人识别无效，跳过本轮")
+                        returnToConversationList("聊天页联系人识别无效")
                         return
                     }
                     val lastReplyText = prefsReply.getString("last_reply_text", "").orEmpty()
@@ -192,6 +193,7 @@ class HostForegroundService : Service() {
                         }
                         cleanupIntermediateOcrCrops(cap, inboundCandidate.path)
                         logger.log(TAG, "截图分析结果：当前聊天页最新可见消息疑似己方发送，且未检测到己方之后新入站，跳过本轮")
+                        returnToConversationList("聊天页最新消息非客户新消息")
                         return
                     }
                     inboundCandidate.path?.let {
@@ -204,15 +206,18 @@ class HostForegroundService : Service() {
                     logger.log(TAG, "截图分析聊天页最新客户消息预判: ${latestInbound.take(120)}")
                     if (latestInbound.isBlank()) {
                         logger.log(TAG, "截图分析结果：当前是聊天页，但未提取到有效客户新消息，跳过本轮")
+                        returnToConversationList("聊天页未提取到有效客户新消息")
                         return
                     }
                     if (ConversationTextExtractor.looksLikeAgentReplyCandidate(latestInbound, lastReplyText)) {
                         logger.log(TAG, "截图分析结果：当前提取文本疑似我方上一条回复或客服话术，跳过本轮")
+                        returnToConversationList("聊天页提取文本疑似我方回复")
                         return
                     }
                     val lastInboundSignature = prefsReply.getString("last_inbound_signature", "").orEmpty()
                     if (inboundSignature.isNotBlank() && inboundSignature == lastInboundSignature) {
                         logger.log(TAG, "截图分析结果：当前是聊天页，但客户最新消息未变化，跳过本轮")
+                        returnToConversationList("聊天页客户最新消息未变化")
                         return
                     }
                     logger.log(TAG, "截图分析结果：当前是聊天页，source=$scanSource，检测到客户新消息，直接复用本轮截图进入回复流程，联系人=$contactName")
@@ -289,6 +294,7 @@ class HostForegroundService : Service() {
             )
             if (contactName.isBlank() || contactName == "当前联系人") {
                 logger.log(TAG, "点击未读会话后，联系人绑定置信度不足，取消本轮（避免串会话）")
+                returnToConversationList("点击后联系人绑定置信度不足")
                 return
             }
             if (listRowContactHint.isNotBlank() &&
@@ -338,6 +344,7 @@ class HostForegroundService : Service() {
                 }
                 cleanupIntermediateOcrCrops(postClickCap, inboundCandidate.path)
                 logger.log(TAG, "点击进入聊天后，最新可见消息疑似己方发送，且未检测到己方之后新入站，取消本轮")
+                returnToConversationList("点击进入后最新消息非客户新消息")
                 return
             }
             inboundCandidate.path?.let {
@@ -350,15 +357,18 @@ class HostForegroundService : Service() {
             logger.log(TAG, "点击进入聊天后最新客户消息预判: ${latestInbound.take(120)}")
             if (latestInbound.isBlank()) {
                 logger.log(TAG, "点击进入聊天后，未提取到有效客户新消息，取消本轮")
+                returnToConversationList("点击进入后未提取到有效客户新消息")
                 return
             }
             if (ConversationTextExtractor.looksLikeAgentReplyCandidate(latestInbound, lastReplyText)) {
                 logger.log(TAG, "点击进入聊天后，提取文本疑似我方上一条回复或客服话术，取消本轮")
+                returnToConversationList("点击进入后提取文本疑似我方回复")
                 return
             }
             val lastInboundSignature = prefsReply.getString("last_inbound_signature", "").orEmpty()
             if (inboundSignature.isNotBlank() && inboundSignature == lastInboundSignature) {
                 logger.log(TAG, "点击进入聊天后，客户最新消息未变化，取消本轮")
+                returnToConversationList("点击进入后客户最新消息未变化")
                 return
             }
             runOnce(
@@ -561,6 +571,7 @@ class HostForegroundService : Service() {
             if (inboundSignature.isNotBlank() && inboundSignature == lastInboundSignature) {
                 logger.log(TAG, "检测到最近客户消息未变化，跳过本轮回复")
                 moveState(HostState.SENT, "最近客户消息未变化，已跳过")
+                returnToConversationList("最近客户消息未变化")
                 return
             }
 
@@ -571,6 +582,7 @@ class HostForegroundService : Service() {
                 if (reply.silenced) {
                     logger.log(TAG, "后端会话处于静音状态，跳过本轮注入: status=${reply.currentStatus} reason=${reply.reason}")
                     moveState(HostState.SENT, "后端会话静音，已跳过: ${reply.currentStatus.ifBlank { reply.reason }}")
+                    returnToConversationList("后端会话静音或人工接管")
                     return
                 }
                 logger.log(TAG, "Agent 返回空 reply_text，raw=${reply.raw.take(500)}")
@@ -946,6 +958,17 @@ class HostForegroundService : Service() {
         mainHandler.postDelayed({
             io.execute { scanConversationListAndRun(scanSource = nextSource) }
         }, delayMs)
+    }
+
+    private fun returnToConversationList(reason: String, scheduleFollowup: Boolean = true) {
+        val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
+        if (prefs.getString("execution_mode", "auto").orEmpty() != "auto") return
+        Thread.sleep(500)
+        val backOk = com.agentime.ime.host.automation.WechatAccessibilityService.clickBack()
+        logger.log(TAG, "跳过当前会话后返回会话列表: reason=$reason result=$backOk")
+        if (backOk && scheduleFollowup) {
+            schedulePostSendFollowupScan("skip_chat_return")
+        }
     }
 
     private fun scheduleUrgentChatFollowupScan() {
