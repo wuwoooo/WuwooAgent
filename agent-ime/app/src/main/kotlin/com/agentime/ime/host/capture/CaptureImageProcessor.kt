@@ -640,7 +640,8 @@ object CaptureImageProcessor {
         if (width < 80 || height < 120) return "unknown"
 
         val searchTop = (height * 0.10f).toInt().coerceAtLeast(0)
-        val searchBottom = (height * 0.90f).toInt().coerceAtMost(height)
+        // 微信输入栏已在 chatCrop 外侧，这里放宽到底部以覆盖贴近输入栏的最后一条短消息。
+        val searchBottom = (height * 0.985f).toInt().coerceAtMost(height)
         if (searchBottom - searchTop < 40) return "unknown"
 
         fun isNearWhite(pixel: Int): Boolean {

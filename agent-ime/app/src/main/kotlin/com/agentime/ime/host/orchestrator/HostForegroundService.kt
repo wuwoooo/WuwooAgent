@@ -853,8 +853,14 @@ class HostForegroundService : Service() {
     ): Boolean {
         val latestSide = cap.latestVisibleMessageSide.orEmpty()
         if (latestSide != "outbound") return false
-        // 防误触发优先：当“最新可见消息”仍是己方时，一律不自动回复。
-        // 若对方真有新消息，应在下一次页面变化中表现为 latestSide=inbound 再触发。
+        if (
+            cap.hasInboundAfterLatestOutbound &&
+            candidate.text.isNotBlank() &&
+            candidate.sourceLabel.orEmpty().contains("我方最后一条之后会话区")
+        ) {
+            return false
+        }
+        // 防误触发优先：当“最新可见消息”仍是己方且没有可信的己方之后入站时，不自动回复。
         return true
     }
 
