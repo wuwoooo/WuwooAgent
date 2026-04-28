@@ -513,8 +513,13 @@ async def get_admin_page():
     return html_path.read_text(encoding="utf-8")
 
 @app.get("/api/admin/sessions")
-async def api_get_sessions(agent_id: Optional[int] = None, username: str = Depends(verify_admin)):
-    return database.get_all_sessions(agent_id=agent_id)
+async def api_get_sessions(
+    agent_id: Optional[int] = None,
+    limit: int = 50,
+    offset: int = 0,
+    username: str = Depends(verify_admin),
+):
+    return database.get_all_sessions(agent_id=agent_id, limit=limit, offset=offset)
 
 @app.get("/api/admin/sessions/{session_id}")
 async def api_get_session_detail(session_id: str, username: str = Depends(verify_admin)):

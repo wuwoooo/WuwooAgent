@@ -284,6 +284,21 @@
                     </div>
                 </div>
             </div>
+            <div class="border-t border-slate-100 p-3 bg-white">
+                <div class="text-xs text-slate-400 text-center mb-2">
+                    第 {{ currentPage }} 页 · 共 {{ sessionTotal }} 个会话
+                </div>
+                <div class="flex gap-2">
+                    <button @click="prevSessionPage" :disabled="sessionOffset === 0"
+                            class="flex-1 py-2 rounded-xl bg-slate-100 text-slate-600 text-xs font-bold hover:bg-slate-200 disabled:opacity-40">
+                        上一页
+                    </button>
+                    <button @click="nextSessionPage" :disabled="!sessionHasMore"
+                            class="flex-1 py-2 rounded-xl bg-indigo-100 text-indigo-600 text-xs font-bold hover:bg-indigo-200 disabled:opacity-40">
+                        下一页
+                    </button>
+                </div>
+            </div>
         </div>
 
         <!-- 中间：聊天记录 -->
@@ -414,11 +429,16 @@
     </div>
 
     <script>
-        const { createApp, ref, onMounted, nextTick } = Vue;
+        const { createApp, ref, computed, onMounted, nextTick } = Vue;
 
         createApp({
             setup() {
                 const sessions = ref([]);
+                const sessionLimit = 50;
+                const sessionOffset = ref(0);
+                const sessionTotal = ref(0);
+                const sessionHasMore = ref(false);
+                const currentPage = computed(() => Math.floor(sessionOffset.value / sessionLimit) + 1);
                 const currentSession = ref(null);
                 const messages = ref([]);
                 const profile = ref(null);
@@ -704,6 +724,7 @@
                 const selectAgentFilter = async (agentId) => {
                     selectedAgentId.value = String(agentId);
                     localStorage.setItem('selected_agent_id', selectedAgentId.value);
+                    sessionOffset.value = 0;
                     showAgentPanel.value = false;
                     currentSession.value = null;
                     messages.value = [];
@@ -713,6 +734,7 @@
 
                 const onAgentFilterChange = () => {
                     localStorage.setItem('selected_agent_id', selectedAgentId.value || '');
+                    sessionOffset.value = 0;
                     currentSession.value = null;
                     messages.value = [];
                     profile.value = null;
@@ -750,10 +772,20 @@
                 const fetchSessions = async () => {
                     if (showLogin.value) return; // Don't fetch if login is shown
                     try {
-                        const query = selectedAgentId.value ? `?agent_id=${encodeURIComponent(selectedAgentId.value)}` : '';
+                        const params = new URLSearchParams({
+                            limit: String(sessionLimit),
+                            offset: String(sessionOffset.value)
+                        });
+                        if (selectedAgentId.value) {
+                            params.set('agent_id', selectedAgentId.value);
+                        }
+                        const query = `?${params.toString()}`;
                         const res = await fetch(`/api/admin/sessions${query}`, { headers: getAuthHeaders() });
                         if(res.ok) {
-                            const newSessions = await res.json();
+                            const data = await res.json();
+                            const newSessions = Array.isArray(data) ? data : (data.items || []);
+                            sessionTotal.value = Array.isArray(data) ? newSessions.length : (data.total || 0);
+                            sessionHasMore.value = Array.isArray(data) ? false : !!data.has_more;
                             
                             // 仅对 Agent 主动请求人工关注的会话播放提醒。
                             let shouldAlert = false;
@@ -781,6 +813,24 @@
                     } catch(e) {
                         console.error('获取列表失败', e);
                     }
+                };
+
+                const prevSessionPage = () => {
+                    if (sessionOffset.value === 0) return;
+                    sessionOffset.value = Math.max(0, sessionOffset.value - sessionLimit);
+                    currentSession.value = null;
+                    messages.value = [];
+                    profile.value = null;
+                    fetchSessions();
+                };
+
+                const nextSessionPage = () => {
+                    if (!sessionHasMore.value) return;
+                    sessionOffset.value += sessionLimit;
+                    currentSession.value = null;
+                    messages.value = [];
+                    profile.value = null;
+                    fetchSessions();
                 };
 
                 const selectSession = async (session) => {
@@ -936,6 +986,10 @@
 
                 return {
                     sessions,
+                    sessionOffset,
+                    sessionTotal,
+                    sessionHasMore,
+                    currentPage,
                     currentSession,
                     messages,
                     profile,
@@ -959,6 +1013,8 @@
                     formatTime,
                     formatFileSize,
                     fetchSessions,
+                    prevSessionPage,
+                    nextSessionPage,
                     fetchServiceStatus,
                     openStatusPanel,
                     openAgentPanel,

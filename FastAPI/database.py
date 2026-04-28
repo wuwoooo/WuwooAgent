@@ -53,6 +53,7 @@ def normalize_session_status(status: str | None) -> str:
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
+    _configure_connection(conn)
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS agents (
@@ -123,8 +124,16 @@ def init_db():
 
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
+    _configure_connection(conn)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _configure_connection(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
 
 
 def _password_hash(password: str, salt: str | None = None) -> str:
@@ -380,24 +389,47 @@ def save_message(session_id: str, contact_name: str, role: str, content: str, ag
     conn.commit()
     conn.close()
 
-def get_all_sessions(agent_id: int | None = None) -> List[Dict[str, Any]]:
+def get_all_sessions(agent_id: int | None = None, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
     conn = get_connection()
     cursor = conn.cursor()
+    safe_limit = max(1, min(int(limit or 50), 200))
+    safe_offset = max(0, int(offset or 0))
     params: tuple[Any, ...] = ()
     where_sql = ""
     if agent_id is not None:
         where_sql = "WHERE s.agent_id = ?"
         params = (agent_id,)
-    cursor.execute(f"""
-        SELECT s.session_id, s.agent_id, s.contact_name, s.updated_at, s.profile_json, s.status,
+
+    cursor.execute(f"SELECT COUNT(*) AS total FROM sessions s {where_sql}", params)
+    total = int(cursor.fetchone()["total"])
+
+    cursor.execute(
+        f"""
+        WITH page_sessions AS (
+            SELECT s.session_id, s.agent_id, s.contact_name, s.updated_at, s.profile_json, s.status
+            FROM sessions s
+            {where_sql}
+            ORDER BY s.updated_at DESC
+            LIMIT ? OFFSET ?
+        ),
+        message_summary AS (
+            SELECT m.session_id, COUNT(*) AS msg_count, MAX(m.id) AS last_message_id
+            FROM messages m
+            JOIN page_sessions ps ON ps.session_id = m.session_id
+            GROUP BY m.session_id
+        )
+        SELECT ps.session_id, ps.agent_id, ps.contact_name, ps.updated_at, ps.profile_json, ps.status,
                a.username AS agent_username, a.display_name AS agent_display_name,
-               (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.session_id) as msg_count,
-               (SELECT content FROM messages m WHERE m.session_id = s.session_id ORDER BY created_at DESC LIMIT 1) as last_msg
-        FROM sessions s
-        LEFT JOIN agents a ON a.id = s.agent_id
-        {where_sql}
-        ORDER BY s.updated_at DESC
-    """, params)
+               COALESCE(ms.msg_count, 0) AS msg_count,
+               substr(COALESCE(last_m.content, ''), 1, 160) AS last_msg
+        FROM page_sessions ps
+        LEFT JOIN agents a ON a.id = ps.agent_id
+        LEFT JOIN message_summary ms ON ms.session_id = ps.session_id
+        LEFT JOIN messages last_m ON last_m.id = ms.last_message_id
+        ORDER BY ps.updated_at DESC
+        """,
+        (*params, safe_limit, safe_offset),
+    )
     rows = cursor.fetchall()
     conn.close()
     sessions = []
@@ -405,7 +437,13 @@ def get_all_sessions(agent_id: int | None = None) -> List[Dict[str, Any]]:
         item = dict(row)
         item["status"] = normalize_session_status(item.get("status"))
         sessions.append(item)
-    return sessions
+    return {
+        "items": sessions,
+        "total": total,
+        "limit": safe_limit,
+        "offset": safe_offset,
+        "has_more": safe_offset + len(sessions) < total,
+    }
 
 def get_session_messages(session_id: str) -> List[Dict[str, Any]]:
     conn = get_connection()
