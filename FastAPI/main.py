@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import datetime
 import os
 from pathlib import Path
+import time
 from typing import Optional, Tuple
 
 from dotenv import load_dotenv
@@ -35,6 +37,9 @@ load_dotenv(BASE_DIR / ".env.example", override=False)
 load_dotenv(BASE_DIR / ".env", override=True)
 UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+LOCAL_TZ = datetime.timezone(datetime.timedelta(hours=8))
+APP_STARTED_AT = datetime.datetime.now(LOCAL_TZ)
+APP_STARTED_MONOTONIC = time.monotonic()
 
 app = FastAPI(title="微信聊天分析", version="0.3.0")
 
@@ -73,11 +78,40 @@ def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
 
 
 def get_current_time_str() -> str:
-    tz = datetime.timezone(datetime.timedelta(hours=8))
-    now = datetime.datetime.now(tz)
+    now = datetime.datetime.now(LOCAL_TZ)
     weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     weekday_str = weekdays[now.weekday()]
     return now.strftime("%Y-%m-%d %H:%M") + f"（{weekday_str}）"
+
+
+def _format_duration(seconds: int) -> str:
+    days, rem = divmod(max(seconds, 0), 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}天")
+    if hours or parts:
+        parts.append(f"{hours}小时")
+    if minutes or parts:
+        parts.append(f"{minutes}分钟")
+    parts.append(f"{seconds}秒")
+    return "".join(parts)
+
+
+def _read_recent_log_lines(log_path: Path, limit: int) -> list[str]:
+    if not log_path.exists() or not log_path.is_file():
+        return []
+
+    safe_limit = max(1, min(limit, 500))
+    lines: deque[str] = deque(maxlen=safe_limit)
+    try:
+        with log_path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                lines.append(line.rstrip("\n"))
+    except OSError:
+        return []
+    return list(lines)
 
 def _build_user_prompt(contact_name: str, current_status: str = "auto") -> Tuple[str, str]:
     """未提供 ocr_text 时：仅截图场景，服务端不做 OCR，用占位描述发给智能体。"""
@@ -270,6 +304,32 @@ async def wechat_chat(
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/api/admin/status")
+async def api_get_admin_status(limit: int = 200, username: str = Depends(verify_admin)):
+    log_path = BASE_DIR / os.environ.get("APP_LOG_FILE", "log.txt")
+    log_stat = None
+    if log_path.exists() and log_path.is_file():
+        stat = log_path.stat()
+        log_stat = {
+            "path": str(log_path),
+            "size_bytes": stat.st_size,
+            "modified_at": datetime.datetime.fromtimestamp(stat.st_mtime, LOCAL_TZ).isoformat(),
+        }
+
+    uptime_seconds = int(time.monotonic() - APP_STARTED_MONOTONIC)
+    return {
+        "ok": True,
+        "status": "running",
+        "pid": os.getpid(),
+        "server_time": datetime.datetime.now(LOCAL_TZ).isoformat(),
+        "started_at": APP_STARTED_AT.isoformat(),
+        "uptime_seconds": uptime_seconds,
+        "uptime_text": _format_duration(uptime_seconds),
+        "log_file": log_stat,
+        "logs": _read_recent_log_lines(log_path, limit),
+    }
 
 
 @app.get("/admin", response_class=HTMLResponse)

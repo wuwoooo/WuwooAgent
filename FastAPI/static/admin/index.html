@@ -78,12 +78,90 @@
             </div>
         </div>
 
+        <!-- 服务状态弹窗 -->
+        <div v-if="showStatusPanel" class="fixed inset-0 z-40 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-6">
+            <div class="bg-white rounded-3xl shadow-2xl w-full max-w-5xl max-h-[88vh] flex flex-col overflow-hidden border border-white/60">
+                <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+                    <div>
+                        <h2 class="text-lg font-black text-slate-800"><i class="fa-solid fa-heart-pulse text-emerald-500 mr-2"></i>FastAPI 服务状态</h2>
+                        <p class="text-xs text-slate-500 mt-1">显示当前进程状态、运行时长和最近服务日志</p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button @click="fetchServiceStatus" class="text-xs bg-indigo-100 text-indigo-600 px-3 py-1.5 rounded-full hover:bg-indigo-200 transition font-bold">
+                            <i class="fa-solid fa-rotate-right mr-1" :class="{'fa-spin': isLoadingStatus}"></i>刷新
+                        </button>
+                        <button @click="showStatusPanel = false" class="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500">
+                            <i class="fa-solid fa-xmark"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="p-6 overflow-y-auto space-y-5">
+                    <div v-if="statusError" class="p-4 rounded-2xl bg-rose-50 text-rose-600 border border-rose-100 text-sm">
+                        {{ statusError }}
+                    </div>
+
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                        <div class="p-4 rounded-2xl bg-emerald-50 border border-emerald-100">
+                            <p class="text-xs text-emerald-600 font-bold mb-1">当前状态</p>
+                            <p class="font-black text-emerald-700">
+                                <span class="inline-block w-2 h-2 rounded-full bg-emerald-500 mr-2"></span>{{ serviceStatus?.status || '未知' }}
+                            </p>
+                        </div>
+                        <div class="p-4 rounded-2xl bg-slate-50 border border-slate-100">
+                            <p class="text-xs text-slate-500 font-bold mb-1">进程 PID</p>
+                            <p class="font-black text-slate-700">{{ serviceStatus?.pid || '-' }}</p>
+                        </div>
+                        <div class="p-4 rounded-2xl bg-slate-50 border border-slate-100">
+                            <p class="text-xs text-slate-500 font-bold mb-1">运行时长</p>
+                            <p class="font-black text-slate-700">{{ serviceStatus?.uptime_text || '-' }}</p>
+                        </div>
+                        <div class="p-4 rounded-2xl bg-slate-50 border border-slate-100">
+                            <p class="text-xs text-slate-500 font-bold mb-1">日志大小</p>
+                            <p class="font-black text-slate-700">{{ formatFileSize(serviceStatus?.log_file?.size_bytes) }}</p>
+                        </div>
+                    </div>
+
+                    <div class="grid md:grid-cols-2 gap-3 text-sm">
+                        <div class="p-4 rounded-2xl bg-white border border-slate-100">
+                            <p class="text-xs text-slate-400 font-bold mb-1">启动时间</p>
+                            <p class="text-slate-700">{{ formatTime(serviceStatus?.started_at) || '-' }}</p>
+                        </div>
+                        <div class="p-4 rounded-2xl bg-white border border-slate-100">
+                            <p class="text-xs text-slate-400 font-bold mb-1">日志更新时间</p>
+                            <p class="text-slate-700">{{ formatTime(serviceStatus?.log_file?.modified_at) || '-' }}</p>
+                        </div>
+                    </div>
+
+                    <div>
+                        <div class="flex items-center justify-between mb-2">
+                            <h3 class="font-bold text-slate-700"><i class="fa-solid fa-terminal text-slate-400 mr-2"></i>最近日志</h3>
+                            <span class="text-xs text-slate-400">{{ serviceStatus?.logs?.length || 0 }} 行</span>
+                        </div>
+                        <pre class="bg-slate-950 text-slate-100 rounded-2xl p-4 overflow-auto text-xs leading-5 max-h-[42vh] whitespace-pre-wrap">{{ (serviceStatus?.logs || []).join('\n') || '暂无日志' }}</pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- 左侧：会话列表 -->
         <div class="w-80 bg-white border-r border-slate-200 flex flex-col shadow-sm z-10">
             <div class="p-4 bg-indigo-600 text-white flex items-center justify-between shadow-md">
                 <h1 class="text-xl font-bold tracking-wider"><i class="fa-solid fa-plane-departure mr-2"></i>客户驾驶舱</h1>
-                <button @click="fetchSessions" class="hover:text-indigo-200 transition"><i class="fa-solid fa-rotate-right"></i></button>
+                <div class="flex items-center gap-3">
+                    <button @click="openStatusPanel" class="hover:text-indigo-200 transition" title="FastAPI 服务状态"><i class="fa-solid fa-heart-pulse"></i></button>
+                    <button @click="fetchSessions" class="hover:text-indigo-200 transition" title="刷新会话"><i class="fa-solid fa-rotate-right"></i></button>
+                </div>
             </div>
+            <button @click="openStatusPanel" class="m-3 p-3 rounded-2xl border border-emerald-100 bg-emerald-50 text-left hover:bg-emerald-100 transition">
+                <div class="flex items-center justify-between">
+                    <span class="text-sm font-bold text-emerald-700">
+                        <span class="inline-block w-2 h-2 rounded-full bg-emerald-500 mr-2"></span>FastAPI {{ serviceStatus?.status || '检查中' }}
+                    </span>
+                    <span class="text-[11px] text-emerald-600">{{ serviceStatus?.uptime_text || '' }}</span>
+                </div>
+                <p class="text-[11px] text-emerald-600 mt-1 truncate">点击查看最近日志和进程信息</p>
+            </button>
             
             <div class="flex-1 overflow-y-auto p-2 space-y-2">
                 <div v-if="sessions.length === 0" class="text-center text-slate-400 mt-10">
@@ -258,6 +336,10 @@
                 const isLoggingIn = ref(false);
                 const loginForm = ref({ username: '', password: '' });
                 const authToken = ref(localStorage.getItem('admin_token') || '');
+                const showStatusPanel = ref(false);
+                const serviceStatus = ref(null);
+                const isLoadingStatus = ref(false);
+                const statusError = ref('');
 
                 // Audio Context for Alerts
                 let audioCtx = null;
@@ -325,6 +407,7 @@
                             setTimeout(() => { showLogin.value = false; }, 500); 
                             initAudio(); // Initialize audio on login interaction
                             fetchSessions();
+                            fetchServiceStatus();
                         } else {
                             alert('用户名或密码错误！');
                         }
@@ -356,6 +439,39 @@
                     } catch(e) {
                         return timeStr;
                     }
+                };
+
+                const formatFileSize = (bytes) => {
+                    if (bytes === undefined || bytes === null) return '-';
+                    if (bytes < 1024) return `${bytes} B`;
+                    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+                    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+                };
+
+                const fetchServiceStatus = async () => {
+                    if (showLogin.value) return;
+                    isLoadingStatus.value = true;
+                    statusError.value = '';
+                    try {
+                        const res = await fetch('/api/admin/status?limit=220', { headers: getAuthHeaders() });
+                        if (res.ok) {
+                            serviceStatus.value = await res.json();
+                        } else if (res.status === 401) {
+                            triggerLogin();
+                        } else {
+                            statusError.value = `状态接口返回异常：HTTP ${res.status}`;
+                        }
+                    } catch(e) {
+                        console.error('获取服务状态失败', e);
+                        statusError.value = '无法获取 FastAPI 状态，请检查服务是否可访问。';
+                    } finally {
+                        isLoadingStatus.value = false;
+                    }
+                };
+
+                const openStatusPanel = async () => {
+                    showStatusPanel.value = true;
+                    await fetchServiceStatus();
                 };
 
                 const fetchSessions = async () => {
@@ -527,6 +643,7 @@
                     document.addEventListener('click', initAudio, { once: true });
                     
                     fetchSessions();
+                    fetchServiceStatus();
                     // Optional polling
                     setInterval(() => {
                         fetchSessions();
@@ -534,6 +651,7 @@
                             selectSession(currentSession.value);
                         }
                     }, 10000); // 10s poll to keep updated
+                    setInterval(fetchServiceStatus, 30000);
                 });
 
                 return {
@@ -547,9 +665,16 @@
                     loginAnimate,
                     isLoggingIn,
                     loginForm,
+                    showStatusPanel,
+                    serviceStatus,
+                    isLoadingStatus,
+                    statusError,
                     handleLogin,
                     formatTime,
+                    formatFileSize,
                     fetchSessions,
+                    fetchServiceStatus,
+                    openStatusPanel,
                     selectSession,
                     extractProfile,
                     getPreferencesList,
