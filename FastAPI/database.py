@@ -12,6 +12,20 @@ def get_beijing_time() -> str:
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "agent_chat.db"
 
+LEGACY_STATUS_MAP = {
+    "manual": "handoff_requested",
+    "takeover": "human_takeover",
+    "silence": "muted",
+}
+
+VALID_SESSION_STATUSES = {"auto", "handoff_requested", "human_takeover", "muted"}
+
+
+def normalize_session_status(status: str | None) -> str:
+    normalized = (status or "").strip().lower()
+    normalized = LEGACY_STATUS_MAP.get(normalized, normalized)
+    return normalized if normalized in VALID_SESSION_STATUSES else "auto"
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -89,7 +103,12 @@ def get_all_sessions() -> List[Dict[str, Any]]:
     """)
     rows = cursor.fetchall()
     conn.close()
-    return [dict(row) for row in rows]
+    sessions = []
+    for row in rows:
+        item = dict(row)
+        item["status"] = normalize_session_status(item.get("status"))
+        sessions.append(item)
+    return sessions
 
 def get_session_messages(session_id: str) -> List[Dict[str, Any]]:
     conn = get_connection()
@@ -115,6 +134,21 @@ def get_session_profile(session_id: str) -> Optional[Dict[str, Any]]:
         except Exception:
             return None
     return None
+
+def get_session(session_id: str) -> Optional[Dict[str, Any]]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT session_id, contact_name, updated_at, profile_json, status FROM sessions WHERE session_id = ?",
+        (session_id,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    item = dict(row)
+    item["status"] = normalize_session_status(item.get("status"))
+    return item
 
 def update_session_profile(session_id: str, profile_dict: Dict[str, Any]):
     conn = get_connection()
@@ -149,15 +183,17 @@ def get_session_status(session_id: str) -> str:
     row = cursor.fetchone()
     conn.close()
     if row and row['status']:
-        return row['status']
+        return normalize_session_status(row['status'])
     return 'auto'
 
 def update_session_status(session_id: str, status: str):
+    status = normalize_session_status(status)
     conn = get_connection()
     cursor = conn.cursor()
+    now_bj = get_beijing_time()
     cursor.execute(
-        "UPDATE sessions SET status = ? WHERE session_id = ?",
-        (status, session_id)
+        "UPDATE sessions SET status = ?, updated_at = ? WHERE session_id = ?",
+        (status, now_bj, session_id)
     )
     conn.commit()
     conn.close()

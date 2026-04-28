@@ -184,8 +184,8 @@
                             {{ session.contact_name || '未知客户' }}
                         </span>
                         <div class="flex items-center space-x-2">
-                            <span v-if="session.status === 'manual'" class="animate-pulse bg-rose-500 text-white text-[10px] px-2 py-0.5 rounded-full shadow-md font-bold whitespace-nowrap shrink-0">
-                                🚨 请求接管
+                            <span v-if="session.status && session.status !== 'auto'" :class="statusBadgeClass(session.status)">
+                                {{ statusLabel(session.status) }}
                             </span>
                             <span class="text-xs text-slate-400 whitespace-nowrap">{{ formatTime(session.updated_at) }}</span>
                             <button @click.stop="deleteSession(session.session_id)" 
@@ -215,11 +215,20 @@
                 <div class="h-14 border-b border-slate-200 bg-white/80 flex items-center px-6 shadow-sm backdrop-blur-md justify-between">
                     <div class="flex items-center">
                         <h2 class="text-lg font-semibold text-slate-700">跟进记录：{{ currentSession.contact_name }}</h2>
+                        <span v-if="currentSession.status && currentSession.status !== 'auto'" :class="statusBadgeClass(currentSession.status)" class="ml-3">
+                            {{ statusLabel(currentSession.status) }}
+                        </span>
                         <span class="ml-4 text-xs text-slate-400">ID: {{ currentSession.session_id }}</span>
                     </div>
-                    <div>
-                        <button v-if="currentSession.status === 'manual'" @click="recoverAI" class="text-xs bg-rose-500 text-white px-3 py-1.5 rounded-full hover:bg-rose-600 transition shadow-sm font-medium animate-pulse flex items-center">
-                            <i class="fa-solid fa-headset mr-1"></i>标记为已处理 (恢复AI接管)
+                    <div class="flex items-center space-x-2">
+                        <button v-if="currentSession.status !== 'human_takeover'" @click="setSessionStatus('human_takeover')" class="text-xs bg-amber-500 text-white px-3 py-1.5 rounded-full hover:bg-amber-600 transition shadow-sm font-medium flex items-center">
+                            <i class="fa-solid fa-headset mr-1"></i>开始人工接管
+                        </button>
+                        <button v-if="currentSession.status !== 'muted'" @click="setSessionStatus('muted')" class="text-xs bg-slate-500 text-white px-3 py-1.5 rounded-full hover:bg-slate-600 transition shadow-sm font-medium flex items-center">
+                            <i class="fa-solid fa-volume-xmark mr-1"></i>暂停 Agent
+                        </button>
+                        <button v-if="currentSession.status && currentSession.status !== 'auto'" @click="setSessionStatus('auto')" class="text-xs bg-emerald-500 text-white px-3 py-1.5 rounded-full hover:bg-emerald-600 transition shadow-sm font-medium flex items-center">
+                            <i class="fa-solid fa-robot mr-1"></i>恢复 Agent
                         </button>
                     </div>
                 </div>
@@ -383,6 +392,24 @@
                     oscillator.stop(audioCtx.currentTime + 0.5);
                 };
 
+                const statusLabel = (status) => {
+                    const labels = {
+                        handoff_requested: '🚨 请求接管',
+                        human_takeover: '人工接管中',
+                        muted: '已暂停 Agent',
+                        auto: 'Agent 代理中'
+                    };
+                    return labels[status] || status || '未知状态';
+                };
+
+                const statusBadgeClass = (status) => {
+                    const base = 'text-[10px] px-2 py-0.5 rounded-full shadow-md font-bold whitespace-nowrap shrink-0';
+                    if (status === 'handoff_requested') return `${base} animate-pulse bg-rose-500 text-white`;
+                    if (status === 'human_takeover') return `${base} bg-amber-500 text-white`;
+                    if (status === 'muted') return `${base} bg-slate-500 text-white`;
+                    return `${base} bg-emerald-100 text-emerald-700`;
+                };
+
                 const getAuthHeaders = () => {
                     return authToken.value ? { 'Authorization': `Basic ${authToken.value}` } : {};
                 };
@@ -515,13 +542,13 @@
                         if(res.ok) {
                             const newSessions = await res.json();
                             
-                            // Check for new manual sessions to trigger alert
+                            // 仅对 Agent 主动请求人工关注的会话播放提醒。
                             let shouldAlert = false;
                             newSessions.forEach(s => {
-                                if (s.status === 'manual' && !alertedSessions.has(s.session_id)) {
+                                if (s.status === 'handoff_requested' && !alertedSessions.has(s.session_id)) {
                                     shouldAlert = true;
                                     alertedSessions.add(s.session_id);
-                                } else if (s.status !== 'manual') {
+                                } else if (s.status !== 'handoff_requested') {
                                     alertedSessions.delete(s.session_id);
                                 }
                             });
@@ -531,6 +558,10 @@
                             }
                             
                             sessions.value = newSessions;
+                            if (currentSession.value) {
+                                const refreshed = newSessions.find(s => s.session_id === currentSession.value.session_id);
+                                if (refreshed) currentSession.value = refreshed;
+                            }
                         } else if (res.status === 401) {
                             triggerLogin();
                         }
@@ -546,6 +577,7 @@
                         const res = await fetch(`/api/admin/sessions/${session.session_id}`, { headers: getAuthHeaders() });
                         if(res.ok) {
                             const data = await res.json();
+                            if (data.session) currentSession.value = data.session;
                             messages.value = data.messages || [];
                             profile.value = data.profile || null;
                             scrollToBottom();
@@ -646,7 +678,7 @@
                     return [];
                 };
 
-                const recoverAI = async () => {
+                const setSessionStatus = async (status) => {
                     if(!currentSession.value) return;
                     try {
                         const sid = currentSession.value.session_id;
@@ -656,19 +688,19 @@
                                 ...getAuthHeaders(),
                                 'Content-Type': 'application/json'
                             },
-                            body: JSON.stringify({status: 'auto'})
+                            body: JSON.stringify({status})
                         });
                         if (res.ok) {
-                            currentSession.value.status = 'auto';
+                            currentSession.value.status = status;
                             alertedSessions.delete(sid); // Reset alert state
                             fetchSessions();
                         } else if (res.status === 401) {
                             triggerLogin();
                         } else {
-                            alert('状态恢复失败');
+                            alert('状态更新失败');
                         }
                     } catch (e) {
-                        console.error('状态恢复异常', e);
+                        console.error('状态更新异常', e);
                     }
                 };
 
@@ -716,7 +748,9 @@
                     getPreferencesList,
                     deleteSession,
                     deleteMessage,
-                    recoverAI
+                    setSessionStatus,
+                    statusLabel,
+                    statusBadgeClass
                 };
             }
         }).mount('#app');

@@ -567,7 +567,15 @@ class HostForegroundService : Service() {
             val reply = agentClient.chat(cap.imagePath, latestInbound, sessionId, contactName)
             moveState(HostState.REPLY_READY, "reply_text 长度=${reply.replyText.length}")
 
-            if (reply.replyText.isBlank()) error("reply_text 为空")
+            if (reply.replyText.isBlank()) {
+                if (reply.silenced) {
+                    logger.log(TAG, "后端会话处于静音状态，跳过本轮注入: status=${reply.currentStatus} reason=${reply.reason}")
+                    moveState(HostState.SENT, "后端会话静音，已跳过: ${reply.currentStatus.ifBlank { reply.reason }}")
+                    return
+                }
+                logger.log(TAG, "Agent 返回空 reply_text，raw=${reply.raw.take(500)}")
+                error("reply_text 为空")
+            }
             if (executionMode == "manual") {
                 moveState(HostState.INPUT_FOCUSED, "手动模式：请先聚焦输入框，再继续注入")
             } else {

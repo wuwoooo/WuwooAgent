@@ -42,13 +42,22 @@ class HttpAgentClient(private val context: Context) : AgentClient {
             .orEmpty()
 
         if (code !in 200..299) throw IllegalStateException("Agent 请求失败($code): $text")
-        val replyText = if (text.isBlank()) "" else try {
-            val json = JSONObject(text)
-            json.optString("reply_text", "").trim()
+        val json = if (text.isBlank()) null else try {
+            JSONObject(text)
         } catch (e: Exception) {
-            ""
+            null
         }
-        return AgentReply(replyText = replyText, raw = text)
+        val replyText = json?.optString("reply_text", "")?.trim().orEmpty()
+        val silenced = json?.optBoolean("silenced", false) ?: false
+        val reason = json?.optString("reason", "")?.trim().orEmpty()
+        val currentStatus = json?.optString("current_status", "")?.trim().orEmpty()
+        return AgentReply(
+            replyText = replyText,
+            raw = text,
+            silenced = silenced,
+            reason = reason,
+            currentStatus = currentStatus,
+        )
     }
 
     private fun writeMultipartField(out: OutputStream, boundary: String, name: String, value: String) {

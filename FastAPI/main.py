@@ -173,7 +173,7 @@ def _build_user_prompt(contact_name: str, current_status: str = "auto") -> Tuple
     pure_text = "[用户上传了一张聊天截图]"
     
     receptionist_rule = ""
-    if current_status == "manual":
+    if current_status == "handoff_requested":
         receptionist_rule = "【当前状态：正在为客户制作方案】你之前已告知客户要去整理行程方案和报价了。对于客户的新消息，请注意：如果客户询问普通旅行问题，可正常解答；如果客户催促方案进度，必须以第一人称安抚（例如：‘我正在快马加鞭为您核算报价和行程呢，请您稍等片刻哦～’），绝对不要自己编造具体方案或报价数字。\n"
 
     wrapped_text = (
@@ -194,7 +194,7 @@ def _build_user_prompt_from_ocr(contact_name: str, ocr_text: str, current_status
     pure_text = text
     
     receptionist_rule = ""
-    if current_status == "manual":
+    if current_status == "handoff_requested":
         receptionist_rule = "【当前状态：正在为客户制作方案】你之前已告知客户要去整理行程方案和报价了。对于客户的新消息，请注意：如果客户询问普通旅行问题，可正常解答；如果客户催促方案进度，必须以第一人称安抚（例如：‘我正在快马加鞭为您核算报价和行程呢，请您稍等片刻哦～’），绝对不要自己编造具体方案或报价数字。\n"
 
     wrapped_text = (
@@ -261,25 +261,50 @@ async def wechat_chat(
             try:
                 # 记录真人的回复，role为assistant，表示我方发出的消息
                 database.save_message(session_id, contact_name, "assistant", pure_user_text)
-                # 状态流转：
-                #   auto    + is_human_reply → takeover（真人介入，AI 静音）
-                #   manual  + is_human_reply → takeover（从"请求接管"推进到"正在接管"）
-                #   takeover + is_human_reply → 保持 takeover（已在接管中，无需变更）
-                if current_status != "takeover":
-                    database.update_session_status(session_id, "takeover")
+                logger.info(
+                    "记录真人回复，不自动切换接管状态: session_id=%s contact=%s status=%s text=%s",
+                    session_id,
+                    contact_name,
+                    current_status,
+                    pure_user_text[:80],
+                )
             except Exception:
                 pass
         
         return {
             "ok": True,
+            "recorded": True,
+            "current_status": current_status,
             "messages": [{"role": "assistant", "text": ""}],
             "reply_text": "",
         }
 
-    if current_status == "takeover":
-        # 真人客服正在接管中，AI 完全静音，不生成回复
+    if current_status in {"human_takeover", "muted"}:
+        # 人工接管或后台静音期间，AI 完全静音，不生成回复。
+        pure_user_text = (ocr_text or "").strip()
+        if pure_user_text:
+            try:
+                database.save_message(session_id, contact_name, "user", pure_user_text)
+            except Exception as e:
+                logger.warning(
+                    "静音期间保存客户消息失败: session_id=%s contact=%s status=%s error=%s",
+                    session_id,
+                    contact_name,
+                    current_status,
+                    e,
+                )
+        logger.info(
+            "会话处于静音状态，跳过 AI 回复: session_id=%s contact=%s status=%s text=%s",
+            session_id,
+            contact_name,
+            current_status,
+            pure_user_text[:80],
+        )
         return {
             "ok": True,
+            "silenced": True,
+            "reason": current_status,
+            "current_status": current_status,
             "messages": [{"role": "assistant", "text": ""}],
             "reply_text": "",
         }
@@ -335,7 +360,7 @@ async def wechat_chat(
     if "[HANDOFF]" in reply_text:
         reply_text = reply_text.replace("[HANDOFF]", "").strip()
         try:
-            database.update_session_status(session_id, "manual")
+            database.update_session_status(session_id, "handoff_requested")
         except Exception:
             pass
 
@@ -413,9 +438,10 @@ async def api_get_sessions(username: str = Depends(verify_admin)):
 
 @app.get("/api/admin/sessions/{session_id}")
 async def api_get_session_detail(session_id: str, username: str = Depends(verify_admin)):
+    session = database.get_session(session_id)
     messages = database.get_session_messages(session_id)
     profile = database.get_session_profile(session_id)
-    return {"messages": messages, "profile": profile}
+    return {"session": session, "messages": messages, "profile": profile}
 
 @app.post("/api/admin/sessions/{session_id}/profile")
 async def api_extract_profile(session_id: str, username: str = Depends(verify_admin)):
@@ -445,5 +471,18 @@ class StatusUpdate(BaseModel):
 
 @app.post("/api/admin/sessions/{session_id}/status")
 async def api_update_session_status(session_id: str, payload: StatusUpdate, username: str = Depends(verify_admin)):
-    database.update_session_status(session_id, payload.status)
-    return {"ok": True}
+    allowed_statuses = {"auto", "handoff_requested", "human_takeover", "muted"}
+    status_value = (payload.status or "").strip().lower()
+    if status_value not in allowed_statuses:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": f"不支持的会话状态: {payload.status}"},
+        )
+    database.update_session_status(session_id, status_value)
+    logger.info(
+        "管理员 %s 更新会话状态: session_id=%s status=%s",
+        username,
+        session_id,
+        status_value,
+    )
+    return {"ok": True, "status": status_value}

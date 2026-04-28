@@ -3,6 +3,9 @@ package com.agentime.ime.host.agent
 data class AgentReply(
     val replyText: String,
     val raw: String,
+    val silenced: Boolean = false,
+    val reason: String = "",
+    val currentStatus: String = "",
 )
 
 interface AgentClient {
