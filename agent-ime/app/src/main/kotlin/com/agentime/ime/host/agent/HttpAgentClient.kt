@@ -12,7 +12,7 @@ class HttpAgentClient(private val context: Context) : AgentClient {
         const val DEFAULT_ENDPOINT = "http://118.24.71.189/api/wechat/chat"
 
         fun login(context: Context, endpoint: String, username: String, password: String): AgentLoginResult {
-            val loginUrl = buildLoginUrl(endpoint.ifBlank { DEFAULT_ENDPOINT })
+            val loginUrls = buildLoginUrls(endpoint.ifBlank { DEFAULT_ENDPOINT })
             val prefs = context.getSharedPreferences("host_config", Context.MODE_PRIVATE)
             val deviceId = SessionIdentity.getDeviceId(context)
             val payload = JSONObject().apply {
@@ -21,24 +21,36 @@ class HttpAgentClient(private val context: Context) : AgentClient {
                 put("device_id", deviceId)
             }.toString()
 
-            val conn = (URL(loginUrl).openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                doOutput = true
-                connectTimeout = 10000
-                readTimeout = 30000
-                setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            }
-            conn.outputStream.use { out ->
-                out.write(payload.toByteArray(Charsets.UTF_8))
-            }
+            var lastError = ""
+            var responseText = ""
+            for (loginUrl in loginUrls) {
+                val conn = (URL(loginUrl).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    doOutput = true
+                    connectTimeout = 10000
+                    readTimeout = 30000
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                }
+                conn.outputStream.use { out ->
+                    out.write(payload.toByteArray(Charsets.UTF_8))
+                }
 
-            val code = conn.responseCode
-            val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
-                ?.bufferedReader()?.use { it.readText() }
-                .orEmpty()
-            if (code !in 200..299) throw IllegalStateException("Agent 登录失败($code): $text")
+                val code = conn.responseCode
+                val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                    ?.bufferedReader()?.use { it.readText() }
+                    .orEmpty()
+                if (code in 200..299) {
+                    responseText = text
+                    break
+                }
+                lastError = "Agent 登录失败($code): $text"
+                if (code != 404) {
+                    throw IllegalStateException(lastError)
+                }
+            }
+            if (responseText.isBlank()) throw IllegalStateException(lastError.ifBlank { "Agent 登录失败：登录接口无响应" })
 
-            val json = JSONObject(text)
+            val json = JSONObject(responseText)
             val token = json.optString("access_token", "").trim()
             val agent = json.optJSONObject("agent")
             if (token.isBlank() || agent == null) {
@@ -61,13 +73,14 @@ class HttpAgentClient(private val context: Context) : AgentClient {
             return result
         }
 
-        private fun buildLoginUrl(endpoint: String): String {
+        private fun buildLoginUrls(endpoint: String): List<String> {
             val trimmed = endpoint.trim().trimEnd('/')
-            return when {
-                trimmed.endsWith("/api/wechat/chat") -> trimmed.removeSuffix("/api/wechat/chat") + "/api/agent/login"
-                trimmed.endsWith("/wechat/chat") -> trimmed.removeSuffix("/wechat/chat") + "/api/agent/login"
-                else -> "$trimmed/api/agent/login"
+            val base = when {
+                trimmed.endsWith("/api/wechat/chat") -> trimmed.removeSuffix("/api/wechat/chat")
+                trimmed.endsWith("/wechat/chat") -> trimmed.removeSuffix("/wechat/chat")
+                else -> trimmed
             }
+            return listOf("$base/api/agent/login", "$base/agent/login").distinct()
         }
     }
 

@@ -37,6 +37,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var backendStatusView: TextView
     private lateinit var agentAuthStatusView: TextView
     private lateinit var loginStatusView: TextView
+    private lateinit var toggleNetworkConfigView: TextView
     private lateinit var currentStatusView: TextView
     private lateinit var accessibilityStatusView: TextView
     private lateinit var imeStatusView: TextView
@@ -45,6 +46,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var advancedLayout: LinearLayout
     private lateinit var loginPanel: LinearLayout
     private lateinit var mainContentLayout: LinearLayout
+    private lateinit var networkConfigLayout: LinearLayout
     private lateinit var toggleAdvancedButton: Button
     private lateinit var runButton: Button
     private lateinit var agentLoginButton: Button
@@ -95,6 +97,7 @@ class MainActivity : ComponentActivity() {
         backendStatusView = findViewById(R.id.textBackendStatus)
         agentAuthStatusView = findViewById(R.id.textAgentAuthStatus)
         loginStatusView = findViewById(R.id.textLoginStatus)
+        toggleNetworkConfigView = findViewById(R.id.textToggleNetworkConfig)
         currentStatusView = findViewById(R.id.textCurrentStatus)
         accessibilityStatusView = findViewById(R.id.textAccessibilityStatus)
         imeStatusView = findViewById(R.id.textImeStatus)
@@ -103,6 +106,7 @@ class MainActivity : ComponentActivity() {
         advancedLayout = findViewById(R.id.layoutAdvanced)
         loginPanel = findViewById(R.id.layoutLoginPanel)
         mainContentLayout = findViewById(R.id.layoutMainContent)
+        networkConfigLayout = findViewById(R.id.layoutNetworkConfig)
         toggleAdvancedButton = findViewById(R.id.btnToggleAdvanced)
         runButton = findViewById(R.id.btnStartRunOnce)
         agentLoginButton = findViewById(R.id.btnAgentLogin)
@@ -128,6 +132,12 @@ class MainActivity : ComponentActivity() {
                 .ifBlank { HttpAgentClient.DEFAULT_ENDPOINT },
         )
         usernameInput.setText(prefs.getString("agent_username", "").orEmpty())
+
+        toggleNetworkConfigView.setOnClickListener {
+            val expanded = networkConfigLayout.visibility == View.VISIBLE
+            networkConfigLayout.visibility = if (expanded) View.GONE else View.VISIBLE
+            toggleNetworkConfigView.text = if (expanded) "显示网络配置" else "隐藏网络配置"
+        }
 
         agentLoginButton.setOnClickListener {
             val endpoint = endpointInput.text?.toString().orEmpty().trim().ifBlank { HttpAgentClient.DEFAULT_ENDPOINT }

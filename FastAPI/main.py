@@ -253,6 +253,7 @@ def _provider_from_env() -> str:
     return (os.environ.get("CHAT_PROVIDER", "volc_knowledge").strip() or "volc_knowledge").lower()
 
 
+@app.post("/agent/login")
 @app.post("/api/agent/login")
 async def api_agent_login(payload: AgentLoginRequest):
     agent = database.authenticate_agent(payload.username, payload.password, payload.device_id)
