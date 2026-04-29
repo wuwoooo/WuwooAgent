@@ -371,70 +371,74 @@
                         {{ isExtracting ? '提取中...' : '用户画像' }}
                     </button>
                 </div>
-                <div class="flex items-center gap-2">
-                    <select v-model="summaryLimit" class="flex-1 text-xs rounded-full border border-slate-200 bg-white px-3 py-1.5 text-slate-600 focus:outline-none focus:ring-2 focus:ring-amber-100">
-                        <option value="10">最近 10 条</option>
-                        <option value="20">最近 20 条</option>
-                        <option value="50">最近 50 条</option>
-                        <option value="0">最多 100 条</option>
-                    </select>
-                    <button @click="summarizeConversation" :disabled="isSummarizing" class="text-xs bg-amber-100 text-amber-700 px-3 py-1.5 rounded-full hover:bg-amber-200 transition font-medium disabled:opacity-50 flex items-center whitespace-nowrap">
-                        <i v-if="isSummarizing" class="fa-solid fa-spinner fa-spin mr-1"></i>
-                        <i v-else class="fa-solid fa-clipboard-list mr-1"></i>
-                        {{ isSummarizing ? '总结中...' : '会话总结' }}
-                    </button>
-                </div>
             </div>
             
             <div class="p-5 flex-1 overflow-y-auto">
-                <div class="mb-6">
-                    <div class="flex items-center justify-between mb-3">
-                        <p class="text-xs font-bold text-slate-500 flex items-center">
+                <div class="mb-6 rounded-2xl border border-amber-100 bg-amber-50/40 overflow-hidden">
+                    <button @click="isSummaryCollapsed = !isSummaryCollapsed" class="w-full px-4 py-3 flex items-center justify-between text-left hover:bg-amber-50 transition">
+                        <span class="text-xs font-bold text-slate-600 flex items-center">
                             <i class="fa-solid fa-person-chalkboard text-amber-500 mr-1.5"></i>会话总结
-                        </p>
-                        <span v-if="conversationSummaryMeta.used" class="text-[10px] text-slate-400">
-                            已读 {{ conversationSummaryMeta.used }}/{{ conversationSummaryMeta.total }} 条
+                            <span v-if="isSummaryFromCache" class="ml-2 text-[10px] px-2 py-0.5 rounded-full bg-white text-amber-600 border border-amber-100">已缓存</span>
                         </span>
-                    </div>
-                    <div v-if="conversationSummary" class="space-y-3">
-                        <div class="p-4 bg-amber-50 rounded-2xl border border-amber-100 text-sm text-slate-700 leading-relaxed">
-                            {{ conversationSummary.overview || '暂无概括' }}
+                        <span class="flex items-center gap-2 text-[10px] text-slate-400">
+                            <span v-if="conversationSummaryMeta.used">已读 {{ conversationSummaryMeta.used }}/{{ conversationSummaryMeta.total }} 条</span>
+                            <i class="fa-solid" :class="isSummaryCollapsed ? 'fa-chevron-down' : 'fa-chevron-up'"></i>
+                        </span>
+                    </button>
+                    <div v-show="!isSummaryCollapsed" class="px-4 pb-4 space-y-3">
+                        <div class="flex items-center gap-2">
+                            <select v-model="summaryLimit" @change="restoreSummaryCache" class="flex-1 text-xs rounded-full border border-amber-100 bg-white px-3 py-1.5 text-slate-600 focus:outline-none focus:ring-2 focus:ring-amber-100">
+                                <option value="10">最近 10 条</option>
+                                <option value="20">最近 20 条</option>
+                                <option value="50">最近 50 条</option>
+                                <option value="0">最多 100 条</option>
+                            </select>
+                            <button @click="summarizeConversation" :disabled="isSummarizing" class="text-xs bg-amber-100 text-amber-700 px-3 py-1.5 rounded-full hover:bg-amber-200 transition font-medium disabled:opacity-50 flex items-center whitespace-nowrap">
+                                <i v-if="isSummarizing" class="fa-solid fa-spinner fa-spin mr-1"></i>
+                                <i v-else class="fa-solid fa-rotate-right mr-1"></i>
+                                {{ isSummarizing ? '总结中...' : (conversationSummary ? '重新生成' : '生成总结') }}
+                            </button>
                         </div>
-                        <div class="grid grid-cols-2 gap-3">
-                            <div class="bg-slate-50 rounded-xl p-3 border border-slate-100">
-                                <p class="text-[10px] text-slate-500 mb-2 font-bold">客户状态</p>
-                                <p class="text-sm text-slate-700">{{ conversationSummary.customer_sentiment || '待判断' }}</p>
+                        <div v-if="conversationSummary" class="space-y-3">
+                            <div class="p-4 bg-white rounded-2xl border border-amber-100 text-sm text-slate-700 leading-relaxed">
+                                {{ conversationSummary.overview || '暂无概括' }}
                             </div>
-                            <div class="bg-slate-50 rounded-xl p-3 border border-slate-100">
-                                <p class="text-[10px] text-slate-500 mb-2 font-bold">当前进展</p>
-                                <p class="text-sm text-slate-700">{{ conversationSummary.latest_status || '暂无' }}</p>
+                            <div class="grid grid-cols-2 gap-3">
+                                <div class="bg-white rounded-xl p-3 border border-slate-100">
+                                    <p class="text-[10px] text-slate-500 mb-2 font-bold">客户状态</p>
+                                    <p class="text-sm text-slate-700">{{ conversationSummary.customer_sentiment || '待判断' }}</p>
+                                </div>
+                                <div class="bg-white rounded-xl p-3 border border-slate-100">
+                                    <p class="text-[10px] text-slate-500 mb-2 font-bold">当前进展</p>
+                                    <p class="text-sm text-slate-700">{{ conversationSummary.latest_status || '暂无' }}</p>
+                                </div>
+                            </div>
+                            <div>
+                                <p class="text-xs font-bold text-slate-500 mb-2">已确认信息</p>
+                                <div v-if="summaryList(conversationSummary.confirmed_info).length" class="space-y-1.5">
+                                    <p v-for="(item, idx) in summaryList(conversationSummary.confirmed_info)" :key="`confirmed-${idx}`" class="text-sm text-slate-600 bg-white border border-slate-100 rounded-lg px-3 py-2">
+                                        {{ item }}
+                                    </p>
+                                </div>
+                                <p v-else class="text-sm text-slate-400 italic">暂无明确结论</p>
+                            </div>
+                            <div>
+                                <p class="text-xs font-bold text-slate-500 mb-2">待确认问题</p>
+                                <div v-if="summaryList(conversationSummary.pending_questions).length" class="space-y-1.5">
+                                    <p v-for="(item, idx) in summaryList(conversationSummary.pending_questions)" :key="`pending-${idx}`" class="text-sm text-slate-600 bg-rose-50 border border-rose-100 rounded-lg px-3 py-2">
+                                        {{ item }}
+                                    </p>
+                                </div>
+                                <p v-else class="text-sm text-slate-400 italic">暂无明显待确认事项</p>
+                            </div>
+                            <div class="p-4 bg-indigo-50 rounded-2xl border border-indigo-100">
+                                <p class="text-[10px] text-indigo-500 mb-2 font-bold">建议接手话术</p>
+                                <p class="text-sm text-slate-700 leading-relaxed">{{ conversationSummary.suggested_next_reply || '暂无建议' }}</p>
                             </div>
                         </div>
-                        <div>
-                            <p class="text-xs font-bold text-slate-500 mb-2">已确认信息</p>
-                            <div v-if="summaryList(conversationSummary.confirmed_info).length" class="space-y-1.5">
-                                <p v-for="(item, idx) in summaryList(conversationSummary.confirmed_info)" :key="`confirmed-${idx}`" class="text-sm text-slate-600 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">
-                                    {{ item }}
-                                </p>
-                            </div>
-                            <p v-else class="text-sm text-slate-400 italic">暂无明确结论</p>
+                        <div v-else class="border border-dashed border-amber-200 rounded-2xl p-4 text-center text-sm text-slate-400 bg-white/70">
+                            展开后可生成或读取本浏览器缓存的会话总结
                         </div>
-                        <div>
-                            <p class="text-xs font-bold text-slate-500 mb-2">待确认问题</p>
-                            <div v-if="summaryList(conversationSummary.pending_questions).length" class="space-y-1.5">
-                                <p v-for="(item, idx) in summaryList(conversationSummary.pending_questions)" :key="`pending-${idx}`" class="text-sm text-slate-600 bg-rose-50 border border-rose-100 rounded-lg px-3 py-2">
-                                    {{ item }}
-                                </p>
-                            </div>
-                            <p v-else class="text-sm text-slate-400 italic">暂无明显待确认事项</p>
-                        </div>
-                        <div class="p-4 bg-indigo-50 rounded-2xl border border-indigo-100">
-                            <p class="text-[10px] text-indigo-500 mb-2 font-bold">建议接手话术</p>
-                            <p class="text-sm text-slate-700 leading-relaxed">{{ conversationSummary.suggested_next_reply || '暂无建议' }}</p>
-                        </div>
-                    </div>
-                    <div v-else class="border border-dashed border-slate-200 rounded-2xl p-4 text-center text-sm text-slate-400">
-                        选择条数后点击“会话总结”，快速了解接管上下文
                     </div>
                 </div>
 
@@ -516,7 +520,10 @@
                 const conversationSummaryMeta = ref({ used: 0, total: 0 });
                 const summaryLimit = ref('20');
                 const isSummarizing = ref(false);
+                const isSummaryCollapsed = ref(true);
+                const isSummaryFromCache = ref(false);
                 const messageBox = ref(null);
+                const summaryCachePrefix = 'admin_conversation_summary_v1';
 
                 // Auth States
                 const showLogin = ref(false);
@@ -626,10 +633,64 @@
                     return authToken.value ? { 'Authorization': `Basic ${authToken.value}` } : {};
                 };
 
-                const resetConversationAid = () => {
-                    profile.value = null;
+                const clearSummaryState = () => {
                     conversationSummary.value = null;
                     conversationSummaryMeta.value = { used: 0, total: 0 };
+                    isSummaryFromCache.value = false;
+                };
+
+                const getSummaryCacheKey = (sessionId = currentSession.value?.session_id) => {
+                    if (!sessionId) return '';
+                    return `${summaryCachePrefix}:${sessionId}:${summaryLimit.value}`;
+                };
+
+                const restoreSummaryCache = () => {
+                    clearSummaryState();
+                    const key = getSummaryCacheKey();
+                    if (!key) return;
+                    try {
+                        const raw = localStorage.getItem(key);
+                        if (!raw) return;
+                        const cached = JSON.parse(raw);
+                        conversationSummary.value = cached.summary || null;
+                        conversationSummaryMeta.value = cached.meta || { used: 0, total: 0 };
+                        isSummaryFromCache.value = !!conversationSummary.value;
+                    } catch (e) {
+                        console.warn('读取会话总结缓存失败', e);
+                    }
+                };
+
+                const saveSummaryCache = () => {
+                    const key = getSummaryCacheKey();
+                    if (!key || !conversationSummary.value) return;
+                    try {
+                        localStorage.setItem(key, JSON.stringify({
+                            summary: conversationSummary.value,
+                            meta: conversationSummaryMeta.value,
+                            cached_at: new Date().toISOString()
+                        }));
+                        isSummaryFromCache.value = true;
+                    } catch (e) {
+                        console.warn('保存会话总结缓存失败', e);
+                    }
+                };
+
+                const removeSessionSummaryCache = (sessionId) => {
+                    const prefix = `${summaryCachePrefix}:${sessionId}:`;
+                    try {
+                        for (let i = localStorage.length - 1; i >= 0; i--) {
+                            const key = localStorage.key(i);
+                            if (key && key.startsWith(prefix)) localStorage.removeItem(key);
+                        }
+                    } catch (e) {
+                        console.warn('清理会话总结缓存失败', e);
+                    }
+                };
+
+                const resetConversationAid = () => {
+                    profile.value = null;
+                    clearSummaryState();
+                    isSummaryCollapsed.value = true;
                 };
 
                 const triggerLogin = () => {
@@ -947,6 +1008,9 @@
                             if (data.session) currentSession.value = data.session;
                             messages.value = data.messages || [];
                             profile.value = data.profile || null;
+                            if (isSwitchingSession) {
+                                restoreSummaryCache();
+                            }
                             scrollToBottom();
                         } else if (res.status === 401) {
                             triggerLogin();
@@ -1001,6 +1065,8 @@
                                 used: data.used_message_count || 0,
                                 total: data.total_message_count || 0
                             };
+                            saveSummaryCache();
+                            isSummaryCollapsed.value = false;
                         } else {
                             const errMsg = data.error || '总结失败，请稍后重试';
                             alert("配置或接口异常：" + errMsg);
@@ -1034,6 +1100,7 @@
                                 messages.value = [];
                                 resetConversationAid();
                             }
+                            removeSessionSummaryCache(sid);
                             fetchSessions();
                         } else if (res.status === 401) {
                             triggerLogin();
@@ -1150,6 +1217,8 @@
                     conversationSummaryMeta,
                     summaryLimit,
                     isSummarizing,
+                    isSummaryCollapsed,
+                    isSummaryFromCache,
                     messageBox,
                     showLogin,
                     loginAnimate,
@@ -1184,6 +1253,7 @@
                     selectSession,
                     extractProfile,
                     summarizeConversation,
+                    restoreSummaryCache,
                     getPreferencesList,
                     summaryList,
                     deleteSession,
