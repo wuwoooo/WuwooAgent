@@ -462,9 +462,11 @@
                 const isSavingAgent = ref(false);
                 const agentForm = ref({ username: '', display_name: '', password: '', note: '' });
 
-                // Audio Context for Alerts
+                // 接管请求警报音
                 let audioCtx = null;
-                const alertedSessions = new Set();
+                let handoffAlertTimer = null;
+                const handoffAlertSessionIds = new Set();
+                const handoffAlertIntervalMs = 1500;
                 
                 const initAudio = () => {
                     if (!audioCtx) {
@@ -475,6 +477,9 @@
                     }
                     if (audioCtx && audioCtx.state === 'suspended') {
                         audioCtx.resume();
+                    }
+                    if (handoffAlertSessionIds.size > 0) {
+                        startHandoffAlert();
                     }
                 };
 
@@ -496,6 +501,33 @@
                     
                     oscillator.start();
                     oscillator.stop(audioCtx.currentTime + 0.5);
+                };
+
+                const startHandoffAlert = () => {
+                    if (handoffAlertTimer) return;
+                    playAlertSound();
+                    handoffAlertTimer = setInterval(playAlertSound, handoffAlertIntervalMs);
+                };
+
+                const stopHandoffAlert = () => {
+                    if (!handoffAlertTimer) return;
+                    clearInterval(handoffAlertTimer);
+                    handoffAlertTimer = null;
+                };
+
+                const syncHandoffAlert = (newSessions) => {
+                    handoffAlertSessionIds.clear();
+                    newSessions.forEach(s => {
+                        if (s.status === 'handoff_requested') {
+                            handoffAlertSessionIds.add(s.session_id);
+                        }
+                    });
+
+                    if (handoffAlertSessionIds.size > 0) {
+                        startHandoffAlert();
+                    } else {
+                        stopHandoffAlert();
+                    }
                 };
 
                 const statusLabel = (status) => {
@@ -787,20 +819,8 @@
                             sessionTotal.value = Array.isArray(data) ? newSessions.length : (data.total || 0);
                             sessionHasMore.value = Array.isArray(data) ? false : !!data.has_more;
                             
-                            // 仅对 Agent 主动请求人工关注的会话播放提醒。
-                            let shouldAlert = false;
-                            newSessions.forEach(s => {
-                                if (s.status === 'handoff_requested' && !alertedSessions.has(s.session_id)) {
-                                    shouldAlert = true;
-                                    alertedSessions.add(s.session_id);
-                                } else if (s.status !== 'handoff_requested') {
-                                    alertedSessions.delete(s.session_id);
-                                }
-                            });
-                            
-                            if (shouldAlert) {
-                                playAlertSound();
-                            }
+                            // 只要仍有请求接管会话，就持续播放警报音。
+                            syncHandoffAlert(newSessions);
                             
                             sessions.value = newSessions;
                             if (currentSession.value) {
@@ -955,7 +975,16 @@
                         });
                         if (res.ok) {
                             currentSession.value.status = status;
-                            alertedSessions.delete(sid); // Reset alert state
+                            if (status !== 'handoff_requested') {
+                                handoffAlertSessionIds.delete(sid);
+                            } else {
+                                handoffAlertSessionIds.add(sid);
+                            }
+                            if (handoffAlertSessionIds.size > 0) {
+                                startHandoffAlert();
+                            } else {
+                                stopHandoffAlert();
+                            }
                             fetchSessions();
                         } else if (res.status === 401) {
                             triggerLogin();
