@@ -314,7 +314,7 @@
                         <span v-if="currentSession.status && currentSession.status !== 'auto'" :class="statusBadgeClass(currentSession.status)" class="ml-3">
                             {{ statusLabel(currentSession.status) }}
                         </span>
-                        <span class="ml-4 text-xs text-slate-400">ID: {{ currentSession.session_id }}</span>
+                        <!--span class="ml-4 text-xs text-slate-400">ID: {{ currentSession.session_id }}</span-->
                     </div>
                     <div class="flex items-center space-x-2">
                         <button v-if="currentSession.status !== 'human_takeover'" @click="setSessionStatus('human_takeover')" class="text-xs bg-amber-500 text-white px-3 py-1.5 rounded-full hover:bg-amber-600 transition shadow-sm font-medium flex items-center">
