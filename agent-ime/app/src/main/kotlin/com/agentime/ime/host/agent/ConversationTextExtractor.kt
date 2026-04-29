@@ -47,7 +47,7 @@ object ConversationTextExtractor {
             .filter { it.isNotBlank() }
 
         val normalizedLastReply = normalize(lastReplyText)
-        val filtered = allLines.filterNot { shouldIgnoreLine(it, contactName) }
+        val filtered = allLines.filterNot { shouldIgnoreContentLine(it, contactName) }
             .let { lines ->
                 if (lastReplyText.isBlank()) lines else removeKnownReply(lines, normalizedLastReply)
             }
@@ -58,7 +58,7 @@ object ConversationTextExtractor {
         if (scoped.isEmpty()) return ExtractionResult("", "")
 
         val strippedOwn = scoped.filterNot {
-            looksLikeOwnLine(it, normalizedLastReply) || looksLikeAgentStyleLine(it)
+            !isBoundaryLine(it) && (looksLikeOwnLine(it, normalizedLastReply) || looksLikeAgentStyleLine(it))
         }
         if (strippedOwn.isEmpty()) return ExtractionResult("", "")
 
@@ -133,6 +133,10 @@ object ConversationTextExtractor {
 
     private fun shouldIgnoreLine(line: String, contactName: String): Boolean {
         if (isBoundaryLine(line)) return true
+        return shouldIgnoreContentLine(line, contactName)
+    }
+
+    private fun shouldIgnoreContentLine(line: String, contactName: String): Boolean {
         if (line == contactName.trim() && contactName.isNotBlank()) return true
         if (line == "微信") return true
         if (line == "Wuwoo Agent") return true

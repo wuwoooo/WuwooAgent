@@ -870,6 +870,7 @@ class HostForegroundService : Service() {
         pageOcrText: String? = null,
     ): InboundCandidate {
         val candidates = buildList {
+            cap.latestInboundBubbleCropPath?.let { add("最新左侧气泡" to it) }
             cap.sinceLastOutboundCropPath?.let { add("我方最后一条之后会话区" to it) }
             cap.recentInboundClusterCropPath?.let { add("最近连续入站消息块" to it) }
         }
@@ -937,8 +938,9 @@ class HostForegroundService : Service() {
 
     private fun inboundSourceTier(label: String): Int {
         return when {
-            label.contains("我方最后一条之后会话区") -> 0
-            label.contains("最近连续入站消息块") -> 1
+            label.contains("最新左侧气泡") -> 0
+            label.contains("我方最后一条之后会话区") -> 1
+            label.contains("最近连续入站消息块") -> 2
             else -> 5
         }
     }
