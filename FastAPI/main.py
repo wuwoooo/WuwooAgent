@@ -34,6 +34,7 @@ import secrets
 try:
     import database
     from profile_extractor import async_extract_profile, check_and_trigger_profile_update
+    from conversation_summary import async_summarize_conversation
 except ImportError:
     pass
 
@@ -138,6 +139,10 @@ class AdminAgentUpdateRequest(BaseModel):
 
 class AdminAgentPasswordRequest(BaseModel):
     password: str
+
+
+class ConversationSummaryRequest(BaseModel):
+    limit: int | None = 20
 
 
 def get_current_time_str() -> str:
@@ -648,6 +653,22 @@ async def api_extract_profile(session_id: str, username: str = Depends(verify_ad
     try:
         profile = await async_extract_profile(session_id)
         return {"ok": True, "profile": profile}
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": str(e)}
+        )
+
+
+@app.post("/api/admin/sessions/{session_id}/summary")
+async def api_summarize_conversation(
+    session_id: str,
+    payload: ConversationSummaryRequest,
+    username: str = Depends(verify_admin),
+):
+    try:
+        result = await async_summarize_conversation(session_id, payload.limit)
+        return {"ok": True, **result}
     except Exception as e:
         return JSONResponse(
             status_code=500,
