@@ -366,10 +366,15 @@
             <div class="p-4 border-b border-slate-100 bg-slate-50/50 space-y-3">
                 <div class="flex items-center justify-between">
                     <h3 class="font-bold text-slate-700"><i class="fa-solid fa-id-card-clip text-indigo-500 mr-2"></i>接管辅助</h3>
-                    <button @click="extractProfile" :disabled="isExtracting" class="text-xs bg-indigo-100 text-indigo-600 px-3 py-1.5 rounded-full hover:bg-indigo-200 transition font-medium disabled:opacity-50 flex items-center">
-                        <i class="fa-solid fa-wand-magic-sparkles mr-1" :class="{'fa-spin': isExtracting}"></i>
-                        {{ isExtracting ? '提取中...' : '用户画像' }}
-                    </button>
+                    <div class="flex items-center gap-2">
+                        <button @click="showAidModal = true" class="w-8 h-8 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 transition" title="大窗查看接管辅助">
+                            <i class="fa-solid fa-up-right-and-down-left-from-center text-xs"></i>
+                        </button>
+                        <button @click="extractProfile" :disabled="isExtracting" class="text-xs bg-indigo-100 text-indigo-600 px-3 py-1.5 rounded-full hover:bg-indigo-200 transition font-medium disabled:opacity-50 flex items-center">
+                            <i class="fa-solid fa-wand-magic-sparkles mr-1" :class="{'fa-spin': isExtracting}"></i>
+                            {{ isExtracting ? '提取中...' : '用户画像' }}
+                        </button>
+                    </div>
                 </div>
             </div>
             
@@ -499,6 +504,145 @@
             </div>
         </div>
 
+        <!-- 接管辅助大弹窗 -->
+        <div v-if="currentSession && showAidModal" class="fixed inset-0 bg-slate-900/45 backdrop-blur-sm z-50 flex items-center justify-center p-6" @click.self="showAidModal = false">
+            <div class="w-full max-w-6xl max-h-[88vh] bg-white rounded-3xl shadow-2xl flex flex-col overflow-hidden">
+                <div class="px-6 py-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+                    <div>
+                        <h3 class="font-bold text-slate-800 text-lg"><i class="fa-solid fa-id-card-clip text-indigo-500 mr-2"></i>接管辅助</h3>
+                        <p class="text-xs text-slate-400 mt-1">{{ currentSession.contact_name || currentSession.session_id }}</p>
+                    </div>
+                    <button @click="showAidModal = false" class="w-9 h-9 rounded-full bg-white border border-slate-200 text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition">
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
+                </div>
+
+                <div class="p-6 overflow-y-auto grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <section class="rounded-3xl border border-amber-100 bg-amber-50/40 p-5">
+                        <div class="flex items-center justify-between mb-4">
+                            <div>
+                                <p class="font-bold text-slate-700 flex items-center">
+                                    <i class="fa-solid fa-person-chalkboard text-amber-500 mr-2"></i>会话总结
+                                    <span v-if="isSummaryFromCache" class="ml-2 text-[10px] px-2 py-0.5 rounded-full bg-white text-amber-600 border border-amber-100">已缓存</span>
+                                </p>
+                                <p v-if="conversationSummaryMeta.used" class="text-xs text-slate-400 mt-1">已读 {{ conversationSummaryMeta.used }}/{{ conversationSummaryMeta.total }} 条</p>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <select v-model="summaryLimit" @change="restoreSummaryCache" class="text-xs rounded-full border border-amber-100 bg-white px-3 py-1.5 text-slate-600 focus:outline-none focus:ring-2 focus:ring-amber-100">
+                                    <option value="10">最近 10 条</option>
+                                    <option value="20">最近 20 条</option>
+                                    <option value="50">最近 50 条</option>
+                                    <option value="0">最多 100 条</option>
+                                </select>
+                                <button @click="summarizeConversation" :disabled="isSummarizing" class="text-xs bg-amber-100 text-amber-700 px-3 py-1.5 rounded-full hover:bg-amber-200 transition font-medium disabled:opacity-50 flex items-center whitespace-nowrap">
+                                    <i v-if="isSummarizing" class="fa-solid fa-spinner fa-spin mr-1"></i>
+                                    <i v-else class="fa-solid fa-rotate-right mr-1"></i>
+                                    {{ isSummarizing ? '总结中...' : (conversationSummary ? '重新生成' : '生成总结') }}
+                                </button>
+                            </div>
+                        </div>
+
+                        <div v-if="conversationSummary" class="space-y-4">
+                            <div class="p-4 bg-white rounded-2xl border border-amber-100 text-sm text-slate-700 leading-relaxed">
+                                {{ conversationSummary.overview || '暂无概括' }}
+                            </div>
+                            <div class="grid grid-cols-2 gap-3">
+                                <div class="bg-white rounded-xl p-3 border border-slate-100">
+                                    <p class="text-[10px] text-slate-500 mb-2 font-bold">客户状态</p>
+                                    <p class="text-sm text-slate-700">{{ conversationSummary.customer_sentiment || '待判断' }}</p>
+                                </div>
+                                <div class="bg-white rounded-xl p-3 border border-slate-100">
+                                    <p class="text-[10px] text-slate-500 mb-2 font-bold">当前进展</p>
+                                    <p class="text-sm text-slate-700">{{ conversationSummary.latest_status || '暂无' }}</p>
+                                </div>
+                            </div>
+                            <div>
+                                <p class="text-xs font-bold text-slate-500 mb-2">已确认信息</p>
+                                <div v-if="summaryList(conversationSummary.confirmed_info).length" class="space-y-1.5">
+                                    <p v-for="(item, idx) in summaryList(conversationSummary.confirmed_info)" :key="`modal-confirmed-${idx}`" class="text-sm text-slate-600 bg-white border border-slate-100 rounded-lg px-3 py-2">
+                                        {{ item }}
+                                    </p>
+                                </div>
+                                <p v-else class="text-sm text-slate-400 italic">暂无明确结论</p>
+                            </div>
+                            <div>
+                                <p class="text-xs font-bold text-slate-500 mb-2">待确认问题</p>
+                                <div v-if="summaryList(conversationSummary.pending_questions).length" class="space-y-1.5">
+                                    <p v-for="(item, idx) in summaryList(conversationSummary.pending_questions)" :key="`modal-pending-${idx}`" class="text-sm text-slate-600 bg-rose-50 border border-rose-100 rounded-lg px-3 py-2">
+                                        {{ item }}
+                                    </p>
+                                </div>
+                                <p v-else class="text-sm text-slate-400 italic">暂无明显待确认事项</p>
+                            </div>
+                            <div class="p-4 bg-indigo-50 rounded-2xl border border-indigo-100">
+                                <p class="text-[10px] text-indigo-500 mb-2 font-bold">建议接手话术</p>
+                                <p class="text-sm text-slate-700 leading-relaxed">{{ conversationSummary.suggested_next_reply || '暂无建议' }}</p>
+                            </div>
+                        </div>
+                        <div v-else class="h-64 flex items-center justify-center border border-dashed border-amber-200 rounded-2xl text-center text-sm text-slate-400 bg-white/70">
+                            选择条数后点击“生成总结”，快速了解接管上下文
+                        </div>
+                    </section>
+
+                    <section class="rounded-3xl border border-indigo-100 bg-white p-5">
+                        <div class="flex items-center justify-between mb-4">
+                            <p class="font-bold text-slate-700 flex items-center">
+                                <i class="fa-solid fa-id-card-clip text-indigo-500 mr-2"></i>客户画像透视
+                            </p>
+                            <button @click="extractProfile" :disabled="isExtracting" class="text-xs bg-indigo-100 text-indigo-600 px-3 py-1.5 rounded-full hover:bg-indigo-200 transition font-medium disabled:opacity-50 flex items-center">
+                                <i class="fa-solid fa-wand-magic-sparkles mr-1" :class="{'fa-spin': isExtracting}"></i>
+                                {{ isExtracting ? '提取中...' : '重新提取' }}
+                            </button>
+                        </div>
+
+                        <div v-if="profile" class="space-y-5">
+                            <div class="p-4 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl text-white shadow-md relative overflow-hidden">
+                                <i class="fa-solid fa-sack-dollar absolute -right-2 -bottom-2 text-6xl opacity-10"></i>
+                                <p class="text-indigo-100 text-xs mb-1 uppercase tracking-wider font-semibold">销售阶段</p>
+                                <p class="text-xl font-bold">{{ profile.sales_stage || '待确认' }}</p>
+                            </div>
+                            <div class="grid grid-cols-2 gap-3">
+                                <div class="bg-amber-50 rounded-xl p-3 border border-amber-100/50">
+                                    <p class="text-[10px] text-amber-600/70 mb-1 flex items-center font-semibold"><i class="fa-solid fa-map-location-dot w-4"></i>目的地</p>
+                                    <p class="font-medium text-slate-700 text-sm">{{ profile.destination || '未明确' }}</p>
+                                </div>
+                                <div class="bg-blue-50 rounded-xl p-3 border border-blue-100/50">
+                                    <p class="text-[10px] text-blue-600/70 mb-1 flex items-center font-semibold"><i class="fa-solid fa-users w-4"></i>人数</p>
+                                    <p class="font-medium text-slate-700 text-sm">{{ profile.people_count || '未知' }}</p>
+                                </div>
+                                <div class="bg-emerald-50 rounded-xl p-3 border border-emerald-100/50">
+                                    <p class="text-[10px] text-emerald-600/70 mb-1 flex items-center font-semibold"><i class="fa-regular fa-calendar w-4"></i>时间</p>
+                                    <p class="font-medium text-slate-700 text-sm">{{ profile.travel_time || '待定' }}</p>
+                                </div>
+                                <div class="bg-rose-50 rounded-xl p-3 border border-rose-100/50">
+                                    <p class="text-[10px] text-rose-600/70 mb-1 flex items-center font-semibold"><i class="fa-solid fa-wallet w-4"></i>预算</p>
+                                    <p class="font-medium text-slate-700 text-sm">{{ profile.budget || '待确认' }}</p>
+                                </div>
+                            </div>
+                            <div>
+                                <p class="text-xs font-bold text-slate-500 mb-2 border-b border-slate-100 pb-2 flex items-center">
+                                    <i class="fa-solid fa-heart text-rose-400 mr-1.5"></i>核心偏好点
+                                </p>
+                                <div class="flex flex-wrap gap-2" v-if="profile.preferences && getPreferencesList(profile.preferences).length">
+                                    <span v-for="tag in getPreferencesList(profile.preferences)" :key="`modal-pref-${tag}`"
+                                          class="px-2.5 py-1 bg-slate-100 text-slate-600 text-xs rounded-lg border border-slate-200">
+                                        {{ tag }}
+                                    </span>
+                                </div>
+                                <p v-else class="text-sm text-slate-400 italic px-1">尚未提取到明确偏好</p>
+                            </div>
+                        </div>
+                        <div v-else class="h-64 flex flex-col items-center justify-center text-slate-400 text-center px-4 space-y-4 border border-dashed border-slate-200 rounded-2xl">
+                            <div class="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center border border-dashed border-slate-300">
+                                <i class="fa-solid fa-robot text-2xl text-slate-300"></i>
+                            </div>
+                            <p class="text-sm">尚未生成客户画像<br>点击右上角重新提取</p>
+                        </div>
+                    </section>
+                </div>
+            </div>
+        </div>
+
     </div>
 
     <script>
@@ -522,6 +666,7 @@
                 const isSummarizing = ref(false);
                 const isSummaryCollapsed = ref(true);
                 const isSummaryFromCache = ref(false);
+                const showAidModal = ref(false);
                 const messageBox = ref(null);
                 const summaryCachePrefix = 'admin_conversation_summary_v1';
 
@@ -691,6 +836,7 @@
                     profile.value = null;
                     clearSummaryState();
                     isSummaryCollapsed.value = true;
+                    showAidModal.value = false;
                 };
 
                 const triggerLogin = () => {
@@ -1219,6 +1365,7 @@
                     isSummarizing,
                     isSummaryCollapsed,
                     isSummaryFromCache,
+                    showAidModal,
                     messageBox,
                     showLogin,
                     loginAnimate,
