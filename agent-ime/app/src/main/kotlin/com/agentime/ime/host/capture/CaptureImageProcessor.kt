@@ -517,7 +517,8 @@ object CaptureImageProcessor {
         if (width < 80 || height < 120) return null
 
         val searchTop = (height * 0.10f).toInt().coerceAtLeast(0)
-        val searchBottom = (height * 0.95f).toInt().coerceAtMost(height)
+        // 最新消息通常贴近输入栏上方，但输入栏自身也有大量复杂图形；裁剪底部收紧以避免误截输入框/按钮。
+        val searchBottom = (height * 0.90f).toInt().coerceAtMost(height)
         if (searchBottom - searchTop < 40) return null
 
         fun rowComplexity(y: Int, xStart: Int, xEnd: Int): Int {

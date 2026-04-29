@@ -22,6 +22,7 @@ import com.agentime.ime.host.agent.SessionIdentity
 import com.agentime.ime.host.automation.AccessibilityAutomationController
 import com.agentime.ime.host.automation.ConversationListUnreadDetector
 import com.agentime.ime.host.automation.NoopAutomationController
+import com.agentime.ime.host.automation.WechatAccessibilityService
 import com.agentime.ime.host.capture.CaptureProviderFactory
 import com.agentime.ime.host.capture.ProjectionPermissionStore
 import com.agentime.ime.host.ime.BroadcastImeController
@@ -876,12 +877,34 @@ class HostForegroundService : Service() {
         }
         val tierBuckets = linkedMapOf<Int, InboundCandidate>()
 
+        if (cap.latestVisibleMessageSide == "inbound") {
+            val accessibilityText = WechatAccessibilityService.getLatestVisibleInboundText().orEmpty()
+            if (accessibilityText.isNotBlank()) {
+                val res = ConversationTextExtractor.extractLatestInboundMessage(
+                    ocrText = accessibilityText,
+                    contactName = contactName,
+                    lastReplyText = lastReplyText,
+                )
+                logger.log(TAG, "候选源 无障碍最新入站文本: raw=${accessibilityText.take(80)} extracted=${res.text.take(80)}")
+                if (res.text.isNotBlank()) {
+                    tierBuckets[-1] = InboundCandidate(
+                        text = res.text,
+                        signature = res.signature,
+                        sourceLabel = "无障碍最新入站文本",
+                        path = cap.imagePath,
+                        score = scoreInboundCandidate(res.text),
+                    )
+                }
+            }
+        }
+
         if (!pageOcrText.isNullOrBlank()) {
             val res = ConversationTextExtractor.extractLatestInboundMessage(
                 ocrText = pageOcrText,
                 contactName = contactName,
                 lastReplyText = lastReplyText,
             )
+            logger.log(TAG, "候选源 页面OCR预提取: rawLen=${pageOcrText.length} extracted=${res.text.take(80)}")
             if (res.text.isNotBlank()) {
                 val score = scoreInboundCandidate(res.text)
                 tierBuckets[2] = InboundCandidate(
@@ -896,12 +919,16 @@ class HostForegroundService : Service() {
 
         for ((label, path) in candidates) {
             val ocrRes = ocr.recognize(path).trim()
-            if (ocrRes.isBlank()) continue
+            if (ocrRes.isBlank()) {
+                logger.log(TAG, "候选源 $label: OCR 为空")
+                continue
+            }
             val res = ConversationTextExtractor.extractLatestInboundMessage(
                 ocrText = ocrRes,
                 contactName = contactName,
                 lastReplyText = lastReplyText,
             )
+            logger.log(TAG, "候选源 $label: rawLen=${ocrRes.length} extracted=${res.text.take(80)}")
             if (res.text.isBlank()) continue
             val score = scoreInboundCandidate(res.text)
             val tier = inboundSourceTier(label)

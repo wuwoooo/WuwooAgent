@@ -258,6 +258,50 @@ class WechatAccessibilityService : AccessibilityService() {
             return findLikelyChatTitle(root)
         }
 
+        fun getLatestVisibleInboundText(): String? {
+            val svc = instance ?: return null
+            val root = svc.rootInActiveWindow ?: return null
+            if (root.packageName?.toString() != WECHAT_PACKAGE) return null
+
+            val screen = Rect().also { root.getBoundsInScreen(it) }
+            val width = screen.width().coerceAtLeast(1)
+            val height = screen.height().coerceAtLeast(1)
+            val timeLikeRegex = Regex("""^\d{1,2}:\d{2}$""")
+            val noiseTexts = setOf("微信", "返回", "更多", "表情", "按住说话", "切换到键盘", "切换到语音", "更多功能")
+            val candidates = mutableListOf<Pair<String, Rect>>()
+
+            fun isLikelyMessageText(text: String, bounds: Rect): Boolean {
+                if (text.isBlank() || text.length > 160) return false
+                if (text in noiseTexts) return false
+                if (timeLikeRegex.matches(text)) return false
+                if (text.contains("返回") || text.contains("更多")) return false
+                if (bounds.width() <= 0 || bounds.height() <= 0) return false
+                if (bounds.top < height * 0.14f || bounds.bottom > height * 0.90f) return false
+                // 仅作为 OCR 失败兜底：在最新可见消息已判定为 inbound 时，取底部偏左文本。
+                if (bounds.centerX() > width * 0.78f) return false
+                return true
+            }
+
+            fun walk(node: AccessibilityNodeInfo?) {
+                if (node == null) return
+                val text = node.text?.toString()?.trim().orEmpty()
+                if (text.isNotBlank()) {
+                    val bounds = Rect().also { node.getBoundsInScreen(it) }
+                    if (isLikelyMessageText(text, bounds)) {
+                        candidates += text to bounds
+                    }
+                }
+                for (i in 0 until node.childCount) {
+                    walk(node.getChild(i))
+                }
+            }
+
+            walk(root)
+            return candidates
+                .maxWithOrNull(compareBy<Pair<String, Rect>> { it.second.bottom }.thenBy { it.second.top })
+                ?.first
+        }
+
         fun isLikelyOnChatPage(): Boolean {
             val svc = instance ?: return false
             val root = svc.rootInActiveWindow ?: return false
