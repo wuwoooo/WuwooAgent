@@ -40,6 +40,15 @@ class HostForegroundService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var logger: HostLogger
     private var lastReportedOutboundText: String = ""
+    private data class ContactBindingResult(
+        val contactName: String,
+        val titleSource: String,
+        val titleName: String,
+        val titleScore: Int,
+        val headerName: String,
+        val headerScore: Int,
+    )
+
     private val startupScanRunnable = Runnable {
         val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
         if (!prefs.getBoolean("runtime_enabled", false)) return@Runnable
@@ -146,11 +155,16 @@ class HostForegroundService : Service() {
                 logger.log(TAG, "截图分析聊天页判定: ${chatAnalysis.debugSummary}")
                 if (chatAnalysis.looksLikeChatPage) {
                     val prefsReply = getSharedPreferences("host_config", Context.MODE_PRIVATE)
-                    val contactName = SessionIdentity.normalizeContactName(
-                        this@HostForegroundService,
-                        ConversationListUnreadDetector.extractChatContactNameFromOcr(headerOcrText)
-                            .ifBlank { chatAnalysis.contactName }
-                            .ifBlank { "当前联系人" },
+                    val binding = resolveChatContactBinding(
+                        ocr = ocr,
+                        cap = cap,
+                        headerOcrText = headerOcrText,
+                        listRowContactHint = "",
+                    )
+                    val contactName = binding.contactName
+                    logger.log(
+                        TAG,
+                        "聊天页联系人绑定: title=${binding.titleName} source=${binding.titleSource} titleScore=${binding.titleScore} header=${binding.headerName} headerScore=${binding.headerScore} contact=$contactName",
                     )
                     if (contactName.isBlank() || contactName == "当前联系人") {
                         logger.log(TAG, "截图分析结果：当前是聊天页，但联系人识别无效，跳过本轮")
@@ -281,16 +295,16 @@ class HostForegroundService : Service() {
                 headerRawName,
                 useFuzzyMatch = true,
             )
-            val contactName = when {
-                listHintStrict.isNotBlank() -> listHintStrict
-                headerScore >= 80 &&
-                    headerResolvedName.isNotBlank() &&
-                    headerResolvedName != "当前联系人" -> headerResolvedName
-                else -> "当前联系人"
-            }
+            val binding = resolveChatContactBinding(
+                ocr = ocr,
+                cap = postClickCap,
+                headerOcrText = postClickHeaderOcr,
+                listRowContactHint = listRowContactHint,
+            )
+            val contactName = binding.contactName
             logger.log(
                 TAG,
-                "点击入会话联系人绑定: listHint=$listHintStrict header=$headerResolvedName headerScore=$headerScore",
+                "点击入会话联系人绑定: listHint=$listHintStrict title=${binding.titleName} source=${binding.titleSource} titleScore=${binding.titleScore} header=$headerResolvedName headerScore=$headerScore contact=$contactName",
             )
             if (contactName.isBlank() || contactName == "当前联系人") {
                 logger.log(TAG, "点击未读会话后，联系人绑定置信度不足，取消本轮（避免串会话）")
@@ -298,13 +312,13 @@ class HostForegroundService : Service() {
                 return
             }
             if (listRowContactHint.isNotBlank() &&
-                headerResolvedName.isNotBlank() &&
-                headerResolvedName != "当前联系人" &&
-                headerResolvedName != contactName
+                listHintStrict.isNotBlank() &&
+                binding.titleName.isNotBlank() &&
+                binding.titleName != listHintStrict
             ) {
                 logger.log(
                     TAG,
-                    "点击入会话联系人校验不一致：listHint=$listRowContactHint header=$headerResolvedName；已采用 listHint 作为会话主键",
+                    "点击入会话联系人校验不一致：listHint=$listRowContactHint title=${binding.titleName}；已采用聊天页可信标题作为会话主键",
                 )
             }
             logger.log(TAG, "截图分析进入会话成功，联系人=$contactName")
@@ -712,6 +726,76 @@ class HostForegroundService : Service() {
             logger.log(TAG, "顶部栏采用 $bestLabel, 长度=${bestText.length}, 候选分数=$bestScore")
         }
         return bestText
+    }
+
+    private fun resolveChatContactBinding(
+        ocr: FallbackOcrProvider,
+        cap: com.agentime.ime.host.capture.CaptureResult,
+        headerOcrText: String,
+        listRowContactHint: String,
+    ): ContactBindingResult {
+        val accessibilityName = normalizeCounterpartyName(
+            com.agentime.ime.host.automation.WechatAccessibilityService.getCurrentChatContactName(),
+            useFuzzyMatch = true,
+        )
+        val titleOcrText = recognizeTitleOnly(ocr, cap)
+        val titleRawName = ConversationListUnreadDetector.extractChatContactNameFromOcr(titleOcrText)
+        val titleScore = ConversationListUnreadDetector.scoreHeaderOcrCandidate(titleOcrText)
+        val titleName = normalizeCounterpartyName(titleRawName, useFuzzyMatch = true)
+        val trustedTitleName = when {
+            accessibilityName.isNotBlank() -> accessibilityName
+            titleScore >= 80 && titleName.isNotBlank() -> titleName
+            else -> ""
+        }
+        val trustedTitleSource = when {
+            accessibilityName.isNotBlank() -> "accessibility"
+            titleScore >= 80 && titleName.isNotBlank() -> "title_ocr"
+            else -> "none"
+        }
+
+        val listHintName = normalizeCounterpartyName(listRowContactHint, useFuzzyMatch = false)
+        val headerRawName = ConversationListUnreadDetector.extractChatContactNameFromOcr(headerOcrText)
+        val headerScore = ConversationListUnreadDetector.scoreHeaderOcrCandidate(headerOcrText)
+        val headerName = normalizeCounterpartyName(headerRawName, useFuzzyMatch = true)
+        val contactName = when {
+            trustedTitleName.isNotBlank() -> trustedTitleName
+            listHintName.isNotBlank() -> listHintName
+            headerScore >= 120 && headerName.isNotBlank() -> headerName
+            else -> "当前联系人"
+        }
+
+        return ContactBindingResult(
+            contactName = contactName,
+            titleSource = trustedTitleSource,
+            titleName = trustedTitleName,
+            titleScore = titleScore,
+            headerName = headerName,
+            headerScore = headerScore,
+        )
+    }
+
+    private fun recognizeTitleOnly(
+        ocr: FallbackOcrProvider,
+        cap: com.agentime.ime.host.capture.CaptureResult,
+    ): String {
+        val path = cap.titleCropPath ?: return ""
+        return ocr.recognize(path).trim().also { text ->
+            if (text.isNotBlank()) {
+                logger.log(
+                    TAG,
+                    "标题栏裁剪 OCR 长度=${text.length}, 候选分数=${ConversationListUnreadDetector.scoreHeaderOcrCandidate(text)}",
+                )
+            }
+        }
+    }
+
+    private fun normalizeCounterpartyName(raw: String?, useFuzzyMatch: Boolean): String {
+        val normalized = SessionIdentity.normalizeContactName(
+            this@HostForegroundService,
+            raw,
+            useFuzzyMatch = useFuzzyMatch,
+        )
+        return normalized.takeIf { it.isNotBlank() && it != "当前联系人" }.orEmpty()
     }
 
     private fun recognizePageWithFallbacks(ocr: FallbackOcrProvider, cap: com.agentime.ime.host.capture.CaptureResult): String {

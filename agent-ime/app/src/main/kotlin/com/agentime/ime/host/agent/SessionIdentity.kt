@@ -98,6 +98,7 @@ object SessionIdentity {
     ): String {
         val trimmed = canonicalizeContactName(raw)
         if (trimmed == "当前联系人") return trimmed
+        if (isLikelySelfContactName(context, trimmed)) return "当前联系人"
 
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val knownContactsStr = prefs.getString("known_contacts_list", "") ?: ""
@@ -147,6 +148,33 @@ object SessionIdentity {
         prefs.edit().putString("known_contacts_list", knownNames.joinToString(",,")).apply()
 
         return trimmed
+    }
+
+    fun isLikelySelfContactName(context: Context, raw: String?): Boolean {
+        val candidate = canonicalizeContactName(raw)
+        if (candidate == "当前联系人") return false
+        val candidateKey = contactIdentityKey(candidate)
+        if (candidateKey.isBlank()) return false
+
+        val prefs = context.getSharedPreferences("host_config", Context.MODE_PRIVATE)
+        val configuredNames = buildList {
+            add(prefs.getString("agent_display_name", "").orEmpty())
+            add(prefs.getString("wechat_self_name", "").orEmpty())
+            add(prefs.getString("self_wechat_name", "").orEmpty())
+            add(prefs.getString("self_contact_name", "").orEmpty())
+            add(prefs.getString("self_contact_names", "").orEmpty())
+        }
+            .flatMap { it.split(",,", ",", "\n", "，") }
+            .map { canonicalizeContactName(it) }
+            .filter { it != "当前联系人" }
+
+        return configuredNames.any { contactIdentityKey(it) == candidateKey }
+    }
+
+    private fun contactIdentityKey(value: String): String {
+        return canonicalizeContactName(value)
+            .replace(Regex("""\s+"""), "")
+            .lowercase()
     }
 
     fun buildSessionId(context: Context, contactName: String): String {
