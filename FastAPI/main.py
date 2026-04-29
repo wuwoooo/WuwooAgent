@@ -12,6 +12,7 @@ import datetime
 import logging
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -144,6 +145,48 @@ def get_current_time_str() -> str:
     weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     weekday_str = weekdays[now.weekday()]
     return now.strftime("%Y-%m-%d %H:%M") + f"（{weekday_str}）"
+
+
+HANDOFF_DIRECT_RE = re.compile(
+    r"(帮我.{0,8}(安排|规划|定制|报价)|"
+    r"(出|做|整理|安排|定制).{0,8}(方案|行程|报价)|"
+    r"(方案|行程|报价).{0,8}(出|做|整理|安排|定制)|"
+    r"报个价|报价|核价|价格|费用|多少钱|"
+    r"下单|预订|订一下|定一下|"
+    r"就这个|按这个|可以安排|安排吧|确定了|定了)"
+)
+HANDOFF_ACK_TEXTS = {"可以", "可以的", "好的", "好", "行", "没问题", "嗯", "嗯嗯", "ok", "OK"}
+HANDOFF_CONTEXT_RE = re.compile(
+    r"(按这个安排|就按|安排来|出方案|方案和报价|报价方案|"
+    r"整理.{0,8}(方案|行程|报价)|"
+    r"行程细节.{0,8}落实|"
+    r"帮您.{0,12}(落实|安排|整理)|"
+    r"(酒店|用车|租车|咖啡厅).{0,12}(推荐|安排|落实))"
+)
+
+
+def _should_request_handoff(latest_text: str, session_id: str) -> bool:
+    """用确定性规则兜底识别客户已经同意推进方案/报价。"""
+    text = re.sub(r"\s+", "", (latest_text or "").strip())
+    if not text:
+        return False
+    if HANDOFF_DIRECT_RE.search(text):
+        return True
+
+    if text not in HANDOFF_ACK_TEXTS:
+        return False
+
+    try:
+        recent_messages = database.get_session_messages(session_id)[-8:]
+    except Exception:
+        return False
+
+    recent_context = "\n".join(str(msg.get("content") or "") for msg in recent_messages)
+    return bool(HANDOFF_CONTEXT_RE.search(recent_context))
+
+
+def _handoff_reply_text() -> str:
+    return "好的，我这就给您整理具体的行程方案和报价～"
 
 
 def _format_duration(seconds: int) -> str:
@@ -392,6 +435,35 @@ async def wechat_chat(
         pure_user_text, wrapped_user_text = _build_user_prompt_from_ocr(contact_name, ocr_text or "", current_status)
     else:
         pure_user_text, wrapped_user_text = _build_user_prompt(contact_name, current_status)
+
+    if _should_request_handoff(pure_user_text, session_id):
+        reply_text = _handoff_reply_text()
+        try:
+            database.save_message(session_id, contact_name, "user", pure_user_text, agent_id=agent_id)
+            database.save_message(session_id, contact_name, "assistant", reply_text, agent_id=agent_id)
+            database.update_session_status(session_id, "handoff_requested", agent_id=agent_id)
+            asyncio.create_task(check_and_trigger_profile_update(session_id))
+        except Exception as e:
+            logger.warning(
+                "确定性接管触发后保存状态失败: agent_id=%s session_id=%s contact=%s error=%s",
+                agent_id,
+                session_id,
+                contact_name,
+                e,
+            )
+        return {
+            "ok": True,
+            "agent_id": agent_id,
+            "agent_display_name": agent.get("display_name") or agent.get("username"),
+            "session_id": session_id,
+            "current_status": "handoff_requested",
+            "handoff_requested": True,
+            "messages": [
+                {"role": "user", "text": pure_user_text},
+                {"role": "assistant", "text": reply_text},
+            ],
+            "reply_text": reply_text,
+        }
 
     provider = _provider_from_env()
     try:
