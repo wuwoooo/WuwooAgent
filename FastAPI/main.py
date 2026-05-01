@@ -255,7 +255,8 @@ def _build_agent_continuation_prompt(
         f"{_format_profile_for_prompt(profile)}\n\n"
         f"最近聊天记录：\n{_format_messages_for_prompt(messages, limit)}\n\n"
         "任务：后台人员已经点击“由 Agent 出方案”，请你继续以旅游定制顾问“小鹿”的身份，"
-        "直接生成一条可以发送给客户的初版行程方案。"
+        "直接生成一条可以发送给客户的初版行程方案。请使用微信里容易阅读和复制的排版，"
+        "每个自然段之间必须用空行分隔。"
     )
 
 
@@ -275,7 +276,9 @@ def _run_volc_agent_continuation(prompt: str) -> str:
 2. 可以给出初版行程框架、玩法/住宿/用车建议、下一步确认项。
 3. 如果价格、酒店房态、车价等信息没有可靠依据，不要编造具体数字，用“我这边继续核算后发您准确报价”表达。
 4. 如果关键信息不足，也要先给一个可执行的初步方向，并用 1 到 3 个问题补齐缺口。
-5. 语气自然、专业、像真人定制师；不要输出 [HANDOFF]。"""
+5. 必须保留清晰排版：开头一句话单独成段；方案按“初步安排：”“推荐重点：”“还需要确认：”等小段落组织；段落之间用空行分隔。
+6. 不要使用 Markdown 表格，不要堆成一整段；适合复制到微信后仍能分段阅读。
+7. 语气自然、专业、像真人定制师；不要输出 [HANDOFF]。"""
 
     messages = [{"role": "system", "content": system_prompt}]
     if knowledge_context:

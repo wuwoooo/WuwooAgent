@@ -341,7 +341,7 @@
                                 {{ msg.role === 'user' ? '客户' : '智能助理' }} • {{ formatTime(msg.created_at) }}
                             </span>
                             <div class="flex items-center space-x-2" :class="msg.role === 'user' ? 'flex-row' : 'flex-row-reverse space-x-reverse'">
-                                <div class="px-4 py-2.5 rounded-2xl shadow-sm text-sm leading-relaxed"
+                                <div class="px-4 py-2.5 rounded-2xl shadow-sm text-sm leading-relaxed whitespace-pre-wrap break-words"
                                      :class="msg.role === 'user' ? 'bg-white text-slate-700 rounded-tl-none border border-slate-100' : 'bg-indigo-500 text-white rounded-tr-none'">
                                     {{ msg.content }}
                                 </div>
