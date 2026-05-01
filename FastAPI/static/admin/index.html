@@ -377,6 +377,9 @@
                         <button @click="showAidModal = true" class="w-8 h-8 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 transition" title="大窗查看接管辅助">
                             <i class="fa-solid fa-up-right-and-down-left-from-center text-xs"></i>
                         </button>
+                        <button @click="showRemarkModal = true" class="text-xs bg-indigo-600 text-white px-3 py-1.5 rounded-full hover:bg-indigo-700 transition font-medium flex items-center">
+                            <i class="fa-solid fa-tag mr-1"></i>备注建议
+                        </button>
                         <button @click="extractProfile" :disabled="isExtracting" class="text-xs bg-indigo-100 text-indigo-600 px-3 py-1.5 rounded-full hover:bg-indigo-200 transition font-medium disabled:opacity-50 flex items-center">
                             <i class="fa-solid fa-wand-magic-sparkles mr-1" :class="{'fa-spin': isExtracting}"></i>
                             {{ isExtracting ? '提取中...' : '用户画像' }}
@@ -386,48 +389,6 @@
             </div>
             
             <div class="p-5 flex-1 overflow-y-auto">
-                <div class="mb-6 rounded-2xl border border-indigo-100 bg-indigo-50/40 overflow-hidden">
-                    <div class="px-4 py-3 flex items-center justify-between">
-                        <div>
-                            <p class="text-xs font-bold text-slate-600 flex items-center">
-                                <i class="fa-solid fa-tag text-indigo-500 mr-1.5"></i>微信备注建议
-                            </p>
-                            <p class="text-[11px] text-slate-400 mt-1">Agent 只给建议，人工复制后去微信手工备注。</p>
-                        </div>
-                        <button @click="refreshRemarkSuggestion" :disabled="isRefreshingRemark"
-                                class="text-xs bg-white text-indigo-600 px-3 py-1.5 rounded-full hover:bg-indigo-100 transition font-bold disabled:opacity-50">
-                            <i class="fa-solid mr-1" :class="isRefreshingRemark ? 'fa-spinner fa-spin' : 'fa-rotate-right'"></i>{{ isRefreshingRemark ? '生成中...' : '生成建议' }}
-                        </button>
-                    </div>
-                    <div class="px-4 pb-4">
-                        <div v-if="currentSession.suggested_remark" class="p-4 bg-white rounded-2xl border border-indigo-100 space-y-3">
-                            <div class="flex items-center justify-between gap-3">
-                                <div class="min-w-0">
-                                    <p class="text-[10px] text-slate-400 font-bold mb-1">建议备注</p>
-                                    <p class="font-black text-slate-800 truncate" :title="currentSession.suggested_remark">{{ currentSession.suggested_remark }}</p>
-                                </div>
-                                <span class="text-[10px] px-2 py-0.5 rounded-full shrink-0"
-                                      :class="currentSession.suggested_remark_status === 'applied' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'">
-                                    {{ currentSession.suggested_remark_status === 'applied' ? '已手工备注' : confidenceLabel(currentSession.suggested_remark_confidence) }}
-                                </span>
-                            </div>
-                            <p class="text-xs text-slate-500 leading-relaxed">{{ currentSession.suggested_remark_reason || '根据当前画像生成' }}</p>
-                            <div class="flex gap-2">
-                                <button @click="copyRemarkSuggestion" class="flex-1 text-xs bg-indigo-600 text-white px-3 py-2 rounded-xl hover:bg-indigo-700 font-bold">
-                                    <i class="fa-regular fa-copy mr-1"></i>复制备注
-                                </button>
-                                <button @click="markRemarkApplied" :disabled="isMarkingRemarkApplied || currentSession.suggested_remark_status === 'applied'"
-                                        class="flex-1 text-xs bg-emerald-100 text-emerald-700 px-3 py-2 rounded-xl hover:bg-emerald-200 font-bold disabled:opacity-50">
-                                    <i class="fa-solid mr-1" :class="isMarkingRemarkApplied ? 'fa-spinner fa-spin' : 'fa-check'"></i>{{ currentSession.suggested_remark_status === 'applied' ? '已标记' : '标记已备注' }}
-                                </button>
-                            </div>
-                        </div>
-                        <div v-else class="border border-dashed border-indigo-200 rounded-2xl p-4 text-center text-sm text-slate-400 bg-white/70">
-                            提取画像后会自动生成；也可点击“生成建议”。
-                        </div>
-                    </div>
-                </div>
-
                 <div class="mb-6 rounded-2xl border border-amber-100 bg-amber-50/40 overflow-hidden">
                     <button @click="isSummaryCollapsed = !isSummaryCollapsed" class="w-full px-4 py-3 flex items-center justify-between text-left hover:bg-amber-50 transition">
                         <span class="text-xs font-bold text-slate-600 flex items-center">
@@ -549,6 +510,55 @@
                         <i class="fa-solid fa-robot text-2xl text-slate-300"></i>
                     </div>
                     <p class="text-sm">尚未生成客户画像<br>点击右上角深度提取</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- 微信备注建议弹窗 -->
+        <div v-if="currentSession && showRemarkModal" class="fixed inset-0 bg-slate-900/45 backdrop-blur-sm z-50 flex items-center justify-center p-6" @click.self="showRemarkModal = false">
+            <div class="w-full max-w-lg bg-white rounded-3xl shadow-2xl overflow-hidden border border-white/60">
+                <div class="px-6 py-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+                    <div>
+                        <h3 class="font-bold text-slate-800 text-lg"><i class="fa-solid fa-tag text-indigo-500 mr-2"></i>微信备注建议</h3>
+                        <p class="text-xs text-slate-400 mt-1">Agent 只给建议，人工复制后去微信手工备注。</p>
+                    </div>
+                    <button @click="showRemarkModal = false" class="w-9 h-9 rounded-full bg-white border border-slate-200 text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition">
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
+                </div>
+
+                <div class="p-6 space-y-4">
+                    <div v-if="currentSession.suggested_remark" class="p-4 bg-indigo-50 rounded-2xl border border-indigo-100 space-y-3">
+                        <div class="flex items-center justify-between gap-3">
+                            <div class="min-w-0">
+                                <p class="text-[10px] text-slate-400 font-bold mb-1">建议备注</p>
+                                <p class="font-black text-slate-800 truncate" :title="currentSession.suggested_remark">{{ currentSession.suggested_remark }}</p>
+                            </div>
+                            <span class="text-[10px] px-2 py-0.5 rounded-full shrink-0"
+                                  :class="currentSession.suggested_remark_status === 'applied' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'">
+                                {{ currentSession.suggested_remark_status === 'applied' ? '已手工备注' : confidenceLabel(currentSession.suggested_remark_confidence) }}
+                            </span>
+                        </div>
+                        <p class="text-xs text-slate-500 leading-relaxed">{{ currentSession.suggested_remark_reason || '根据当前画像生成' }}</p>
+                    </div>
+                    <div v-else class="border border-dashed border-indigo-200 rounded-2xl p-6 text-center text-sm text-slate-400 bg-indigo-50/40">
+                        提取画像后会自动生成；也可点击“生成建议”。
+                    </div>
+
+                    <div class="grid grid-cols-3 gap-2">
+                        <button @click="refreshRemarkSuggestion" :disabled="isRefreshingRemark"
+                                class="text-xs bg-white text-indigo-600 px-3 py-2 rounded-xl hover:bg-indigo-50 border border-indigo-100 font-bold disabled:opacity-50">
+                            <i class="fa-solid mr-1" :class="isRefreshingRemark ? 'fa-spinner fa-spin' : 'fa-rotate-right'"></i>{{ isRefreshingRemark ? '生成中...' : '生成建议' }}
+                        </button>
+                        <button @click="copyRemarkSuggestion" :disabled="!currentSession.suggested_remark"
+                                class="text-xs bg-indigo-600 text-white px-3 py-2 rounded-xl hover:bg-indigo-700 font-bold disabled:opacity-50">
+                            <i class="fa-regular fa-copy mr-1"></i>复制备注
+                        </button>
+                        <button @click="markRemarkApplied" :disabled="isMarkingRemarkApplied || !currentSession.suggested_remark || currentSession.suggested_remark_status === 'applied'"
+                                class="text-xs bg-emerald-100 text-emerald-700 px-3 py-2 rounded-xl hover:bg-emerald-200 font-bold disabled:opacity-50">
+                            <i class="fa-solid mr-1" :class="isMarkingRemarkApplied ? 'fa-spinner fa-spin' : 'fa-check'"></i>{{ currentSession.suggested_remark_status === 'applied' ? '已标记' : '已备注' }}
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -719,6 +729,7 @@
                 const isSummaryCollapsed = ref(true);
                 const isSummaryFromCache = ref(false);
                 const showAidModal = ref(false);
+                const showRemarkModal = ref(false);
                 const messageBox = ref(null);
                 const summaryCachePrefix = 'admin_conversation_summary_v1';
 
@@ -889,6 +900,7 @@
                     clearSummaryState();
                     isSummaryCollapsed.value = true;
                     showAidModal.value = false;
+                    showRemarkModal.value = false;
                 };
 
                 const triggerLogin = () => {
@@ -1281,14 +1293,41 @@
                     }
                 };
 
+                const fallbackCopyText = (text) => {
+                    const textarea = document.createElement('textarea');
+                    textarea.value = text;
+                    textarea.setAttribute('readonly', '');
+                    textarea.style.position = 'fixed';
+                    textarea.style.left = '-9999px';
+                    textarea.style.top = '0';
+                    document.body.appendChild(textarea);
+                    textarea.focus();
+                    textarea.select();
+                    let copied = false;
+                    try {
+                        copied = document.execCommand('copy');
+                    } finally {
+                        document.body.removeChild(textarea);
+                    }
+                    return copied;
+                };
+
                 const copyRemarkSuggestion = async () => {
                     const remark = currentSession.value?.suggested_remark || '';
                     if (!remark) return;
                     try {
-                        await navigator.clipboard.writeText(remark);
+                        if (navigator.clipboard && window.isSecureContext) {
+                            await navigator.clipboard.writeText(remark);
+                        } else if (!fallbackCopyText(remark)) {
+                            throw new Error('fallback copy failed');
+                        }
                         alert('备注已复制，请到微信联系人资料页手工粘贴保存。');
                     } catch (e) {
-                        window.prompt('复制失败，请手动复制备注：', remark);
+                        if (fallbackCopyText(remark)) {
+                            alert('备注已复制，请到微信联系人资料页手工粘贴保存。');
+                            return;
+                        }
+                        window.prompt('浏览器禁止自动复制，请手动复制备注：', remark);
                     }
                 };
 
@@ -1551,6 +1590,7 @@
                     isSummaryCollapsed,
                     isSummaryFromCache,
                     showAidModal,
+                    showRemarkModal,
                     messageBox,
                     showLogin,
                     loginAnimate,
