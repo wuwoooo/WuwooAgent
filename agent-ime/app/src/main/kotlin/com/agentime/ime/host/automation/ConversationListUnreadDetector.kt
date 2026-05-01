@@ -39,6 +39,16 @@ object ConversationListUnreadDetector {
         """^[\w\-.一-龥]+?\.(apk|jpg|jpeg|png|gif|webp|pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|7z)(\.\d+)?$""",
         RegexOption.IGNORE_CASE,
     )
+    private val blockedWechatSystemPageTitles = setOf("新的朋友")
+
+    fun isBlockedWechatSystemPageTitle(raw: String?): Boolean {
+        val normalized = raw.orEmpty()
+            .replace("（", "(")
+            .replace("）", ")")
+            .replace(Regex("""\s+"""), "")
+            .trim()
+        return normalized in blockedWechatSystemPageTitles
+    }
 
     fun analyzeChatPage(ocrText: String, headerOcrText: String = ""): ChatPageAnalysis {
         val lines = ocrText.lines().map { it.trim() }.filter { it.isNotBlank() }
@@ -51,6 +61,7 @@ object ConversationListUnreadDetector {
         val contactName = headerContactName.ifBlank { pageContactName }
         val headerLooksLikeListTitle = headerLines.any { listTitleRegex.matches(it.replace("（", "(").replace("）", ")")) }
         val pageLooksLikeListTitle = lines.take(4).any { listTitleRegex.matches(it.replace("（", "(").replace("）", ")")) }
+        val blockedSystemPageTitle = (headerLines + lines.take(3)).any { isBlockedWechatSystemPageTitle(it) }
         val messageLikeLines = lines.filter { isLikelyChatMessageLine(it) }
         val hasTimeline = lines.any { timeRegex.matches(it) }
         val hasHeaderCandidate = headerContactName.isNotBlank() || normalizedHeaderText.isNotBlank()
@@ -66,6 +77,7 @@ object ConversationListUnreadDetector {
             }
         val looksLikeChatPage =
             tabSignalAcceptable &&
+                !blockedSystemPageTitle &&
                 !headerLooksLikeListTitle &&
                 !pageLooksLikeListTitle &&
                 (hasHeaderCandidate || hasConversationStructure)
@@ -74,6 +86,7 @@ object ConversationListUnreadDetector {
             "looksLikeChatPage=$looksLikeChatPage " +
                 "contactName=${if (contactName.isBlank()) "null" else contactName} " +
                 "headerContact=${if (headerContactName.isBlank()) "null" else headerContactName} " +
+                "blockedSystemPageTitle=$blockedSystemPageTitle " +
                 "messageLikeLines=${messageLikeLines.size} " +
                 "hasTimeline=$hasTimeline " +
                 "tabSignalAcceptable=$tabSignalAcceptable " +
@@ -426,6 +439,7 @@ object ConversationListUnreadDetector {
                     attachmentNameRegex.matches(line) ||
                     fullTimestampRegex.matches(line) ||
                     SessionIdentity.isTransientContactTitle(line) ||
+                    isBlockedWechatSystemPageTitle(line) ||
                     line.length < 2 ||
                     line.length > 24 ||
                     !contactLikeCharRegex.containsMatchIn(line) ||

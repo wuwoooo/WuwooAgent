@@ -167,6 +167,10 @@ class HostForegroundService : Service() {
                         TAG,
                         "聊天页联系人绑定: title=${binding.titleName} source=${binding.titleSource} titleScore=${binding.titleScore} header=${binding.headerName} headerScore=${binding.headerScore} contact=$contactName",
                     )
+                    if (ConversationListUnreadDetector.isBlockedWechatSystemPageTitle(contactName)) {
+                        logger.log(TAG, "截图分析结果：识别到微信系统页标题($contactName)，跳过本轮且不执行点击/返回")
+                        return
+                    }
                     if (contactName.isBlank() || contactName == "当前联系人") {
                         logger.log(TAG, "截图分析结果：当前是聊天页，但联系人识别无效，跳过本轮")
                         returnToConversationList("聊天页联系人识别无效")
@@ -315,6 +319,10 @@ class HostForegroundService : Service() {
                 TAG,
                 "点击入会话联系人绑定: listHint=$listHintStrict title=${binding.titleName} source=${binding.titleSource} titleScore=${binding.titleScore} header=$headerResolvedName headerScore=$headerScore contact=$contactName",
             )
+            if (ConversationListUnreadDetector.isBlockedWechatSystemPageTitle(contactName)) {
+                logger.log(TAG, "点击未读会话后识别到微信系统页标题($contactName)，取消本轮且不执行后续点击")
+                return
+            }
             if (contactName.isBlank() || contactName == "当前联系人") {
                 logger.log(TAG, "点击未读会话后，联系人绑定置信度不足，取消本轮（避免串会话）")
                 returnToConversationList("点击后联系人绑定置信度不足")
@@ -483,6 +491,10 @@ class HostForegroundService : Service() {
 
         try {
             moveState(HostState.IDLE, "开始任务: $sessionId/$contactName")
+            if (ConversationListUnreadDetector.isBlockedWechatSystemPageTitle(contactName)) {
+                logger.log(TAG, "runOnce 拒绝处理微信系统页标题($contactName)，停止本轮自动回复")
+                return
+            }
             logger.log(TAG, "当前截图 provider=$captureProvider")
 
             if (executionMode == "manual") {
@@ -1057,6 +1069,10 @@ class HostForegroundService : Service() {
         lastReplyText: String,
         sessionId: String,
     ): InboundCandidate? {
+        if (ConversationListUnreadDetector.isBlockedWechatSystemPageTitle(contactName)) {
+            logger.log(TAG, "语音转文字跳过：联系人标题为微信系统页($contactName)")
+            return null
+        }
         if (!initialCap.latestInboundVoiceRedDot) return null
         val redX = initialCap.latestInboundVoiceRedDotX ?: return null
         val redY = initialCap.latestInboundVoiceRedDotY ?: return null
