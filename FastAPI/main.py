@@ -155,6 +155,10 @@ class AgentContinuationRequest(BaseModel):
     limit: int | None = 30
 
 
+class RemarkAppliedRequest(BaseModel):
+    applied_remark: str = ""
+
+
 def get_current_time_str() -> str:
     now = datetime.datetime.now(LOCAL_TZ)
     weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
@@ -787,12 +791,45 @@ async def api_admin_set_agent_password(agent_id: int, payload: AdminAgentPasswor
 async def api_extract_profile(session_id: str, username: str = Depends(verify_admin)):
     try:
         profile = await async_extract_profile(session_id)
-        return {"ok": True, "profile": profile}
+        session = database.get_session(session_id)
+        return {"ok": True, "profile": profile, "session": session}
     except Exception as e:
         return JSONResponse(
             status_code=500,
             content={"ok": False, "error": str(e)}
         )
+
+
+@app.post("/api/admin/sessions/{session_id}/remark-suggestion")
+async def api_refresh_remark_suggestion(session_id: str, username: str = Depends(verify_admin)):
+    session = database.refresh_remark_suggestion(session_id)
+    if not session:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "会话不存在"})
+    logger.info(
+        "管理员 %s 刷新备注建议: session_id=%s remark=%s",
+        username,
+        session_id,
+        session.get("suggested_remark"),
+    )
+    return {"ok": True, "session": session}
+
+
+@app.post("/api/admin/sessions/{session_id}/remark-applied")
+async def api_mark_remark_applied(
+    session_id: str,
+    payload: RemarkAppliedRequest,
+    username: str = Depends(verify_admin),
+):
+    session = database.mark_remark_applied(session_id, payload.applied_remark)
+    if not session:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "会话不存在"})
+    logger.info(
+        "管理员 %s 标记已手工备注: session_id=%s remark=%s",
+        username,
+        session_id,
+        payload.applied_remark or session.get("suggested_remark"),
+    )
+    return {"ok": True, "session": session}
 
 
 @app.post("/api/admin/sessions/{session_id}/summary")

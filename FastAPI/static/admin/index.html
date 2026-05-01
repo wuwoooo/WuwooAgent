@@ -281,6 +281,10 @@
                         <span v-if="session.profile_json" class="text-xs px-2 py-0.5 bg-green-100 text-green-700 rounded-full">
                             <i class="fa-solid fa-check mr-1"></i>已画像
                         </span>
+                        <span v-if="session.suggested_remark" class="text-xs px-2 py-0.5 rounded-full"
+                              :class="session.suggested_remark_status === 'applied' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'">
+                            <i class="fa-solid fa-tag mr-1"></i>{{ session.suggested_remark_status === 'applied' ? '已备注' : '待备注' }}
+                        </span>
                     </div>
                 </div>
             </div>
@@ -382,6 +386,48 @@
             </div>
             
             <div class="p-5 flex-1 overflow-y-auto">
+                <div class="mb-6 rounded-2xl border border-indigo-100 bg-indigo-50/40 overflow-hidden">
+                    <div class="px-4 py-3 flex items-center justify-between">
+                        <div>
+                            <p class="text-xs font-bold text-slate-600 flex items-center">
+                                <i class="fa-solid fa-tag text-indigo-500 mr-1.5"></i>微信备注建议
+                            </p>
+                            <p class="text-[11px] text-slate-400 mt-1">Agent 只给建议，人工复制后去微信手工备注。</p>
+                        </div>
+                        <button @click="refreshRemarkSuggestion" :disabled="isRefreshingRemark"
+                                class="text-xs bg-white text-indigo-600 px-3 py-1.5 rounded-full hover:bg-indigo-100 transition font-bold disabled:opacity-50">
+                            <i class="fa-solid mr-1" :class="isRefreshingRemark ? 'fa-spinner fa-spin' : 'fa-rotate-right'"></i>{{ isRefreshingRemark ? '生成中...' : '生成建议' }}
+                        </button>
+                    </div>
+                    <div class="px-4 pb-4">
+                        <div v-if="currentSession.suggested_remark" class="p-4 bg-white rounded-2xl border border-indigo-100 space-y-3">
+                            <div class="flex items-center justify-between gap-3">
+                                <div class="min-w-0">
+                                    <p class="text-[10px] text-slate-400 font-bold mb-1">建议备注</p>
+                                    <p class="font-black text-slate-800 truncate" :title="currentSession.suggested_remark">{{ currentSession.suggested_remark }}</p>
+                                </div>
+                                <span class="text-[10px] px-2 py-0.5 rounded-full shrink-0"
+                                      :class="currentSession.suggested_remark_status === 'applied' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'">
+                                    {{ currentSession.suggested_remark_status === 'applied' ? '已手工备注' : confidenceLabel(currentSession.suggested_remark_confidence) }}
+                                </span>
+                            </div>
+                            <p class="text-xs text-slate-500 leading-relaxed">{{ currentSession.suggested_remark_reason || '根据当前画像生成' }}</p>
+                            <div class="flex gap-2">
+                                <button @click="copyRemarkSuggestion" class="flex-1 text-xs bg-indigo-600 text-white px-3 py-2 rounded-xl hover:bg-indigo-700 font-bold">
+                                    <i class="fa-regular fa-copy mr-1"></i>复制备注
+                                </button>
+                                <button @click="markRemarkApplied" :disabled="isMarkingRemarkApplied || currentSession.suggested_remark_status === 'applied'"
+                                        class="flex-1 text-xs bg-emerald-100 text-emerald-700 px-3 py-2 rounded-xl hover:bg-emerald-200 font-bold disabled:opacity-50">
+                                    <i class="fa-solid mr-1" :class="isMarkingRemarkApplied ? 'fa-spinner fa-spin' : 'fa-check'"></i>{{ currentSession.suggested_remark_status === 'applied' ? '已标记' : '标记已备注' }}
+                                </button>
+                            </div>
+                        </div>
+                        <div v-else class="border border-dashed border-indigo-200 rounded-2xl p-4 text-center text-sm text-slate-400 bg-white/70">
+                            提取画像后会自动生成；也可点击“生成建议”。
+                        </div>
+                    </div>
+                </div>
+
                 <div class="mb-6 rounded-2xl border border-amber-100 bg-amber-50/40 overflow-hidden">
                     <button @click="isSummaryCollapsed = !isSummaryCollapsed" class="w-full px-4 py-3 flex items-center justify-between text-left hover:bg-amber-50 transition">
                         <span class="text-xs font-bold text-slate-600 flex items-center">
@@ -668,6 +714,8 @@
                 const summaryLimit = ref('20');
                 const isSummarizing = ref(false);
                 const isGeneratingAgentPlan = ref(false);
+                const isRefreshingRemark = ref(false);
+                const isMarkingRemarkApplied = ref(false);
                 const isSummaryCollapsed = ref(true);
                 const isSummaryFromCache = ref(false);
                 const showAidModal = ref(false);
@@ -1180,7 +1228,11 @@
                         
                         if(res.ok && data.ok) {
                             profile.value = data.profile;
-                            currentSession.value.profile_json = data.profile;
+                            if (data.session) {
+                                currentSession.value = data.session;
+                            } else {
+                                currentSession.value.profile_json = data.profile;
+                            }
                             fetchSessions();
                         } else {
                             const errMsg = data.error || '提取失败，请稍后重试';
@@ -1191,6 +1243,94 @@
                         alert("外部接口调用超时或网络异常，请重试");
                     } finally {
                         isExtracting.value = false;
+                    }
+                };
+
+                const confidenceLabel = (confidence) => {
+                    const labels = {
+                        high: '高置信',
+                        medium: '中置信',
+                        low: '低置信'
+                    };
+                    return labels[confidence] || '待确认';
+                };
+
+                const refreshRemarkSuggestion = async () => {
+                    if(!currentSession.value || isRefreshingRemark.value) return;
+                    isRefreshingRemark.value = true;
+                    try {
+                        const sid = currentSession.value.session_id;
+                        const res = await fetch(`/api/admin/sessions/${sid}/remark-suggestion`, {
+                            method: 'POST',
+                            headers: getAuthHeaders()
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if(res.ok && data.ok) {
+                            currentSession.value = data.session;
+                            fetchSessions();
+                        } else if (res.status === 401) {
+                            triggerLogin();
+                        } else {
+                            alert(data.error || '生成备注建议失败');
+                        }
+                    } catch(e) {
+                        console.error('生成备注建议失败', e);
+                        alert('生成备注建议请求失败');
+                    } finally {
+                        isRefreshingRemark.value = false;
+                    }
+                };
+
+                const copyRemarkSuggestion = async () => {
+                    const remark = currentSession.value?.suggested_remark || '';
+                    if (!remark) return;
+                    try {
+                        await navigator.clipboard.writeText(remark);
+                        alert('备注已复制，请到微信联系人资料页手工粘贴保存。');
+                    } catch (e) {
+                        window.prompt('复制失败，请手动复制备注：', remark);
+                    }
+                };
+
+                const markRemarkApplied = async () => {
+                    if(!currentSession.value || isMarkingRemarkApplied.value) return;
+                    const remark = currentSession.value.suggested_remark || '';
+                    if (!remark) {
+                        alert('当前没有可标记的备注建议');
+                        return;
+                    }
+                    const appliedRemark = window.prompt('请输入微信里最终保存的备注名，后台会把它加入历史别名用于识别同一人：', remark);
+                    if (appliedRemark === null) return;
+                    const finalRemark = appliedRemark.trim();
+                    if (!finalRemark) {
+                        alert('备注名不能为空');
+                        return;
+                    }
+                    isMarkingRemarkApplied.value = true;
+                    try {
+                        const sid = currentSession.value.session_id;
+                        const res = await fetch(`/api/admin/sessions/${sid}/remark-applied`, {
+                            method: 'POST',
+                            headers: {
+                                ...getAuthHeaders(),
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({ applied_remark: finalRemark })
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if(res.ok && data.ok) {
+                            currentSession.value = data.session;
+                            fetchSessions();
+                        } else if (res.status === 401) {
+                            triggerLogin();
+                        } else {
+                            alert(data.error || '标记备注失败');
+                        }
+                    } catch(e) {
+                        console.error('标记备注失败', e);
+                        alert('标记备注请求失败');
+                    } finally {
+                        isMarkingRemarkApplied.value = false;
                     }
                 };
 
@@ -1406,6 +1546,8 @@
                     summaryLimit,
                     isSummarizing,
                     isGeneratingAgentPlan,
+                    isRefreshingRemark,
+                    isMarkingRemarkApplied,
                     isSummaryCollapsed,
                     isSummaryFromCache,
                     showAidModal,
@@ -1442,6 +1584,10 @@
                     restartService,
                     selectSession,
                     extractProfile,
+                    confidenceLabel,
+                    refreshRemarkSuggestion,
+                    copyRemarkSuggestion,
+                    markRemarkApplied,
                     summarizeConversation,
                     continueAgentWithPlan,
                     restoreSummaryCache,

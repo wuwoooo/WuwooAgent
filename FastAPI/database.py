@@ -26,6 +26,7 @@ VALID_SESSION_STATUSES = {"auto", "handoff_requested", "human_takeover", "muted"
 
 TRAILING_EMOJI_RE = re.compile(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\u200D\uFE0F\U000E0020-\U000E007F]+$")
 TRAILING_EMOJI_PLACEHOLDER_RE = re.compile(r"\s*[\[(](?:表情|动画表情|emoji)[\])]$", re.IGNORECASE)
+EMPTY_PROFILE_VALUES = {"", "无", "未知", "未明确", "待定", "待确认", "没有", "暂无"}
 
 
 def canonicalize_contact_name(raw: str | None, default: str = "客户") -> str:
@@ -44,6 +45,101 @@ def canonicalize_contact_name(raw: str | None, default: str = "客户") -> str:
             return default
 
     return normalized or default
+
+
+def _json_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item).strip() for item in parsed if str(item).strip()]
+
+
+def _compact_profile_value(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        return "、".join(str(item).strip() for item in value if str(item).strip())
+    return str(value or "").strip()
+
+
+def _is_meaningful_profile_value(value: Any) -> bool:
+    text = _compact_profile_value(value)
+    return bool(text and text not in EMPTY_PROFILE_VALUES)
+
+
+def _add_contact_alias(cursor: sqlite3.Cursor, session_id: str, contact_name: str | None) -> None:
+    alias = canonicalize_contact_name(contact_name, default="")
+    if not alias or alias in {"客户", "当前联系人"}:
+        return
+
+    cursor.execute("SELECT contact_aliases_json FROM sessions WHERE session_id = ?", (session_id,))
+    row = cursor.fetchone()
+    aliases = _json_list(row["contact_aliases_json"] if row else None)
+    if alias not in aliases:
+        aliases.append(alias)
+        cursor.execute(
+            "UPDATE sessions SET contact_aliases_json = ? WHERE session_id = ?",
+            (json.dumps(aliases[-20:], ensure_ascii=False), session_id),
+        )
+
+
+def build_remark_suggestion(contact_name: str | None, profile: Dict[str, Any] | None) -> Dict[str, str]:
+    """根据已确认画像生成短备注，供人工复制到微信备注。"""
+    profile = profile or {}
+    base_name = canonicalize_contact_name(contact_name, default="")
+    if base_name in {"客户", "当前联系人"}:
+        base_name = ""
+
+    destination = _compact_profile_value(profile.get("destination"))
+    people_count = _compact_profile_value(profile.get("people_count"))
+    preferences = profile.get("preferences")
+    preference_text = _compact_profile_value(preferences)
+
+    tags: list[str] = []
+    if _is_meaningful_profile_value(destination):
+        tags.append(destination[:8])
+    if _is_meaningful_profile_value(people_count):
+        tags.append(people_count[:6])
+    elif any(keyword in preference_text for keyword in ("亲子", "孩子", "老人", "家庭")):
+        tags.append("亲子")
+    elif any(keyword in preference_text for keyword in ("团建", "公司", "企业")):
+        tags.append("团建")
+    elif any(keyword in preference_text for keyword in ("蜜月", "情侣")):
+        tags.append("蜜月")
+
+    stage = _compact_profile_value(profile.get("sales_stage"))
+    if stage in {"意向强烈", "已出方案", "成交"}:
+        tags.append(stage[:4])
+
+    deduped_tags: list[str] = []
+    for tag in tags:
+        tag = re.sub(r"\s+", "", tag)
+        if tag and tag not in deduped_tags:
+            deduped_tags.append(tag)
+
+    parts = [part for part in [base_name, *deduped_tags[:2]] if part]
+    suggestion = "-".join(parts)[:32]
+    if not suggestion:
+        return {
+            "suggested_remark": "",
+            "suggested_remark_reason": "暂未识别到可用于备注的称呼或旅行需求",
+            "suggested_remark_confidence": "low",
+        }
+
+    confidence = "high" if base_name and len(deduped_tags) >= 1 else "medium"
+    reason_bits = []
+    if base_name:
+        reason_bits.append(f"联系人称呼为「{base_name}」")
+    if deduped_tags:
+        reason_bits.append(f"已识别需求标签：{'、'.join(deduped_tags[:2])}")
+    return {
+        "suggested_remark": suggestion,
+        "suggested_remark_reason": "；".join(reason_bits) or "根据当前联系人名和画像生成",
+        "suggested_remark_confidence": confidence,
+    }
 
 
 def normalize_session_status(status: str | None) -> str:
@@ -96,15 +192,21 @@ def init_db():
             FOREIGN KEY (agent_id) REFERENCES agents (id)
         )
     """)
-    # Add status column if it doesn't exist (for older DBs)
-    try:
-        cursor.execute("ALTER TABLE sessions ADD COLUMN status TEXT DEFAULT 'auto'")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    try:
-        cursor.execute("ALTER TABLE sessions ADD COLUMN agent_id INTEGER")
-    except sqlite3.OperationalError:
-        pass
+    # Add columns if they don't exist (for older DBs)
+    for column_sql in [
+        "ALTER TABLE sessions ADD COLUMN status TEXT DEFAULT 'auto'",
+        "ALTER TABLE sessions ADD COLUMN agent_id INTEGER",
+        "ALTER TABLE sessions ADD COLUMN contact_aliases_json TEXT",
+        "ALTER TABLE sessions ADD COLUMN suggested_remark TEXT",
+        "ALTER TABLE sessions ADD COLUMN suggested_remark_reason TEXT",
+        "ALTER TABLE sessions ADD COLUMN suggested_remark_confidence TEXT",
+        "ALTER TABLE sessions ADD COLUMN suggested_remark_status TEXT DEFAULT 'pending'",
+        "ALTER TABLE sessions ADD COLUMN suggested_remark_updated_at TIMESTAMP",
+    ]:
+        try:
+            cursor.execute(column_sql)
+        except sqlite3.OperationalError:
+            pass
 
     # Create messages table
     cursor.execute("""
@@ -118,6 +220,7 @@ def init_db():
         )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_agent_updated ON sessions(agent_id, updated_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_agent_contact ON sessions(agent_id, contact_name)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_session_created ON messages(session_id, created_at)")
     conn.commit()
     conn.close()
@@ -314,7 +417,7 @@ def make_agent_session_id(agent_id: int | None, session_id: str) -> str:
 
 
 def resolve_session_id(session_id: str, contact_name: str, agent_id: int | None = None) -> str:
-    """优先复用同一规范化联系人已有的后端会话，兼容旧客户端的不同 session_id。"""
+    """优先复用同一规范化联系人已有的后端会话，兼容联系人备注变更后的新 session_id。"""
     incoming_session_id = make_agent_session_id(agent_id, session_id)
     canonical_name = canonicalize_contact_name(contact_name)
     if not incoming_session_id:
@@ -328,32 +431,55 @@ def resolve_session_id(session_id: str, contact_name: str, agent_id: int | None 
 
         if canonical_name not in {"客户", "当前联系人"}:
             if agent_id is None:
-                cursor.execute("SELECT session_id, contact_name FROM sessions WHERE agent_id IS NULL ORDER BY updated_at DESC")
+                cursor.execute(
+                    """
+                    SELECT session_id, contact_name, contact_aliases_json, suggested_remark
+                    FROM sessions
+                    WHERE agent_id IS NULL
+                    ORDER BY updated_at DESC
+                    """
+                )
             else:
-                cursor.execute("SELECT session_id, contact_name FROM sessions WHERE agent_id = ? ORDER BY updated_at DESC", (agent_id,))
-            matching_rows = [
-                row
-                for row in cursor.fetchall()
-                if canonicalize_contact_name(row["contact_name"]) == canonical_name
-            ]
+                cursor.execute(
+                    """
+                    SELECT session_id, contact_name, contact_aliases_json, suggested_remark
+                    FROM sessions
+                    WHERE agent_id = ?
+                    ORDER BY updated_at DESC
+                    """,
+                    (agent_id,),
+                )
+            matching_rows = []
+            for row in cursor.fetchall():
+                known_names = [
+                    row["contact_name"],
+                    row["suggested_remark"],
+                    *_json_list(row["contact_aliases_json"]),
+                ]
+                if any(canonicalize_contact_name(name, default="") == canonical_name for name in known_names):
+                    matching_rows.append(row)
             preferred_row = next(
                 (row for row in matching_rows if row["contact_name"] == canonical_name),
                 matching_rows[0] if matching_rows else None,
             )
             if preferred_row:
                 if preferred_row["contact_name"] != canonical_name:
+                    _add_contact_alias(cursor, preferred_row["session_id"], preferred_row["contact_name"])
+                    _add_contact_alias(cursor, preferred_row["session_id"], canonical_name)
                     cursor.execute(
-                        "UPDATE sessions SET contact_name = ? WHERE session_id = ?",
-                        (canonical_name, preferred_row["session_id"]),
+                        "UPDATE sessions SET contact_name = ?, updated_at = ? WHERE session_id = ?",
+                        (canonical_name, get_beijing_time(), preferred_row["session_id"]),
                     )
                     conn.commit()
                 return preferred_row["session_id"]
 
         if exact_row:
             if exact_row["contact_name"] != canonical_name:
+                _add_contact_alias(cursor, incoming_session_id, exact_row["contact_name"])
+                _add_contact_alias(cursor, incoming_session_id, canonical_name)
                 cursor.execute(
-                    "UPDATE sessions SET contact_name = ? WHERE session_id = ?",
-                    (canonical_name, incoming_session_id),
+                    "UPDATE sessions SET contact_name = ?, updated_at = ? WHERE session_id = ?",
+                    (canonical_name, get_beijing_time(), incoming_session_id),
                 )
                 conn.commit()
             return incoming_session_id
@@ -375,11 +501,13 @@ def save_message(session_id: str, contact_name: str, role: str, content: str, ag
             "INSERT INTO sessions (session_id, agent_id, contact_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
             (session_id, agent_id, contact_name, now_bj, now_bj)
         )
+        _add_contact_alias(cursor, session_id, contact_name)
     else:
         cursor.execute(
             "UPDATE sessions SET updated_at = ?, agent_id = COALESCE(agent_id, ?) WHERE session_id = ?",
             (now_bj, agent_id, session_id)
         )
+        _add_contact_alias(cursor, session_id, contact_name)
         
     # Insert message
     cursor.execute(
@@ -406,7 +534,9 @@ def get_all_sessions(agent_id: int | None = None, limit: int = 50, offset: int =
     cursor.execute(
         f"""
         WITH page_sessions AS (
-            SELECT s.session_id, s.agent_id, s.contact_name, s.updated_at, s.profile_json, s.status
+            SELECT s.session_id, s.agent_id, s.contact_name, s.updated_at, s.profile_json, s.status,
+                   s.contact_aliases_json, s.suggested_remark, s.suggested_remark_reason,
+                   s.suggested_remark_confidence, s.suggested_remark_status, s.suggested_remark_updated_at
             FROM sessions s
             {where_sql}
             ORDER BY s.updated_at DESC
@@ -419,6 +549,8 @@ def get_all_sessions(agent_id: int | None = None, limit: int = 50, offset: int =
             GROUP BY m.session_id
         )
         SELECT ps.session_id, ps.agent_id, ps.contact_name, ps.updated_at, ps.profile_json, ps.status,
+               ps.contact_aliases_json, ps.suggested_remark, ps.suggested_remark_reason,
+               ps.suggested_remark_confidence, ps.suggested_remark_status, ps.suggested_remark_updated_at,
                a.username AS agent_username, a.display_name AS agent_display_name,
                COALESCE(ms.msg_count, 0) AS msg_count,
                substr(COALESCE(last_m.content, ''), 1, 160) AS last_msg
@@ -477,6 +609,8 @@ def get_session(session_id: str, agent_id: int | None = None) -> Optional[Dict[s
         cursor.execute(
             """
             SELECT s.session_id, s.agent_id, s.contact_name, s.updated_at, s.profile_json, s.status,
+                   s.contact_aliases_json, s.suggested_remark, s.suggested_remark_reason,
+                   s.suggested_remark_confidence, s.suggested_remark_status, s.suggested_remark_updated_at,
                    a.username AS agent_username, a.display_name AS agent_display_name
             FROM sessions s
             LEFT JOIN agents a ON a.id = s.agent_id
@@ -488,6 +622,8 @@ def get_session(session_id: str, agent_id: int | None = None) -> Optional[Dict[s
         cursor.execute(
             """
             SELECT s.session_id, s.agent_id, s.contact_name, s.updated_at, s.profile_json, s.status,
+                   s.contact_aliases_json, s.suggested_remark, s.suggested_remark_reason,
+                   s.suggested_remark_confidence, s.suggested_remark_status, s.suggested_remark_updated_at,
                    a.username AS agent_username, a.display_name AS agent_display_name
             FROM sessions s
             LEFT JOIN agents a ON a.id = s.agent_id
@@ -507,12 +643,111 @@ def update_session_profile(session_id: str, profile_dict: Dict[str, Any]):
     conn = get_connection()
     cursor = conn.cursor()
     profile_str = json.dumps(profile_dict, ensure_ascii=False)
+    now_bj = get_beijing_time()
+    cursor.execute("SELECT contact_name, suggested_remark_status FROM sessions WHERE session_id = ?", (session_id,))
+    row = cursor.fetchone()
+    suggestion = build_remark_suggestion(row["contact_name"] if row else "", profile_dict)
     cursor.execute(
-        "UPDATE sessions SET profile_json = ? WHERE session_id = ?",
-        (profile_str, session_id)
+        """
+        UPDATE sessions
+        SET profile_json = ?,
+            suggested_remark = ?,
+            suggested_remark_reason = ?,
+            suggested_remark_confidence = ?,
+            suggested_remark_status = CASE
+                WHEN COALESCE(suggested_remark_status, 'pending') = 'applied' THEN suggested_remark_status
+                ELSE 'pending'
+            END,
+            suggested_remark_updated_at = ?
+        WHERE session_id = ?
+        """,
+        (
+            profile_str,
+            suggestion["suggested_remark"],
+            suggestion["suggested_remark_reason"],
+            suggestion["suggested_remark_confidence"],
+            now_bj,
+            session_id,
+        )
     )
     conn.commit()
     conn.close()
+
+
+def refresh_remark_suggestion(session_id: str) -> Optional[Dict[str, Any]]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT contact_name, profile_json FROM sessions WHERE session_id = ?", (session_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return None
+
+    profile: Dict[str, Any] = {}
+    if row["profile_json"]:
+        try:
+            profile = json.loads(row["profile_json"])
+        except Exception:
+            profile = {}
+    suggestion = build_remark_suggestion(row["contact_name"], profile)
+    now_bj = get_beijing_time()
+    cursor.execute(
+        """
+        UPDATE sessions
+        SET suggested_remark = ?,
+            suggested_remark_reason = ?,
+            suggested_remark_confidence = ?,
+            suggested_remark_status = 'pending',
+            suggested_remark_updated_at = ?
+        WHERE session_id = ?
+        """,
+        (
+            suggestion["suggested_remark"],
+            suggestion["suggested_remark_reason"],
+            suggestion["suggested_remark_confidence"],
+            now_bj,
+            session_id,
+        ),
+    )
+    _add_contact_alias(cursor, session_id, suggestion["suggested_remark"])
+    conn.commit()
+    cursor.execute("SELECT * FROM sessions WHERE session_id = ?", (session_id,))
+    updated = dict(cursor.fetchone())
+    conn.close()
+    updated["status"] = normalize_session_status(updated.get("status"))
+    return updated
+
+
+def mark_remark_applied(session_id: str, applied_remark: str | None = None) -> Optional[Dict[str, Any]]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT contact_name, suggested_remark FROM sessions WHERE session_id = ?", (session_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return None
+
+    remark = canonicalize_contact_name(applied_remark or row["suggested_remark"] or row["contact_name"], default="")
+    now_bj = get_beijing_time()
+    if remark:
+        _add_contact_alias(cursor, session_id, row["contact_name"])
+        _add_contact_alias(cursor, session_id, row["suggested_remark"])
+        _add_contact_alias(cursor, session_id, remark)
+    cursor.execute(
+        """
+        UPDATE sessions
+        SET suggested_remark_status = 'applied',
+            suggested_remark_updated_at = ?
+        WHERE session_id = ?
+        """,
+        (now_bj, session_id),
+    )
+    conn.commit()
+    cursor.execute("SELECT * FROM sessions WHERE session_id = ?", (session_id,))
+    updated = dict(cursor.fetchone())
+    conn.close()
+    updated["status"] = normalize_session_status(updated.get("status"))
+    return updated
 
 def delete_session(session_id: str, agent_id: int | None = None):
     conn = get_connection()
