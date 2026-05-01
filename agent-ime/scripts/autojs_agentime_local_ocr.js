@@ -44,9 +44,13 @@ let ocrState = {
   done: false,
   success: false,
   text: "",
+  blocksJson: "[]",
+  blocks: [],
   error: "",
   requestId: ""
 };
+
+let screenCaptureReady = false;
 
 function ensureDir() {
   files.ensureDir(IMG_DIR + "/placeholder.txt");
@@ -62,6 +66,8 @@ function resetOcrState(requestId) {
   ocrState.done = false;
   ocrState.success = false;
   ocrState.text = "";
+  ocrState.blocksJson = "[]";
+  ocrState.blocks = [];
   ocrState.error = "";
   ocrState.requestId = requestId;
 }
@@ -82,12 +88,15 @@ function registerOcrReceiver() {
 
       ocrState.success = !!intent.getBooleanExtra("success", false);
       ocrState.text = intent.getStringExtra("ocr_text") || "";
+      ocrState.blocksJson = intent.getStringExtra("ocr_blocks_json") || "[]";
+      ocrState.blocks = parseOcrBlocks(ocrState.blocksJson);
       ocrState.error = intent.getStringExtra("error") || "";
       ocrState.done = true;
 
       writeLog(
         "收到 OCR 结果 success=" + ocrState.success +
         " text_length=" + (ocrState.text ? ocrState.text.length : 0) +
+        " blocks=" + ocrState.blocks.length +
         " error=" + ocrState.error
       );
     }
@@ -115,8 +124,11 @@ function ensureWechatForeground() {
 function captureChatScreen() {
   ensureDir();
 
-  if (!requestScreenCapture()) {
-    throw new Error("请求截图权限失败");
+  if (!screenCaptureReady) {
+    if (!requestScreenCapture()) {
+      throw new Error("请求截图权限失败");
+    }
+    screenCaptureReady = true;
   }
 
   sleep(800);
@@ -150,6 +162,278 @@ function waitForOcrResult(timeoutMs) {
     sleep(200);
   }
   throw new Error("等待本地 OCR 结果超时");
+}
+
+function waitForOcrPayload(timeoutMs) {
+  let text = waitForOcrResult(timeoutMs);
+  return {
+    text: text,
+    blocks: ocrState.blocks || []
+  };
+}
+
+function parseOcrBlocks(blocksJson) {
+  try {
+    let raw = JSON.parse(blocksJson || "[]");
+    if (!raw || !raw.length) return [];
+    let out = [];
+    for (let i = 0; i < raw.length; i++) {
+      let item = raw[i] || {};
+      let left = Number(item.left);
+      let top = Number(item.top);
+      let right = Number(item.right);
+      let bottom = Number(item.bottom);
+      if (!isFinite(left) || !isFinite(top) || !isFinite(right) || !isFinite(bottom)) continue;
+      if (right <= left || bottom <= top) continue;
+      out.push({
+        text: String(item.text || ""),
+        left: left,
+        top: top,
+        right: right,
+        bottom: bottom
+      });
+    }
+    return out;
+  } catch (e) {
+    writeLog("解析 OCR 坐标 JSON 失败: " + e);
+    return [];
+  }
+}
+
+function blockCenterX(block) {
+  return (block.left + block.right) / 2;
+}
+
+function blockCenterY(block) {
+  return (block.top + block.bottom) / 2;
+}
+
+function normalizeOcrToken(text) {
+  return String(text || "")
+    .replace(/\s+/g, "")
+    .replace(/[“”″]/g, "\"")
+    .replace(/[‘’]/g, "'");
+}
+
+function blockToString(block) {
+  if (!block) return "null";
+  return "'" + block.text + "'@[" +
+    Math.round(block.left) + "," + Math.round(block.top) + "," +
+    Math.round(block.right) + "," + Math.round(block.bottom) + "]";
+}
+
+function isVoiceDurationText(text) {
+  let token = normalizeOcrToken(text);
+  if (/^\d{1,2}"$/.test(token)) return true;
+  if (/^\d{1,2}'\d{1,2}"?$/.test(token)) return true;
+
+  // 部分机型会漏识别秒符号；仅在很短的数字文本上做弱匹配。
+  if (/^\d{1,2}$/.test(token)) {
+    let seconds = parseInt(token, 10);
+    return seconds > 0 && seconds <= 60;
+  }
+  return false;
+}
+
+function isTranscribeText(text) {
+  let token = normalizeOcrToken(text);
+  return token.indexOf("转文字") >= 0 || token.indexOf("轉文字") >= 0;
+}
+
+function captureAndOcr(timeoutMs) {
+  captureChatScreen();
+  let requestId = String(UUID.randomUUID());
+  requestLocalOcr(requestId);
+  return waitForOcrPayload(timeoutMs || 20000);
+}
+
+function findLatestInboundVoiceDurationBlock(blocks) {
+  let candidates = [];
+  for (let i = 0; i < blocks.length; i++) {
+    let block = blocks[i];
+    let cx = blockCenterX(block);
+    let cy = blockCenterY(block);
+    if (cy < device.height * 0.12 || cy > device.height * 0.88) continue;
+    if (cx > device.width * 0.58) continue;
+    if (!isVoiceDurationText(block.text)) continue;
+    candidates.push(block);
+  }
+
+  writeLog("语音时长候选数量=" + candidates.length + " " + candidates.map(blockToString).join(" | "));
+  if (!candidates.length) return null;
+
+  candidates.sort(function(a, b) {
+    return blockCenterY(b) - blockCenterY(a);
+  });
+  return candidates[0];
+}
+
+function findShortcutTranscribeBlock(blocks, voiceBlock) {
+  let voiceCx = blockCenterX(voiceBlock);
+  let voiceCy = blockCenterY(voiceBlock);
+  let candidates = [];
+
+  for (let i = 0; i < blocks.length; i++) {
+    let block = blocks[i];
+    if (!isTranscribeText(block.text)) continue;
+    let cx = blockCenterX(block);
+    let cy = blockCenterY(block);
+    if (cx <= voiceCx + 30) continue;
+    if (Math.abs(cy - voiceCy) > 90) continue;
+    candidates.push(block);
+  }
+
+  writeLog("快捷转文字候选数量=" + candidates.length + " " + candidates.map(blockToString).join(" | "));
+  if (!candidates.length) return null;
+
+  candidates.sort(function(a, b) {
+    let ay = Math.abs(blockCenterY(a) - voiceCy);
+    let by = Math.abs(blockCenterY(b) - voiceCy);
+    if (ay !== by) return ay - by;
+    return blockCenterX(a) - blockCenterX(b);
+  });
+  return candidates[0];
+}
+
+function clickBlockCenter(block, reason) {
+  let x = parseInt(blockCenterX(block), 10);
+  let y = parseInt(blockCenterY(block), 10);
+  writeLog(reason + "，点击 OCR 坐标: " + x + "," + y + " block=" + blockToString(block));
+  click(x, y);
+  sleep(500);
+}
+
+function longPressVoiceBubble(voiceBlock) {
+  let x = parseInt(Math.min(device.width * 0.52, blockCenterX(voiceBlock) + 80), 10);
+  let y = parseInt(blockCenterY(voiceBlock), 10);
+  writeLog("未找到快捷转文字，长按语音气泡估算点: " + x + "," + y + " anchor=" + blockToString(voiceBlock));
+  press(x, y, 900);
+  sleep(900);
+}
+
+function findMenuTranscribeBlock(blocks, voiceBlock) {
+  let voiceCy = voiceBlock ? blockCenterY(voiceBlock) : device.height / 2;
+  let candidates = [];
+  for (let i = 0; i < blocks.length; i++) {
+    let block = blocks[i];
+    if (!isTranscribeText(block.text)) continue;
+    let cy = blockCenterY(block);
+    // 菜单一般在语音气泡上方；保留少量容错，避免点击旧聊天内容。
+    if (cy > voiceCy + 40) continue;
+    candidates.push(block);
+  }
+
+  writeLog("菜单转文字候选数量=" + candidates.length + " " + candidates.map(blockToString).join(" | "));
+  if (!candidates.length) return null;
+
+  candidates.sort(function(a, b) {
+    return Math.abs(blockCenterY(a) - voiceCy) - Math.abs(blockCenterY(b) - voiceCy);
+  });
+  return candidates[0];
+}
+
+function clickMenuTranscribeFallback(voiceBlock) {
+  let x = parseInt(Math.max(70, Math.min(device.width - 70, blockCenterX(voiceBlock) - 140)), 10);
+  let y = parseInt(Math.max(device.height * 0.18, blockCenterY(voiceBlock) - 155), 10);
+  writeLog("OCR 未识别菜单转文字，使用菜单相对位置兜底点击: " + x + "," + y);
+  click(x, y);
+  sleep(500);
+}
+
+function stripVoiceUiNoise(text) {
+  return String(text || "")
+    .split(/\n+/)
+    .map(function(line) { return line.trim(); })
+    .filter(function(line) {
+      if (!line) return false;
+      if (isVoiceDurationText(line)) return false;
+      if (isTranscribeText(line)) return false;
+      if (/^(听筒播放|收藏|背景播放|删除|多选|引用|提醒)$/.test(normalizeOcrToken(line))) return false;
+      return true;
+    })
+    .join("\n")
+    .trim();
+}
+
+function extractTranscribedTextNearVoice(blocks, voiceBlock) {
+  let voiceCy = blockCenterY(voiceBlock);
+  let lines = [];
+  for (let i = 0; i < blocks.length; i++) {
+    let block = blocks[i];
+    let cy = blockCenterY(block);
+    let token = normalizeOcrToken(block.text);
+    if (cy < voiceCy - 35) continue;
+    if (cy > Math.min(device.height * 0.9, voiceCy + 280)) continue;
+    if (isVoiceDurationText(block.text)) continue;
+    if (isTranscribeText(block.text)) continue;
+    if (/^(听筒播放|收藏|背景播放|删除|多选|引用|提醒)$/.test(token)) continue;
+    if (!/[\u4e00-\u9fa5]/.test(block.text)) continue;
+    lines.push(block.text.trim());
+  }
+  return lines.join("\n").trim();
+}
+
+function waitForTranscriptionStable(voiceBlock, timeoutMs) {
+  let start = new Date().getTime();
+  let lastStableText = "";
+  let stableCount = 0;
+  let lastPayload = null;
+
+  while (new Date().getTime() - start < timeoutMs) {
+    let payload = captureAndOcr(12000);
+    lastPayload = payload;
+
+    let nearbyText = extractTranscribedTextNearVoice(payload.blocks, voiceBlock);
+    let cleaned = nearbyText;
+    writeLog(
+      "等待转文字稳定: cleaned_length=" + cleaned.length +
+      " stableCount=" + stableCount +
+      " nearby_length=" + nearbyText.length +
+      " text=" + cleaned.slice(0, 80).replace(/\n/g, " / ")
+    );
+
+    if (cleaned && cleaned === lastStableText) {
+      stableCount++;
+    } else {
+      lastStableText = cleaned;
+      stableCount = cleaned ? 1 : 0;
+    }
+
+    if (stableCount >= 2) {
+      writeLog("语音转文字结果已稳定");
+      return payload;
+    }
+    sleep(700);
+  }
+
+  throw new Error("等待语音转文字稳定超时");
+}
+
+function prepareLatestMessageForOcr() {
+  let initialPayload = captureAndOcr(20000);
+  let voiceBlock = findLatestInboundVoiceDurationBlock(initialPayload.blocks);
+  if (!voiceBlock) {
+    writeLog("未发现最新左侧语音时长，按普通文字消息处理");
+    return initialPayload;
+  }
+
+  writeLog("发现疑似最新语音消息: " + blockToString(voiceBlock));
+  let shortcutBlock = findShortcutTranscribeBlock(initialPayload.blocks, voiceBlock);
+  if (shortcutBlock) {
+    clickBlockCenter(shortcutBlock, "点击语音气泡旁快捷转文字");
+    return waitForTranscriptionStable(voiceBlock, 15000);
+  }
+
+  longPressVoiceBubble(voiceBlock);
+  let menuPayload = captureAndOcr(12000);
+  let menuBlock = findMenuTranscribeBlock(menuPayload.blocks, voiceBlock);
+  if (menuBlock) {
+    clickBlockCenter(menuBlock, "点击长按菜单转文字");
+  } else {
+    clickMenuTranscribeFallback(voiceBlock);
+  }
+
+  return waitForTranscriptionStable(voiceBlock, 15000);
 }
 
 function requestAgentReply(ocrText) {
@@ -213,12 +497,8 @@ function main() {
 
   const receiver = registerOcrReceiver();
   try {
-    captureChatScreen();
-
-    let requestId = String(UUID.randomUUID());
-    requestLocalOcr(requestId);
-
-    let ocrText = waitForOcrResult(20000).trim();
+    let preparedPayload = prepareLatestMessageForOcr();
+    let ocrText = (preparedPayload.text || "").trim();
     writeLog("本地 OCR 成功，文本长度=" + ocrText.length);
 
     if (!ocrText) {

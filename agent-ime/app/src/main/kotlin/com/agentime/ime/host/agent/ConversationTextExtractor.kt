@@ -12,6 +12,7 @@ object ConversationTextExtractor {
         RegexOption.IGNORE_CASE,
     )
     private val lonePunctuationRegex = Regex("""^[!！,，.。|?？]+$""")
+    private val voiceDurationRegex = Regex("""^[小少]?\d{1,2}(["”″])?$|^[小少]?\d{1,2}['’]\d{1,2}(["”″])?$""")
     private val plausibleInboundRegex = Regex("""[\p{L}\p{N}一-龥]""")
     private val tokenRegex = Regex("""[\p{L}\p{N}一-龥]{2,}""")
     private val systemNoiseMarkers = listOf(
@@ -32,6 +33,14 @@ object ConversationTextExtractor {
         "clickSend 返回",
         "type=dataSync",
         "会话列表截图分析跳过",
+    )
+    private val transcriptionActionNoiseMarkers = listOf(
+        "转文字",
+        "轉文字",
+        "转女字",
+        "轉女字",
+        "转文宇",
+        "轉文宇",
     )
 
     fun extractLatestInboundMessage(
@@ -131,6 +140,17 @@ object ConversationTextExtractor {
         .replace("\n", " ")
         .trim()
 
+    fun looksLikeVoiceTranscriptionUiOnly(text: String): Boolean {
+        val lines = normalize(text).lines()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+        if (lines.isEmpty()) return false
+        val voiceUiLines = lines.filter { line ->
+            looksLikeVoiceDurationLine(line) || looksLikeTranscriptionActionLine(line)
+        }
+        return voiceUiLines.isNotEmpty() && voiceUiLines.size == lines.size
+    }
+
     private fun shouldIgnoreLine(line: String, contactName: String): Boolean {
         if (isBoundaryLine(line)) return true
         return shouldIgnoreContentLine(line, contactName)
@@ -142,10 +162,55 @@ object ConversationTextExtractor {
         if (line == "Wuwoo Agent") return true
         if (fullTimestampRegex.matches(line)) return true
         if (systemNoiseMarkers.any { marker -> line.contains(marker) }) return true
+        if (looksLikeVoiceDurationLine(line)) return true
+        if (looksLikeTranscriptionActionLine(line)) return true
         if (fileSizeRegex.matches(line)) return true
         if (attachmentNameRegex.matches(line)) return true
         if (lonePunctuationRegex.matches(line)) return true
         return false
+    }
+
+    private fun looksLikeVoiceDurationLine(line: String): Boolean {
+        val normalized = normalizeVoiceUiToken(line)
+        return voiceDurationRegex.matches(normalized)
+    }
+
+    private fun looksLikeTranscriptionActionLine(line: String): Boolean {
+        val normalized = normalizeVoiceUiToken(line)
+        return transcriptionActionNoiseMarkers.any { marker -> normalized.contains(marker) }
+    }
+
+    private fun normalizeVoiceUiToken(text: String): String {
+        return text
+            .replace(whitespaceRegex, "")
+            .replace("｜", "|")
+            .replace("“", "\"")
+            .replace("”", "\"")
+            .replace("″", "\"")
+            .replace("‘", "'")
+            .replace("’", "'")
+            .trim(
+                '●',
+                '·',
+                '|',
+                '丨',
+                ' ',
+                '\t',
+                '(',
+                ')',
+                '（',
+                '）',
+                '[',
+                ']',
+                '【',
+                '】',
+                '<',
+                '>',
+                '《',
+                '》',
+                '!',
+                '！',
+            )
     }
 
     private fun isBoundaryLine(line: String): Boolean {

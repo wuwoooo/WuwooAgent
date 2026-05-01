@@ -17,6 +17,7 @@ import java.util.concurrent.Executors
  * 结果 Action: [ACTION_OCR_RESULT]
  * - [EXTRA_OCR_SUCCESS]：boolean
  * - [EXTRA_OCR_TEXT]：成功时的全文
+ * - [EXTRA_OCR_BLOCKS_JSON]：成功时的文字行坐标 JSON
  * - [EXTRA_OCR_ERROR]：失败时的说明
  * - [EXTRA_REQUEST_ID]：与请求一致
  */
@@ -32,21 +33,21 @@ class OcrRequestReceiver : BroadcastReceiver() {
 
         ioExecutor.execute {
             try {
-                val task = OcrHelper.recognizeText(app, path, uri)
+                val task = OcrHelper.recognize(app, path, uri)
                 task.addOnCompleteListener { t ->
                     try {
                         if (t.isSuccessful) {
-                            sendResult(app, true, t.result, null, requestId)
+                            sendResult(app, true, t.result?.text, t.result?.blocksJson, null, requestId)
                         } else {
                             val msg = t.exception?.message ?: "OCR 任务失败"
-                            sendResult(app, false, null, msg, requestId)
+                            sendResult(app, false, null, null, msg, requestId)
                         }
                     } finally {
                         pending.finish()
                     }
                 }
             } catch (e: Exception) {
-                sendResult(app, false, null, e.message ?: e.toString(), requestId)
+                sendResult(app, false, null, null, e.message ?: e.toString(), requestId)
                 pending.finish()
             }
         }
@@ -56,12 +57,14 @@ class OcrRequestReceiver : BroadcastReceiver() {
         app: Context,
         success: Boolean,
         text: String?,
+        blocksJson: String?,
         error: String?,
         requestId: String?,
     ) {
         val out = Intent(ACTION_OCR_RESULT).apply {
             putExtra(EXTRA_OCR_SUCCESS, success)
             if (success && text != null) putExtra(EXTRA_OCR_TEXT, text)
+            if (success && blocksJson != null) putExtra(EXTRA_OCR_BLOCKS_JSON, blocksJson)
             if (!success && error != null) putExtra(EXTRA_OCR_ERROR, error)
             if (!requestId.isNullOrBlank()) putExtra(EXTRA_REQUEST_ID, requestId)
         }
@@ -75,6 +78,7 @@ class OcrRequestReceiver : BroadcastReceiver() {
         const val EXTRA_IMAGE_URI = "image_uri"
         const val EXTRA_OCR_SUCCESS = "success"
         const val EXTRA_OCR_TEXT = "ocr_text"
+        const val EXTRA_OCR_BLOCKS_JSON = "ocr_blocks_json"
         const val EXTRA_OCR_ERROR = "error"
         const val EXTRA_REQUEST_ID = "request_id"
 

@@ -24,6 +24,14 @@ object CaptureImageProcessor {
         val peak: Double,
     )
 
+    private data class RedDot(
+        val centerX: Float,
+        val centerY: Float,
+        val width: Int,
+        val height: Int,
+        val count: Int,
+    )
+
     fun processBitmap(
         context: Context,
         bitmap: Bitmap,
@@ -79,6 +87,9 @@ object CaptureImageProcessor {
         val recentLeftMessageCropPath = saveBitmapIfPresent(context, recentLeftMessageCrop, outDir, fileName, "leftmsg_recent")
         val latestInboundBubbleCrop = createLatestInboundBubbleCrop(bitmap)
         val latestInboundBubbleCropPath = saveBitmapIfPresent(context, latestInboundBubbleCrop, outDir, fileName, "leftmsg_latest_bubble")
+        val latestInboundVoiceTranscriptionCrop = createLatestInboundVoiceTranscriptionCrop(bitmap)
+        val latestInboundVoiceTranscriptionCropPath = saveBitmapIfPresent(context, latestInboundVoiceTranscriptionCrop, outDir, fileName, "leftmsg_voice_transcription")
+        val latestInboundVoiceRedDot = detectLatestInboundVoiceRedDot(bitmap)
         val latestOutboundCrop = chatCrop?.let(::createLatestOutboundCrop)
         val latestOutboundCropPath = saveBitmapIfPresent(context, latestOutboundCrop, outDir, fileName, "latest_outbound")
         headerCrop?.recycle()
@@ -89,6 +100,7 @@ object CaptureImageProcessor {
         leftMessageCrop?.recycle()
         recentLeftMessageCrop?.recycle()
         latestInboundBubbleCrop?.recycle()
+        latestInboundVoiceTranscriptionCrop?.recycle()
         latestOutboundCrop?.recycle()
 
         return CaptureResult(
@@ -108,6 +120,11 @@ object CaptureImageProcessor {
             leftMessageCropPath = leftMessageCropPath,
             recentLeftMessageCropPath = recentLeftMessageCropPath,
             latestInboundBubbleCropPath = latestInboundBubbleCropPath,
+            latestInboundVoiceTranscriptionCropPath = latestInboundVoiceTranscriptionCropPath,
+            latestInboundVoiceRedDot = latestInboundVoiceRedDot != null,
+            latestInboundVoiceRedDotX = latestInboundVoiceRedDot?.centerX,
+            latestInboundVoiceRedDotY = latestInboundVoiceRedDot?.centerY,
+            latestInboundVoiceRedDotScore = latestInboundVoiceRedDot?.count ?: 0,
             latestOutboundCropPath = latestOutboundCropPath,
             acceptableForOcr = acceptableForOcr,
             sharpnessScore = sharpnessScore,
@@ -635,6 +652,109 @@ object CaptureImageProcessor {
         )
     }
 
+    private fun createLatestInboundVoiceTranscriptionCrop(source: Bitmap): Bitmap? {
+        val width = source.width
+        val height = source.height
+        if (width < 80 || height < 120) return null
+
+        val searchTop = (height * 0.10f).toInt().coerceAtLeast(0)
+        val searchBottom = (height * 0.985f).toInt().coerceAtMost(height)
+        if (searchBottom - searchTop < 40) return null
+
+        val redDot = detectLatestInboundVoiceRedDot(source) ?: return createLatestInboundBubbleCrop(source)
+        val detectedInputTop = detectWechatInputBarTop(source)
+        val fallbackInputTop = (height * 0.985f).toInt().coerceAtMost(height)
+        val inputTop = detectedInputTop
+            ?.takeIf { it > redDot.centerY + height * 0.09f }
+            ?: fallbackInputTop
+        val cropTop = (redDot.centerY - height * 0.055f).toInt().coerceAtLeast(searchTop)
+        val cropBottom = (inputTop - maxOf(4, (height * 0.004f).toInt())).coerceIn(cropTop + 40, searchBottom)
+        if (cropBottom - cropTop < 40) return null
+
+        val cropLeft = 0
+        val cropRight = (width * 0.90f).toInt().coerceAtMost(width)
+        return Bitmap.createBitmap(
+            source,
+            cropLeft,
+            cropTop,
+            (cropRight - cropLeft).coerceAtLeast(10),
+            (cropBottom - cropTop).coerceAtLeast(10),
+        )
+    }
+
+    private fun detectWechatInputBarTop(source: Bitmap): Int? {
+        val width = source.width
+        val height = source.height
+        if (width < 200 || height < 400) return null
+
+        val yStart = (height * 0.78f).toInt().coerceAtLeast(0)
+        val yEnd = (height * 0.985f).toInt().coerceAtMost(height)
+        if (yEnd - yStart < 40) return null
+
+        fun isInputWhite(pixel: Int): Boolean {
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            return r >= 245 && g >= 245 && b >= 245
+        }
+
+        fun isDarkIcon(pixel: Int): Boolean {
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            return r <= 90 && g <= 90 && b <= 90
+        }
+
+        fun ratio(y: Int, xStart: Int, xEnd: Int, predicate: (Int) -> Boolean): Double {
+            var hit = 0
+            var total = 0
+            var x = xStart
+            while (x < xEnd) {
+                if (predicate(source.getPixel(x, y))) hit++
+                total++
+                x += 4
+            }
+            return if (total == 0) 0.0 else hit.toDouble() / total
+        }
+
+        fun rowLooksLikeInputBar(y: Int): Boolean {
+            val centerWhite = ratio(
+                y,
+                (width * 0.12f).toInt(),
+                (width * 0.76f).toInt(),
+                ::isInputWhite,
+            )
+            val leftDark = ratio(
+                y,
+                (width * 0.02f).toInt(),
+                (width * 0.13f).toInt(),
+                ::isDarkIcon,
+            )
+            val rightDark = ratio(
+                y,
+                (width * 0.78f).toInt(),
+                (width * 0.98f).toInt(),
+                ::isDarkIcon,
+            )
+            return centerWhite >= 0.32 && (leftDark >= 0.018 || rightDark >= 0.018)
+        }
+
+        var runTop = -1
+        var runLength = 0
+        for (y in yEnd - 1 downTo yStart) {
+            if (rowLooksLikeInputBar(y)) {
+                runTop = y
+                runLength++
+            } else if (runLength >= 10) {
+                return runTop
+            } else {
+                runTop = -1
+                runLength = 0
+            }
+        }
+        return if (runLength >= 10) runTop else null
+    }
+
     private fun detectLatestVisibleMessageSide(source: Bitmap): String {
         val width = source.width
         val height = source.height
@@ -707,6 +827,125 @@ object CaptureImageProcessor {
             inboundHits >= 8 && inboundHits >= outboundHits + 3 -> "inbound"
             else -> "unknown"
         }
+    }
+
+    private fun detectLatestInboundVoiceRedDot(source: Bitmap): RedDot? {
+        val width = source.width
+        val height = source.height
+        if (width < 200 || height < 400) return null
+
+        val xStart = (width * 0.28f).toInt().coerceAtLeast(0)
+        val xEnd = (width * 0.78f).toInt().coerceAtMost(width)
+        val yStart = (height * 0.13f).toInt().coerceAtLeast(0)
+        val yEnd = (height * 0.985f).toInt().coerceAtMost(height)
+        val step = 2
+        val gridWidth = ((xEnd - xStart) / step).coerceAtLeast(1)
+        val gridHeight = ((yEnd - yStart) / step).coerceAtLeast(1)
+        val mask = BooleanArray(gridWidth * gridHeight)
+        fun idx(gx: Int, gy: Int): Int = gy * gridWidth + gx
+
+        for (gy in 0 until gridHeight) {
+            val y = yStart + gy * step
+            for (gx in 0 until gridWidth) {
+                val x = xStart + gx * step
+                val c = source.getPixel(x, y)
+                val r = (c shr 16) and 0xFF
+                val g = (c shr 8) and 0xFF
+                val b = c and 0xFF
+                mask[idx(gx, gy)] = isWechatVoiceUnreadRed(r, g, b)
+            }
+        }
+
+        val visited = BooleanArray(mask.size)
+        val queueX = IntArray(mask.size)
+        val queueY = IntArray(mask.size)
+        val widthScale = (width / 480f).coerceAtLeast(1f)
+        val minDim = (5 * widthScale).toInt().coerceAtLeast(5)
+        val maxDim = (34 * widthScale).toInt().coerceAtLeast(minDim + 2)
+        val minCount = (3 * widthScale * widthScale).toInt().coerceAtLeast(3)
+        val maxCount = (55 * widthScale * widthScale).toInt().coerceAtLeast(minCount + 2)
+        var best: RedDot? = null
+
+        for (gy in 0 until gridHeight) {
+            for (gx in 0 until gridWidth) {
+                val start = idx(gx, gy)
+                if (!mask[start] || visited[start]) continue
+
+                var head = 0
+                var tail = 0
+                queueX[tail] = gx
+                queueY[tail] = gy
+                tail++
+                visited[start] = true
+
+                var count = 0
+                var minX = gx
+                var maxX = gx
+                var minY = gy
+                var maxY = gy
+                var sumX = 0
+                var sumY = 0
+
+                while (head < tail) {
+                    val cx = queueX[head]
+                    val cy = queueY[head]
+                    head++
+                    count++
+                    sumX += cx
+                    sumY += cy
+                    if (cx < minX) minX = cx
+                    if (cx > maxX) maxX = cx
+                    if (cy < minY) minY = cy
+                    if (cy > maxY) maxY = cy
+
+                    for (dy in -1..1) {
+                        for (dx in -1..1) {
+                            if (dx == 0 && dy == 0) continue
+                            val nx = cx + dx
+                            val ny = cy + dy
+                            if (nx !in 0 until gridWidth || ny !in 0 until gridHeight) continue
+                            val next = idx(nx, ny)
+                            if (!mask[next] || visited[next]) continue
+                            visited[next] = true
+                            queueX[tail] = nx
+                            queueY[tail] = ny
+                            tail++
+                        }
+                    }
+                }
+
+                val compWidth = (maxX - minX + 1) * step
+                val compHeight = (maxY - minY + 1) * step
+                val aspect = compWidth.toDouble() / compHeight.coerceAtLeast(1)
+                val centerX = xStart + (sumX.toFloat() / count) * step
+                val centerY = yStart + (sumY.toFloat() / count) * step
+                val plausible =
+                    count in minCount..maxCount &&
+                        compWidth in minDim..maxDim &&
+                        compHeight in minDim..maxDim &&
+                        aspect in 0.55..1.85
+                if (!plausible) continue
+
+                val candidate = RedDot(centerX, centerY, compWidth, compHeight, count)
+                val current = best
+                if (
+                    current == null ||
+                    candidate.centerY > current.centerY + height * 0.015f ||
+                    (
+                        kotlin.math.abs(candidate.centerY - current.centerY) <= height * 0.015f &&
+                            candidate.count > current.count
+                        )
+                ) {
+                    best = candidate
+                }
+            }
+        }
+
+        return best
+    }
+
+    private fun isWechatVoiceUnreadRed(r: Int, g: Int, b: Int): Boolean {
+        return r >= 200 && (r - g) >= 50 && (r - b) >= 50
     }
 
     private fun createLatestOutboundCrop(source: Bitmap): Bitmap? {

@@ -173,13 +173,21 @@ class HostForegroundService : Service() {
                         return
                     }
                     val lastReplyText = prefsReply.getString("last_reply_text", "").orEmpty()
-                    val inboundCandidate = extractInboundCandidate(
+                    var inboundCandidate = extractInboundCandidate(
                         ocr = ocr,
                         cap = cap,
                         contactName = contactName,
                         lastReplyText = lastReplyText,
                         pageOcrText = ocrText,
                     )
+                    tryTranscribeLatestVoiceIfNeeded(
+                        ocr = ocr,
+                        capture = capture,
+                        initialCap = cap,
+                        contactName = contactName,
+                        lastReplyText = lastReplyText,
+                        sessionId = SessionIdentity.buildSessionId(this@HostForegroundService, contactName),
+                    )?.let { inboundCandidate = it }
                     val latestInbound = inboundCandidate.text
                     val inboundSignature = inboundCandidate.signature
                     logger.log(
@@ -325,13 +333,21 @@ class HostForegroundService : Service() {
             logger.log(TAG, "截图分析进入会话成功，联系人=$contactName")
             val prefsReply = getSharedPreferences("host_config", Context.MODE_PRIVATE)
             val lastReplyText = prefsReply.getString("last_reply_text", "").orEmpty()
-            val inboundCandidate = extractInboundCandidate(
+            var inboundCandidate = extractInboundCandidate(
                 ocr = ocr,
                 cap = postClickCap,
                 contactName = contactName,
                 lastReplyText = lastReplyText,
                 pageOcrText = postClickOcr,
             )
+            tryTranscribeLatestVoiceIfNeeded(
+                ocr = ocr,
+                capture = capture,
+                initialCap = postClickCap,
+                contactName = contactName,
+                lastReplyText = lastReplyText,
+                sessionId = SessionIdentity.buildSessionId(this@HostForegroundService, contactName),
+            )?.let { inboundCandidate = it }
             val latestInbound = inboundCandidate.text
             val inboundSignature = inboundCandidate.signature
             logger.log(
@@ -373,6 +389,11 @@ class HostForegroundService : Service() {
             if (latestInbound.isBlank()) {
                 logger.log(TAG, "点击进入聊天后，未提取到有效客户新消息，取消本轮")
                 returnToConversationList("点击进入后未提取到有效客户新消息")
+                return
+            }
+            if (ConversationTextExtractor.looksLikeVoiceTranscriptionUiOnly(latestInbound)) {
+                logger.log(TAG, "点击进入聊天后，提取文本疑似语音消息 UI，取消普通文字回复: ${latestInbound.take(80)}")
+                returnToConversationList("点击进入后最新消息疑似语音")
                 return
             }
             if (ConversationTextExtractor.looksLikeAgentReplyCandidate(latestInbound, lastReplyText)) {
@@ -543,13 +564,21 @@ class HostForegroundService : Service() {
                 if (resolvedContactName.isNotBlank() && resolvedContactName != "当前联系人") {
                     logger.log(TAG, "顶部栏识别联系人: $resolvedContactName")
                 }
-                val inboundCandidate = extractInboundCandidate(
+                var inboundCandidate = extractInboundCandidate(
                     ocr = ocr,
                     cap = cap,
                     contactName = resolvedContactName.ifBlank { contactName },
                     lastReplyText = prefs.getString("last_reply_text", "").orEmpty(),
                     pageOcrText = ocrText,
                 )
+                tryTranscribeLatestVoiceIfNeeded(
+                    ocr = ocr,
+                    capture = capture,
+                    initialCap = cap,
+                    contactName = resolvedContactName.ifBlank { contactName },
+                    lastReplyText = prefs.getString("last_reply_text", "").orEmpty(),
+                    sessionId = sessionId,
+                )?.let { inboundCandidate = it }
                 latestInbound = inboundCandidate.text
                 inboundSignature = inboundCandidate.signature
                 inboundCandidate.path?.let {
@@ -581,6 +610,11 @@ class HostForegroundService : Service() {
             }
             logger.log(TAG, "提炼后的最新客户消息: ${latestInbound.take(200)}")
             if (latestInbound.isBlank()) error("未能从 OCR 中提取出最新客户消息")
+            if (ConversationTextExtractor.looksLikeVoiceTranscriptionUiOnly(latestInbound)) {
+                logger.log(TAG, "提炼结果疑似语音消息 UI（如扬声器残影+秒数），取消本轮普通文字回复: ${latestInbound.take(80)}")
+                returnToConversationList("最新消息疑似语音，等待转文字处理")
+                return
+            }
 
             val lastInboundSignature = prefs.getString("last_inbound_signature", "").orEmpty()
             if (inboundSignature.isNotBlank() && inboundSignature == lastInboundSignature) {
@@ -870,6 +904,52 @@ class HostForegroundService : Service() {
         lastReplyText: String,
         pageOcrText: String? = null,
     ): InboundCandidate {
+        if (cap.latestInboundVoiceRedDot) {
+            logger.log(
+                TAG,
+                "检测到最新左侧消息语音红点: x=${cap.latestInboundVoiceRedDotX?.toInt()} y=${cap.latestInboundVoiceRedDotY?.toInt()} score=${cap.latestInboundVoiceRedDotScore}，跳过普通文字回复",
+            )
+            return InboundCandidate(
+                sourceLabel = "最新左侧语音红点",
+                path = cap.latestInboundBubbleCropPath ?: cap.imagePath,
+            )
+        }
+        if (cap.latestVisibleMessageSide == "inbound" && !cap.latestInboundBubbleCropPath.isNullOrBlank()) {
+            val bubbleOcr = ocr.recognize(cap.latestInboundBubbleCropPath).trim()
+            if (bubbleOcr.isBlank()) {
+                logger.log(TAG, "候选源 最新左侧气泡(强约束): OCR 为空，禁止回退整屏历史 OCR")
+                return InboundCandidate(
+                    sourceLabel = "最新左侧气泡(强约束)",
+                    path = cap.latestInboundBubbleCropPath,
+                )
+            }
+
+            val res = ConversationTextExtractor.extractLatestInboundMessage(
+                ocrText = bubbleOcr,
+                contactName = contactName,
+                lastReplyText = lastReplyText,
+            )
+            logger.log(TAG, "候选源 最新左侧气泡(强约束): rawLen=${bubbleOcr.length} extracted=${res.text.take(80)}")
+            if (res.text.isBlank()) {
+                if (ConversationTextExtractor.looksLikeVoiceTranscriptionUiOnly(bubbleOcr)) {
+                    logger.log(TAG, "候选源 最新左侧气泡(强约束): 疑似语音消息 UI，禁止回退整屏历史 OCR")
+                } else {
+                    logger.log(TAG, "候选源 最新左侧气泡(强约束): 未提取到有效文本，禁止回退整屏历史 OCR")
+                }
+                return InboundCandidate(
+                    sourceLabel = "最新左侧气泡(强约束)",
+                    path = cap.latestInboundBubbleCropPath,
+                )
+            }
+
+            return InboundCandidate(
+                text = res.text,
+                signature = res.signature,
+                sourceLabel = "最新左侧气泡(强约束)",
+                path = cap.latestInboundBubbleCropPath,
+                score = scoreInboundCandidate(res.text),
+            )
+        }
         val candidates = buildList {
             cap.latestInboundBubbleCropPath?.let { add("最新左侧气泡" to it) }
             cap.sinceLastOutboundCropPath?.let { add("我方最后一条之后会话区" to it) }
@@ -905,6 +985,9 @@ class HostForegroundService : Service() {
                 lastReplyText = lastReplyText,
             )
             logger.log(TAG, "候选源 页面OCR预提取: rawLen=${pageOcrText.length} extracted=${res.text.take(80)}")
+            if (res.text.isBlank() && ConversationTextExtractor.looksLikeVoiceTranscriptionUiOnly(pageOcrText)) {
+                logger.log(TAG, "候选源 页面OCR预提取: 疑似语音消息 UI，仅包含时长/转文字按钮，跳过直接回复")
+            }
             if (res.text.isNotBlank()) {
                 val score = scoreInboundCandidate(res.text)
                 tierBuckets[2] = InboundCandidate(
@@ -929,6 +1012,9 @@ class HostForegroundService : Service() {
                 lastReplyText = lastReplyText,
             )
             logger.log(TAG, "候选源 $label: rawLen=${ocrRes.length} extracted=${res.text.take(80)}")
+            if (res.text.isBlank() && ConversationTextExtractor.looksLikeVoiceTranscriptionUiOnly(ocrRes)) {
+                logger.log(TAG, "候选源 $label: 疑似语音消息 UI，仅包含时长/转文字按钮，跳过直接回复")
+            }
             if (res.text.isBlank()) continue
             val score = scoreInboundCandidate(res.text)
             val tier = inboundSourceTier(label)
@@ -961,6 +1047,247 @@ class HostForegroundService : Service() {
         if (lineCount == 2) score += 2
         if (lineCount >= 3) score -= (lineCount - 2) * 6
         return score
+    }
+
+    private fun tryTranscribeLatestVoiceIfNeeded(
+        ocr: FallbackOcrProvider,
+        capture: com.agentime.ime.host.capture.CaptureController,
+        initialCap: com.agentime.ime.host.capture.CaptureResult,
+        contactName: String,
+        lastReplyText: String,
+        sessionId: String,
+    ): InboundCandidate? {
+        if (!initialCap.latestInboundVoiceRedDot) return null
+        val redX = initialCap.latestInboundVoiceRedDotX ?: return null
+        val redY = initialCap.latestInboundVoiceRedDotY ?: return null
+        val size = readImageSize(initialCap.imagePath)
+        val width = size?.first ?: 1080
+        val height = size?.second ?: 2400
+        val clickX = (redX + width * 0.11f).coerceIn(0f, (width - 1).toFloat())
+        val clickY = redY.coerceIn(0f, (height - 1).toFloat())
+
+        logger.log(
+            TAG,
+            "检测到语音红点，尝试点击快捷转文字: red=(${redX.toInt()},${redY.toInt()}) tap=(${clickX.toInt()},${clickY.toInt()}) score=${initialCap.latestInboundVoiceRedDotScore}",
+        )
+        val tapOk = WechatAccessibilityService.tapConversationAt(clickX, clickY)
+        logger.log(TAG, "点击快捷转文字结果=$tapOk")
+        if (!tapOk) return null
+
+        Thread.sleep(1200)
+        for (attempt in 1..10) {
+            val cap = capture.captureScreen("${sessionId}_voice_transcribe_$attempt")
+            val candidate = extractVoiceTranscriptionFromAnchor(
+                ocr = ocr,
+                cap = cap,
+                anchorY = redY,
+                contactName = contactName,
+                lastReplyText = lastReplyText,
+                label = "语音转文字等待#$attempt",
+            )
+            if (candidate.text.isNotBlank()) {
+                logger.log(TAG, "语音转文字已提取有效文本: ${candidate.text.take(120)}")
+                return candidate
+            }
+            logger.log(
+                TAG,
+                "语音转文字等待#$attempt 暂未得到有效文本 redDot=${cap.latestInboundVoiceRedDot} side=${cap.latestVisibleMessageSide}",
+            )
+            Thread.sleep(700)
+        }
+        logger.log(TAG, "语音转文字等待超时，保持跳过普通文字回复")
+        return null
+    }
+
+    private fun extractVoiceTranscriptionFromAnchor(
+        ocr: FallbackOcrProvider,
+        cap: com.agentime.ime.host.capture.CaptureResult,
+        anchorY: Float,
+        contactName: String,
+        lastReplyText: String,
+        label: String,
+    ): InboundCandidate {
+        val anchorCropPath = createVoiceTranscriptionAnchorCrop(cap.imagePath, anchorY, label)
+        if (!anchorCropPath.isNullOrBlank()) {
+            val raw = ocr.recognize(anchorCropPath).trim()
+            if (raw.isBlank()) {
+                logger.log(TAG, "$label: 锚点扩展区域 OCR 为空 path=$anchorCropPath")
+            } else {
+                val res = ConversationTextExtractor.extractLatestInboundMessage(
+                    ocrText = raw,
+                    contactName = contactName,
+                    lastReplyText = lastReplyText,
+                )
+                logger.log(TAG, "$label: anchorRawLen=${raw.length} extracted=${res.text.take(80)}")
+                if (res.text.isNotBlank() && !ConversationTextExtractor.looksLikeVoiceTranscriptionUiOnly(res.text)) {
+                    return InboundCandidate(
+                        text = res.text,
+                        signature = res.signature,
+                        sourceLabel = label,
+                        path = anchorCropPath,
+                        score = scoreInboundCandidate(res.text),
+                    )
+                }
+            }
+        }
+
+        return extractLatestInboundBubbleOnly(
+            ocr = ocr,
+            cap = cap,
+            contactName = contactName,
+            lastReplyText = lastReplyText,
+            label = label,
+        )
+    }
+
+    private fun createVoiceTranscriptionAnchorCrop(imagePath: String, anchorY: Float, label: String): String? {
+        val bitmap = BitmapFactory.decodeFile(imagePath) ?: return null
+        try {
+            val width = bitmap.width
+            val height = bitmap.height
+            if (width < 200 || height < 400) return null
+
+            val detectedInputTop = detectWechatInputBarTop(bitmap)
+            val fallbackInputTop = (height * 0.985f).toInt().coerceAtMost(height)
+            val inputTop = detectedInputTop
+                ?.takeIf { it > anchorY + height * 0.09f }
+                ?: fallbackInputTop
+            val cropTop = (anchorY - height * 0.055f).toInt().coerceAtLeast((height * 0.10f).toInt())
+            val cropBottom = (inputTop - maxOf(4, (height * 0.004f).toInt()))
+                .coerceIn(cropTop + 40, (height * 0.985f).toInt().coerceAtMost(height))
+            val cropRight = (width * 0.92f).toInt().coerceAtMost(width)
+            val cropWidth = cropRight.coerceAtLeast(10)
+            val cropHeight = (cropBottom - cropTop).coerceAtLeast(10)
+
+            val crop = Bitmap.createBitmap(bitmap, 0, cropTop, cropWidth, cropHeight)
+            try {
+                val out = File(filesDir, "captures").apply { mkdirs() }
+                    .resolve("cap_${label.replace(Regex("""\W+"""), "_")}_${System.currentTimeMillis()}_voice_anchor.png")
+                FileOutputStream(out).use { fos ->
+                    crop.compress(Bitmap.CompressFormat.PNG, 100, fos)
+                }
+                logger.log(TAG, "$label: 锚点扩展裁剪 top=$cropTop bottom=$cropBottom inputTop=$inputTop path=${out.absolutePath}")
+                return out.absolutePath
+            } finally {
+                crop.recycle()
+            }
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    private fun detectWechatInputBarTop(bitmap: Bitmap): Int? {
+        val width = bitmap.width
+        val height = bitmap.height
+        val yStart = (height * 0.78f).toInt().coerceAtLeast(0)
+        val yEnd = (height * 0.985f).toInt().coerceAtMost(height)
+        if (yEnd - yStart < 40) return null
+
+        fun isInputWhite(pixel: Int): Boolean {
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            return r >= 245 && g >= 245 && b >= 245
+        }
+
+        fun isDarkIcon(pixel: Int): Boolean {
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            return r <= 90 && g <= 90 && b <= 90
+        }
+
+        fun ratio(y: Int, xStart: Int, xEnd: Int, predicate: (Int) -> Boolean): Double {
+            var hit = 0
+            var total = 0
+            var x = xStart
+            while (x < xEnd) {
+                if (predicate(bitmap.getPixel(x, y))) hit++
+                total++
+                x += 4
+            }
+            return if (total == 0) 0.0 else hit.toDouble() / total
+        }
+
+        fun rowLooksLikeInputBar(y: Int): Boolean {
+            val centerWhite = ratio(
+                y,
+                (width * 0.12f).toInt(),
+                (width * 0.76f).toInt(),
+                ::isInputWhite,
+            )
+            val leftDark = ratio(
+                y,
+                (width * 0.02f).toInt(),
+                (width * 0.13f).toInt(),
+                ::isDarkIcon,
+            )
+            val rightDark = ratio(
+                y,
+                (width * 0.78f).toInt(),
+                (width * 0.98f).toInt(),
+                ::isDarkIcon,
+            )
+            return centerWhite >= 0.32 && (leftDark >= 0.018 || rightDark >= 0.018)
+        }
+
+        var runTop = -1
+        var runLength = 0
+        for (y in yEnd - 1 downTo yStart) {
+            if (rowLooksLikeInputBar(y)) {
+                runTop = y
+                runLength++
+            } else if (runLength >= 10) {
+                return runTop
+            } else {
+                runTop = -1
+                runLength = 0
+            }
+        }
+        return if (runLength >= 10) runTop else null
+    }
+
+    private fun extractLatestInboundBubbleOnly(
+        ocr: FallbackOcrProvider,
+        cap: com.agentime.ime.host.capture.CaptureResult,
+        contactName: String,
+        lastReplyText: String,
+        label: String,
+    ): InboundCandidate {
+        val path = cap.latestInboundVoiceTranscriptionCropPath ?: cap.latestInboundBubbleCropPath
+        if (path.isNullOrBlank()) {
+            logger.log(TAG, "$label: 无最新左侧语音转写裁剪")
+            return InboundCandidate(sourceLabel = label, path = cap.imagePath)
+        }
+        val raw = ocr.recognize(path).trim()
+        if (raw.isBlank()) {
+            logger.log(TAG, "$label: 最新左侧语音转写区域 OCR 为空 path=$path")
+            return InboundCandidate(sourceLabel = label, path = path)
+        }
+        val res = ConversationTextExtractor.extractLatestInboundMessage(
+            ocrText = raw,
+            contactName = contactName,
+            lastReplyText = lastReplyText,
+        )
+        logger.log(TAG, "$label: rawLen=${raw.length} extracted=${res.text.take(80)}")
+        if (res.text.isBlank() || ConversationTextExtractor.looksLikeVoiceTranscriptionUiOnly(res.text)) {
+            return InboundCandidate(sourceLabel = label, path = path)
+        }
+        return InboundCandidate(
+            text = res.text,
+            signature = res.signature,
+            sourceLabel = label,
+            path = path,
+            score = scoreInboundCandidate(res.text),
+        )
+    }
+
+    private fun readImageSize(path: String): Pair<Int, Int>? {
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, options)
+        val width = options.outWidth
+        val height = options.outHeight
+        return if (width > 0 && height > 0) width to height else null
     }
 
     private fun inboundSourceTier(label: String): Int {
@@ -1010,6 +1337,7 @@ class HostForegroundService : Service() {
             cap.leftMessageCropPath,
             cap.recentLeftMessageCropPath,
             cap.latestInboundBubbleCropPath,
+            cap.latestInboundVoiceTranscriptionCropPath,
         )
         paths.distinct()
             .filter { it != keepPath }

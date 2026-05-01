@@ -17,7 +17,7 @@ import shlex
 import subprocess
 import sys
 import time
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, status, UploadFile
@@ -28,7 +28,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from adp_client import load_adp_config_from_env, run_adp_chat
-from volc_knowledge_client import run_volc_knowledge_chat
+from volc_knowledge_client import (
+    build_knowledge_context,
+    chat_completion,
+    load_volc_config_from_env,
+    run_volc_knowledge_chat,
+    search_knowledge,
+)
 import secrets
 
 try:
@@ -145,6 +151,10 @@ class ConversationSummaryRequest(BaseModel):
     limit: int | None = 20
 
 
+class AgentContinuationRequest(BaseModel):
+    limit: int | None = 30
+
+
 def get_current_time_str() -> str:
     now = datetime.datetime.now(LOCAL_TZ)
     weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
@@ -192,6 +202,128 @@ def _should_request_handoff(latest_text: str, session_id: str) -> bool:
 
 def _handoff_reply_text() -> str:
     return "好的，我这就给您整理具体的行程方案和报价～"
+
+
+def _format_profile_for_prompt(profile: dict[str, Any] | None) -> str:
+    if not profile:
+        return "暂无已提取画像。"
+
+    parts = []
+    labels = {
+        "destination": "目的地",
+        "people_count": "人数",
+        "travel_time": "出行时间",
+        "budget": "预算",
+        "preferences": "偏好",
+        "sales_stage": "销售阶段",
+    }
+    for key, label in labels.items():
+        value = profile.get(key)
+        if value:
+            if isinstance(value, (list, tuple)):
+                value = "、".join(str(item) for item in value if item)
+            parts.append(f"{label}：{value}")
+    return "\n".join(parts) if parts else "暂无已提取画像。"
+
+
+def _format_messages_for_prompt(messages: list[dict[str, Any]], limit: int | None = 30) -> str:
+    safe_limit = max(1, min(int(limit or 30), 80))
+    recent_messages = messages[-safe_limit:]
+    if not recent_messages:
+        return "暂无聊天记录。"
+
+    lines = []
+    for msg in recent_messages:
+        role = "客户" if msg.get("role") == "user" else "我方"
+        content = str(msg.get("content") or "").strip()
+        if content:
+            lines.append(f"{role}：{content}")
+    return "\n".join(lines) if lines else "暂无有效聊天记录。"
+
+
+def _build_agent_continuation_prompt(
+    *,
+    contact_name: str,
+    messages: list[dict[str, Any]],
+    profile: dict[str, Any] | None,
+    limit: int | None = 30,
+) -> str:
+    return (
+        f"当前微信联系人：{contact_name or '客户'}\n"
+        f"当前实际时间：{get_current_time_str()}\n\n"
+        "客户画像：\n"
+        f"{_format_profile_for_prompt(profile)}\n\n"
+        f"最近聊天记录：\n{_format_messages_for_prompt(messages, limit)}\n\n"
+        "任务：后台人员已经点击“由 Agent 出方案”，请你继续以旅游定制顾问“小鹿”的身份，"
+        "直接生成一条可以发送给客户的初版行程方案。"
+    )
+
+
+def _run_volc_agent_continuation(prompt: str) -> str:
+    cfg = load_volc_config_from_env()
+    cfg["max_tokens"] = max(int(cfg.get("max_tokens") or 250), 1200)
+    cfg["temperature"] = min(float(cfg.get("temperature") or 0.7), 0.5)
+
+    search_payload = search_knowledge(prompt[-1200:], cfg)
+    knowledge_context = build_knowledge_context(search_payload)
+
+    system_prompt = """你是云南云鹿旅行社的高级旅游顾问“小鹿”，正在微信里和客户一对一沟通。
+现在客户已经请求推进方案，后台人员点击按钮让 Agent 继续出方案。
+
+输出要求：
+1. 直接输出要发给客户的微信消息，不要解释你的思考过程。
+2. 可以给出初版行程框架、玩法/住宿/用车建议、下一步确认项。
+3. 如果价格、酒店房态、车价等信息没有可靠依据，不要编造具体数字，用“我这边继续核算后发您准确报价”表达。
+4. 如果关键信息不足，也要先给一个可执行的初步方向，并用 1 到 3 个问题补齐缺口。
+5. 语气自然、专业、像真人定制师；不要输出 [HANDOFF]。"""
+
+    messages = [{"role": "system", "content": system_prompt}]
+    if knowledge_context:
+        messages.append({"role": "system", "content": knowledge_context})
+    messages.append({"role": "user", "content": prompt})
+
+    return chat_completion(messages, cfg).replace("[HANDOFF]", "").strip()
+
+
+async def _generate_agent_continuation(session_id: str, limit: int | None = 30) -> tuple[str, dict[str, Any]]:
+    session = database.get_session(session_id)
+    if not session:
+        raise ValueError("会话不存在")
+
+    messages = database.get_session_messages(session_id)
+    if not messages:
+        raise ValueError("当前会话还没有聊天记录，无法生成方案")
+
+    contact_name = session.get("contact_name") or "客户"
+    prompt = _build_agent_continuation_prompt(
+        contact_name=contact_name,
+        messages=messages,
+        profile=database.get_session_profile(session_id),
+        limit=limit,
+    )
+
+    provider = _provider_from_env()
+    if provider == "adp":
+        sid, skey, region, app_key = load_adp_config_from_env()
+        reply_text = await run_adp_chat(
+            secret_id=sid,
+            secret_key=skey,
+            region=region,
+            bot_app_key=app_key,
+            session_id=session_id,
+            user_text=prompt,
+        )
+        reply_text = reply_text.replace("[HANDOFF]", "").strip()
+    else:
+        reply_text = await asyncio.to_thread(_run_volc_agent_continuation, prompt)
+
+    if not reply_text:
+        raise ValueError("Agent 未生成可用方案，请稍后重试")
+
+    agent_id = session.get("agent_id")
+    database.save_message(session_id, contact_name, "assistant", reply_text, agent_id=agent_id)
+    database.update_session_status(session_id, "auto", agent_id=agent_id)
+    return reply_text, session
 
 
 def _format_duration(seconds: int) -> str:
@@ -674,6 +806,32 @@ async def api_summarize_conversation(
             status_code=500,
             content={"ok": False, "error": str(e)}
         )
+
+
+@app.post("/api/admin/sessions/{session_id}/agent-continuation")
+async def api_generate_agent_continuation(
+    session_id: str,
+    payload: AgentContinuationRequest,
+    username: str = Depends(verify_admin),
+):
+    try:
+        reply_text, session = await _generate_agent_continuation(session_id, payload.limit)
+        logger.info(
+            "管理员 %s 触发 Agent 继续出方案: session_id=%s contact=%s",
+            username,
+            session_id,
+            session.get("contact_name"),
+        )
+        return {
+            "ok": True,
+            "status": "auto",
+            "reply_text": reply_text,
+        }
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"ok": False, "error": str(e)})
+    except Exception as e:
+        logger.exception("Agent 继续出方案失败: session_id=%s", session_id)
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
 @app.delete("/api/admin/sessions/{session_id}")
 async def api_delete_session(session_id: str, username: str = Depends(verify_admin)):

@@ -323,6 +323,9 @@
                         <button v-if="currentSession.status !== 'muted'" @click="setSessionStatus('muted')" class="text-xs bg-slate-500 text-white px-3 py-1.5 rounded-full hover:bg-slate-600 transition shadow-sm font-medium flex items-center">
                             <i class="fa-solid fa-volume-xmark mr-1"></i>暂停 Agent
                         </button>
+                        <button v-if="currentSession.status === 'handoff_requested'" @click="continueAgentWithPlan" :disabled="isGeneratingAgentPlan" class="text-xs bg-indigo-600 text-white px-3 py-1.5 rounded-full hover:bg-indigo-700 transition shadow-sm font-medium flex items-center disabled:opacity-60">
+                            <i class="fa-solid mr-1" :class="isGeneratingAgentPlan ? 'fa-spinner fa-spin' : 'fa-route'"></i>{{ isGeneratingAgentPlan ? '出方案中...' : 'Agent 出方案' }}
+                        </button>
                         <button v-if="currentSession.status && currentSession.status !== 'auto'" @click="setSessionStatus('auto')" class="text-xs bg-emerald-500 text-white px-3 py-1.5 rounded-full hover:bg-emerald-600 transition shadow-sm font-medium flex items-center">
                             <i class="fa-solid fa-robot mr-1"></i>恢复 Agent
                         </button>
@@ -664,6 +667,7 @@
                 const conversationSummaryMeta = ref({ used: 0, total: 0 });
                 const summaryLimit = ref('20');
                 const isSummarizing = ref(false);
+                const isGeneratingAgentPlan = ref(false);
                 const isSummaryCollapsed = ref(true);
                 const isSummaryFromCache = ref(false);
                 const showAidModal = ref(false);
@@ -1225,6 +1229,44 @@
                     }
                 };
 
+                const continueAgentWithPlan = async () => {
+                    if(!currentSession.value || isGeneratingAgentPlan.value) return;
+                    isGeneratingAgentPlan.value = true;
+                    try {
+                        const sid = currentSession.value.session_id;
+                        const res = await fetch(`/api/admin/sessions/${sid}/agent-continuation`, {
+                            method: 'POST',
+                            headers: {
+                                ...getAuthHeaders(),
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({ limit: 30 })
+                        });
+                        const data = await res.json();
+
+                        if(res.ok && data.ok) {
+                            currentSession.value.status = data.status || 'auto';
+                            handoffAlertSessionIds.delete(sid);
+                            if (handoffAlertSessionIds.size > 0) {
+                                startHandoffAlert();
+                            } else {
+                                stopHandoffAlert();
+                            }
+                            await selectSession(currentSession.value);
+                            fetchSessions();
+                        } else if (res.status === 401) {
+                            triggerLogin();
+                        } else {
+                            alert(data.error || 'Agent 出方案失败，请稍后重试');
+                        }
+                    } catch(e) {
+                        console.error('Agent 出方案接口异常', e);
+                        alert('外部接口调用超时或网络异常，请重试');
+                    } finally {
+                        isGeneratingAgentPlan.value = false;
+                    }
+                };
+
                 const scrollToBottom = () => {
                     nextTick(() => {
                         if(messageBox.value) {
@@ -1363,6 +1405,7 @@
                     conversationSummaryMeta,
                     summaryLimit,
                     isSummarizing,
+                    isGeneratingAgentPlan,
                     isSummaryCollapsed,
                     isSummaryFromCache,
                     showAidModal,
@@ -1400,6 +1443,7 @@
                     selectSession,
                     extractProfile,
                     summarizeConversation,
+                    continueAgentWithPlan,
                     restoreSummaryCache,
                     getPreferencesList,
                     summaryList,
