@@ -320,9 +320,9 @@
                         <button v-if="currentSession.status !== 'human_takeover'" @click="setSessionStatus('human_takeover')" class="text-xs bg-amber-500 text-white px-3 py-1.5 rounded-full hover:bg-amber-600 transition shadow-sm font-medium flex items-center">
                             <i class="fa-solid fa-headset mr-1"></i>开始人工接管
                         </button>
-                        <button v-if="currentSession.status !== 'muted'" @click="setSessionStatus('muted')" class="text-xs bg-slate-500 text-white px-3 py-1.5 rounded-full hover:bg-slate-600 transition shadow-sm font-medium flex items-center">
+                        <!--button v-if="currentSession.status !== 'muted'" @click="setSessionStatus('muted')" class="text-xs bg-slate-500 text-white px-3 py-1.5 rounded-full hover:bg-slate-600 transition shadow-sm font-medium flex items-center">
                             <i class="fa-solid fa-volume-xmark mr-1"></i>暂停 Agent
-                        </button>
+                        </button-->
                         <button v-if="currentSession.status === 'handoff_requested'" @click="continueAgentWithPlan" :disabled="isGeneratingAgentPlan" class="text-xs bg-indigo-600 text-white px-3 py-1.5 rounded-full hover:bg-indigo-700 transition shadow-sm font-medium flex items-center disabled:opacity-60">
                             <i class="fa-solid mr-1" :class="isGeneratingAgentPlan ? 'fa-spinner fa-spin' : 'fa-route'"></i>{{ isGeneratingAgentPlan ? '出方案中...' : 'Agent 出方案' }}
                         </button>
