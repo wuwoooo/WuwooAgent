@@ -9,5 +9,4 @@ interface AutomationController {
     fun openWechatSearch(): Boolean
     fun focusWechatSearchInput(): Boolean
     fun tapWechatSearchResult(contactName: String, keyword: String): Boolean
-    fun isCurrentChatTarget(contactName: String): Boolean
 }

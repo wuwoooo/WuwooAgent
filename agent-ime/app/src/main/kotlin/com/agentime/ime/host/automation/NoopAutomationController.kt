@@ -12,5 +12,4 @@ class NoopAutomationController : AutomationController {
     override fun openWechatSearch(): Boolean = true
     override fun focusWechatSearchInput(): Boolean = true
     override fun tapWechatSearchResult(contactName: String, keyword: String): Boolean = true
-    override fun isCurrentChatTarget(contactName: String): Boolean = true
 }

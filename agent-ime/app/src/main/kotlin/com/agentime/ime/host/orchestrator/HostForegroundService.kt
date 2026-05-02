@@ -170,6 +170,8 @@ class HostForegroundService : Service() {
         }
         val automation = AccessibilityAutomationController(this)
         val ime = BroadcastImeController(this)
+        val capture = CaptureProviderFactory.create(this)
+        val ocr = FallbackOcrProvider(LocalOcrProvider(this), RemoteOcrProvider(this))
         try {
             moveState(HostState.IDLE, "开始主动外发任务: ${task.contactName}")
             if (task.contactName.isBlank() || task.searchKeyword.isBlank() || task.message.isBlank()) {
@@ -184,8 +186,9 @@ class HostForegroundService : Service() {
                 Thread.sleep(1200)
             }
 
-            if (!automation.isCurrentChatTarget(task.contactName)) {
-                if (WechatAccessibilityService.isLikelyOnChatPage()) {
+            var chatVerification = verifyOutboundChatByOcr(capture, ocr, task.contactName, "outbound_initial_${task.id}")
+            if (!chatVerification.matched) {
+                if (chatVerification.looksLikeChatPage) {
                     logger.log(TAG, "当前不是目标聊天页，先返回微信列表页")
                     automation.clickBack()
                     Thread.sleep(900)
@@ -200,16 +203,19 @@ class HostForegroundService : Service() {
                 if (!automation.tapWechatSearchResult(task.contactName, task.searchKeyword)) {
                     error("点击搜索结果失败")
                 }
-                Thread.sleep(1600)
-                if (!automation.isCurrentChatTarget(task.contactName)) {
+                chatVerification = waitOutboundChatByOcr(capture, ocr, task.contactName, 6_000L, "outbound_after_search_${task.id}")
+                if (!chatVerification.matched && (task.autoSend || !chatVerification.looksLikeChatPage)) {
                     error("进入聊天页后联系人校验失败，已停止以避免误发")
                 }
+                if (!chatVerification.matched) {
+                    logger.log(TAG, "OCR 已确认进入聊天页但标题未匹配；任务未自动发送，继续只填入文本: ${chatVerification.debugSummary}")
+                }
             } else {
-                logger.log(TAG, "手机已在目标联系人聊天页，直接准备输入")
+                logger.log(TAG, "OCR 确认手机已在目标联系人聊天页，直接准备输入: ${chatVerification.debugSummary}")
             }
 
             if (!automation.focusInputArea()) error("聚焦微信输入框失败")
-            Thread.sleep(450)
+            Thread.sleep(700)
             if (!ime.injectText(task.message)) error("注入主动外发文本失败")
             moveState(HostState.TEXT_INJECTED, "主动外发文本已注入")
 
@@ -230,6 +236,87 @@ class HostForegroundService : Service() {
             lastFinishedAt = System.currentTimeMillis()
             running.set(false)
         }
+    }
+
+    private data class OutboundChatVerification(
+        val looksLikeChatPage: Boolean,
+        val matched: Boolean,
+        val observedName: String,
+        val debugSummary: String,
+    )
+
+    private fun waitOutboundChatByOcr(
+        capture: com.agentime.ime.host.capture.CaptureController,
+        ocr: FallbackOcrProvider,
+        contactName: String,
+        timeoutMs: Long,
+        capturePrefix: String,
+    ): OutboundChatVerification {
+        val start = System.currentTimeMillis()
+        var last = OutboundChatVerification(false, false, "", "not_checked")
+        var attempt = 0
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            attempt += 1
+            last = verifyOutboundChatByOcr(capture, ocr, contactName, "${capturePrefix}_$attempt")
+            logger.log(TAG, "主动外发 OCR 聊天页校验#$attempt: ${last.debugSummary}")
+            if (last.matched) return last
+            Thread.sleep(650)
+        }
+        return last
+    }
+
+    private fun verifyOutboundChatByOcr(
+        capture: com.agentime.ime.host.capture.CaptureController,
+        ocr: FallbackOcrProvider,
+        contactName: String,
+        captureName: String,
+    ): OutboundChatVerification {
+        return runCatching {
+            val cap = capture.captureScreen(captureName)
+            val headerOcrText = recognizeHeaderWithFallbacks(ocr, cap)
+            val pageOcrText = recognizePageWithFallbacks(ocr, cap)
+            val chatAnalysis = ConversationListUnreadDetector.analyzeChatPage(pageOcrText, headerOcrText)
+            val titleOcrText = recognizeTitleOnly(ocr, cap)
+            val titleRaw = ConversationListUnreadDetector.extractChatContactNameFromOcr(titleOcrText)
+            val headerRaw = ConversationListUnreadDetector.extractChatContactNameFromOcr(headerOcrText)
+            val observed = listOf(titleRaw, headerRaw, chatAnalysis.contactName)
+                .map { SessionIdentity.normalizeContactName(this@HostForegroundService, it, useFuzzyMatch = true) }
+                .firstOrNull { it.isNotBlank() && it != "当前联系人" }
+                .orEmpty()
+            val matched = outboundNamesMatch(observed, contactName) ||
+                outboundTextContainsName(titleOcrText, contactName) ||
+                outboundTextContainsName(headerOcrText, contactName)
+            OutboundChatVerification(
+                looksLikeChatPage = chatAnalysis.looksLikeChatPage,
+                matched = chatAnalysis.looksLikeChatPage && matched,
+                observedName = observed,
+                debugSummary = "looksLikeChatPage=${chatAnalysis.looksLikeChatPage} observed=$observed target=$contactName titleRaw=$titleRaw headerRaw=$headerRaw chat=${chatAnalysis.debugSummary}",
+            )
+        }.getOrElse { e ->
+            OutboundChatVerification(false, false, "", "ocr_verify_failed=${e.message}")
+        }
+    }
+
+    private fun outboundNamesMatch(observed: String, target: String): Boolean {
+        val left = normalizeOutboundName(observed)
+        val right = normalizeOutboundName(target)
+        if (left.isBlank() || right.isBlank()) return false
+        return left == right || left.contains(right) || right.contains(left)
+    }
+
+    private fun outboundTextContainsName(ocrText: String, target: String): Boolean {
+        val text = normalizeOutboundName(ocrText)
+        val name = normalizeOutboundName(target)
+        return text.isNotBlank() && name.isNotBlank() && (text.contains(name) || name.contains(text))
+    }
+
+    private fun normalizeOutboundName(value: String): String {
+        return value
+            .replace("（", "(")
+            .replace("）", ")")
+            .replace(Regex("""[\s\n\r\t]+"""), "")
+            .lowercase()
+            .trim()
     }
 
     private fun scanConversationListAndRun(scanSource: String) {
@@ -887,21 +974,15 @@ class HostForegroundService : Service() {
         headerOcrText: String,
         listRowContactHint: String,
     ): ContactBindingResult {
-        val accessibilityName = normalizeCounterpartyName(
-            com.agentime.ime.host.automation.WechatAccessibilityService.getCurrentChatContactName(),
-            useFuzzyMatch = true,
-        )
         val titleOcrText = recognizeTitleOnly(ocr, cap)
         val titleRawName = ConversationListUnreadDetector.extractChatContactNameFromOcr(titleOcrText)
         val titleScore = ConversationListUnreadDetector.scoreHeaderOcrCandidate(titleOcrText)
         val titleName = normalizeCounterpartyName(titleRawName, useFuzzyMatch = true)
         val trustedTitleName = when {
-            accessibilityName.isNotBlank() -> accessibilityName
             titleScore >= 80 && titleName.isNotBlank() -> titleName
             else -> ""
         }
         val trustedTitleSource = when {
-            accessibilityName.isNotBlank() -> "accessibility"
             titleScore >= 80 && titleName.isNotBlank() -> "title_ocr"
             else -> "none"
         }

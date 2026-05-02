@@ -20,7 +20,4 @@ class AccessibilityAutomationController(private val context: Context) : Automati
     override fun focusWechatSearchInput(): Boolean = WechatAccessibilityService.focusWechatSearchInput()
     override fun tapWechatSearchResult(contactName: String, keyword: String): Boolean =
         WechatAccessibilityService.tapWechatSearchResult(contactName, keyword)
-
-    override fun isCurrentChatTarget(contactName: String): Boolean =
-        WechatAccessibilityService.isCurrentChatTarget(contactName)
 }
