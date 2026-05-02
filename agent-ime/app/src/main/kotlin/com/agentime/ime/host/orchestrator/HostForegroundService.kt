@@ -264,6 +264,12 @@ class HostForegroundService : Service() {
                 Thread.sleep(650)
                 if (!automation.clickSend()) error("点击发送失败")
                 moveState(HostState.SENT, "主动外发已发送")
+                Thread.sleep(800)
+                val backOk = automation.clickBack()
+                logger.log(TAG, "主动外发发送完成后返回列表页，执行结果=$backOk")
+                if (backOk) {
+                    schedulePostSendFollowupScan("outbound_post_send_back")
+                }
             } else {
                 moveState(HostState.SENT, "主动外发已填入，等待人工确认发送")
             }

@@ -240,6 +240,13 @@ def init_db():
             FOREIGN KEY (agent_id) REFERENCES agents (id)
         )
     """)
+    for column_sql in [
+        "ALTER TABLE outbound_tasks ADD COLUMN recorded_message_at TIMESTAMP",
+    ]:
+        try:
+            cursor.execute(column_sql)
+        except sqlite3.OperationalError:
+            pass
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_outbound_tasks_agent_status ON outbound_tasks(agent_id, status, id)")
     conn.commit()
     conn.close()
@@ -507,13 +514,18 @@ def resolve_session_id(session_id: str, contact_name: str, agent_id: int | None 
 
     return incoming_session_id
 
-def save_message(session_id: str, contact_name: str, role: str, content: str, agent_id: int | None = None):
-    conn = get_connection()
-    cursor = conn.cursor()
+def _save_message_with_cursor(
+    cursor: sqlite3.Cursor,
+    session_id: str,
+    contact_name: str,
+    role: str,
+    content: str,
+    agent_id: int | None = None,
+    created_at: str | None = None,
+) -> None:
     contact_name = canonicalize_contact_name(contact_name)
-    
-    # Ensure session exists
-    now_bj = get_beijing_time()
+
+    now_bj = created_at or get_beijing_time()
     cursor.execute("SELECT session_id, agent_id FROM sessions WHERE session_id = ?", (session_id,))
     if not cursor.fetchone():
         cursor.execute(
@@ -533,6 +545,12 @@ def save_message(session_id: str, contact_name: str, role: str, content: str, ag
         "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
         (session_id, role, content, now_bj)
     )
+
+
+def save_message(session_id: str, contact_name: str, role: str, content: str, agent_id: int | None = None):
+    conn = get_connection()
+    cursor = conn.cursor()
+    _save_message_with_cursor(cursor, session_id, contact_name, role, content, agent_id=agent_id)
     conn.commit()
     conn.close()
 
@@ -911,15 +929,19 @@ def complete_outbound_task(task_id: int, agent_id: int, success: bool, error: st
         return None
 
     task = _get_outbound_task_by_id(cursor, task_id)
+    if task and success and task.get("auto_send") and not task.get("recorded_message_at"):
+        session_id = str(task.get("session_id") or "")
+        contact_name = str(task.get("contact_name") or "")
+        message = str(task.get("message") or "").strip()
+        if session_id and message:
+            _save_message_with_cursor(cursor, session_id, contact_name, "assistant", message, agent_id=agent_id, created_at=now_bj)
+            cursor.execute(
+                "UPDATE outbound_tasks SET recorded_message_at = ?, updated_at = ? WHERE id = ?",
+                (now_bj, now_bj, task_id),
+            )
+            task = _get_outbound_task_by_id(cursor, task_id)
     conn.commit()
     conn.close()
-    if task and success and task.get("auto_send"):
-        save_outbound_message_after_task(
-            session_id=str(task.get("session_id") or ""),
-            contact_name=str(task.get("contact_name") or ""),
-            message=str(task.get("message") or ""),
-            agent_id=agent_id,
-        )
     return task
 
 
