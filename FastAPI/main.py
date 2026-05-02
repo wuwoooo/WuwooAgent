@@ -872,9 +872,9 @@ async def api_get_session_detail(session_id: str, username: str = Depends(verify
     session = database.get_session(session_id)
     messages = database.get_session_messages(session_id)
     profile = database.get_session_profile(session_id)
-    contact = None
-    if session and session.get("contact_id"):
-        contact = database.get_contact(int(session["contact_id"]))
+    contact = database.get_contact_for_session(session_id) if session else None
+    if contact:
+        session = database.get_session(session_id)
     return {"session": session, "messages": messages, "profile": profile, "contact": contact}
 
 
@@ -996,13 +996,14 @@ async def api_extract_profile(session_id: str, username: str = Depends(verify_ad
     try:
         profile = await async_extract_profile(session_id)
         session = database.get_session(session_id)
-        contact = None
-        if session and session.get("contact_id"):
+        contact = database.get_contact_for_session(session_id) if session else None
+        if contact:
             try:
-                await async_extract_contact_memory(session_id, contact_id=int(session["contact_id"]))
-                contact = database.get_contact(int(session["contact_id"]))
+                await async_extract_contact_memory(session_id, contact_id=int(contact["id"]))
+                contact = database.get_contact(int(contact["id"]))
             except Exception as e:
                 logger.warning("管理员手动提取画像时，联系人长期记忆更新失败: session_id=%s error=%s", session_id, e)
+        session = database.get_session(session_id)
         return {"ok": True, "profile": profile, "session": session, "contact": contact}
     except Exception as e:
         return JSONResponse(
