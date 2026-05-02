@@ -109,6 +109,9 @@ class HostForegroundService : Service() {
                 }
                 io.execute { runOnce(sessionId, contactName) }
             }
+            ACTION_RUN_OUTBOUND_TASK -> io.execute {
+                runNextOutboundTaskOnce()
+            }
         }
         return START_STICKY
     }
@@ -167,6 +170,30 @@ class HostForegroundService : Service() {
             runOutboundTask(task, agentClient)
         } catch (e: Exception) {
             logger.log(TAG, "主动外发任务轮询失败: ${e.message}")
+        }
+    }
+
+    private fun runNextOutboundTaskOnce() {
+        if (running.get()) {
+            logger.log(TAG, "已有任务在执行中，忽略本次主动外发触发")
+            return
+        }
+        val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
+        if (prefs.getString("execution_mode", "auto").orEmpty() != "auto") {
+            logger.log(TAG, "当前不是自动模式，忽略主动外发触发")
+            return
+        }
+        val agentClient = HttpAgentClient(this)
+        try {
+            val task = agentClient.claimNextOutboundTask()
+            if (task == null) {
+                logger.log(TAG, "主动外发触发成功，但后端没有待执行任务")
+                return
+            }
+            logger.log(TAG, "手动触发主动外发任务: id=${task.id} contact=${task.contactName} autoSend=${task.autoSend}")
+            runOutboundTask(task, agentClient)
+        } catch (e: Exception) {
+            logger.log(TAG, "手动触发主动外发失败: ${e.message}")
         }
     }
 
@@ -1766,6 +1793,7 @@ class HostForegroundService : Service() {
         @Volatile private var lastPostSendFollowupScheduledAt: Long = 0L
 
         const val ACTION_RUN_ONCE = "com.agentime.ime.action.RUN_ONCE"
+        const val ACTION_RUN_OUTBOUND_TASK = "com.agentime.ime.action.RUN_OUTBOUND_TASK"
         const val ACTION_PREPARE_PROJECTION = "com.agentime.ime.action.PREPARE_PROJECTION"
         const val ACTION_START_RUNTIME = "com.agentime.ime.action.START_RUNTIME"
         const val ACTION_SCAN_CONVERSATION_LIST = "com.agentime.ime.action.SCAN_CONVERSATION_LIST"
