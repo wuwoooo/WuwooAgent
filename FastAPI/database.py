@@ -801,7 +801,7 @@ def create_outbound_task(
     if not contact_name:
         raise ValueError("联系人不能为空")
     if not search_keyword:
-        raise ValueError("搜索关键词不能为空")
+        search_keyword = contact_name
     if not message:
         raise ValueError("发送内容不能为空")
 

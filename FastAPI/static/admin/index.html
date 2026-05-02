@@ -1334,9 +1334,9 @@
 
                 const openOutboundModal = async () => {
                     if (!currentSession.value) return;
-                    const contactName = currentSession.value.suggested_remark || currentSession.value.contact_name || '';
+                    const contactName = currentSession.value.contact_name || '';
                     outboundForm.value = {
-                        contact_name: currentSession.value.contact_name || contactName,
+                        contact_name: contactName,
                         search_keyword: contactName,
                         message: conversationSummary.value?.suggested_next_reply || '',
                         auto_send: false
@@ -1368,7 +1368,7 @@
                         agent_id: currentSession.value.agent_id || null,
                         session_id: currentSession.value.session_id || '',
                         contact_name: (outboundForm.value.contact_name || '').trim(),
-                        search_keyword: (outboundForm.value.search_keyword || outboundForm.value.contact_name || '').trim(),
+                        search_keyword: (outboundForm.value.search_keyword || currentSession.value.contact_name || outboundForm.value.contact_name || '').trim(),
                         message: (outboundForm.value.message || '').trim(),
                         auto_send: !!outboundForm.value.auto_send
                     };
