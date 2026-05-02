@@ -464,16 +464,24 @@
                     </div>
                 </div>
 
-                <div class="mb-6 rounded-2xl border border-emerald-100 bg-emerald-50/40 p-4 space-y-3">
-                    <div class="flex items-center justify-between">
-                        <p class="text-xs font-bold text-slate-600 flex items-center">
+                <div class="mb-6 rounded-2xl border border-emerald-100 bg-emerald-50/40 overflow-hidden">
+                    <button @click="isContactMemoryCollapsed = !isContactMemoryCollapsed" class="w-full px-4 py-3 flex items-center justify-between text-left hover:bg-emerald-50 transition">
+                        <span class="text-xs font-bold text-slate-600 flex items-center">
                             <i class="fa-solid fa-brain text-emerald-500 mr-1.5"></i>联系人长期记忆
-                        </p>
+                            <span v-if="contact" class="ml-2 text-[10px] px-2 py-0.5 rounded-full bg-white text-emerald-600 border border-emerald-100">已关联</span>
+                        </span>
+                        <span class="flex items-center gap-2 text-[10px] text-slate-400">
+                            <span v-if="contact?.updated_at">更新 {{ formatTime(contact.updated_at) }}</span>
+                            <i class="fa-solid" :class="isContactMemoryCollapsed ? 'fa-chevron-down' : 'fa-chevron-up'"></i>
+                        </span>
+                    </button>
+                    <div v-show="!isContactMemoryCollapsed" class="px-4 pb-4 space-y-3">
+                        <div class="flex items-center justify-end">
                         <button @click="mergeContactMemory" :disabled="isMergingContactMemory || !contact"
                                 class="text-[10px] px-2.5 py-1 rounded-full bg-white text-emerald-700 border border-emerald-100 hover:bg-emerald-100 disabled:opacity-50">
                             <i class="fa-solid mr-1" :class="isMergingContactMemory ? 'fa-spinner fa-spin' : 'fa-rotate'"></i>{{ isMergingContactMemory ? '合并中' : '合并记忆' }}
                         </button>
-                    </div>
+                        </div>
                     <div v-if="contact" class="space-y-3">
                         <div class="text-sm text-slate-700">
                             <span class="text-xs text-slate-400">联系人：</span>{{ contact.primary_name || currentSession.contact_name }}
@@ -487,10 +495,10 @@
                         </div>
                         <p v-else class="text-xs text-slate-400 italic">暂无自动沉淀的长期记忆。</p>
                         <div>
-                            <label class="block text-[10px] text-slate-500 font-bold mb-1">人工补充资料（JSON，对 Agent 优先级最高）</label>
+                            <label class="block text-[10px] text-slate-500 font-bold mb-1">人工补充资料（自然语言，对 Agent 优先级最高）</label>
                             <textarea v-model="contactManualNotesText" rows="5"
                                       class="w-full px-3 py-2 rounded-xl border border-emerald-100 bg-white text-xs leading-5 focus:outline-none focus:ring-2 focus:ring-emerald-100"
-                                      placeholder='{"沟通风格":"喜欢直接一点","禁忌":["不要反复问预算"]}'></textarea>
+                                      placeholder="例如：这是老客户，喜欢直接一点，不要太官方。之前说过不要反复追问预算，重点推荐品质好、节奏轻松的亲子路线。"></textarea>
                             <button @click="saveContactManualNotes" :disabled="isSavingContactNotes"
                                     class="mt-2 w-full py-2 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 disabled:opacity-50">
                                 <i class="fa-solid mr-1" :class="isSavingContactNotes ? 'fa-spinner fa-spin' : 'fa-floppy-disk'"></i>{{ isSavingContactNotes ? '保存中...' : '保存人工资料' }}
@@ -498,6 +506,7 @@
                         </div>
                     </div>
                     <p v-else class="text-xs text-slate-400 italic">当前会话尚未关联长期联系人。</p>
+                    </div>
                 </div>
 
                 <div v-if="profile" class="space-y-5">
@@ -826,6 +835,7 @@
                 const isRefreshingRemark = ref(false);
                 const isMarkingRemarkApplied = ref(false);
                 const isSummaryCollapsed = ref(true);
+                const isContactMemoryCollapsed = ref(true);
                 const isSummaryFromCache = ref(false);
                 const showAidModal = ref(false);
                 const showRemarkModal = ref(false);
@@ -1009,6 +1019,7 @@
                     contactManualNotesText.value = '';
                     clearSummaryState();
                     isSummaryCollapsed.value = true;
+                    isContactMemoryCollapsed.value = true;
                     showAidModal.value = false;
                     showRemarkModal.value = false;
                     showOutboundModal.value = false;
@@ -1330,7 +1341,7 @@
                             messages.value = data.messages || [];
                             profile.value = data.profile || null;
                             contact.value = data.contact || null;
-                            contactManualNotesText.value = JSON.stringify(contact.value?.manual_notes || {}, null, 2);
+                            contactManualNotesText.value = manualNotesToText(contact.value?.manual_notes || {});
                             if (isSwitchingSession) {
                                 restoreSummaryCache();
                             }
@@ -1360,7 +1371,7 @@
                             }
                             if (data.contact) {
                                 contact.value = data.contact;
-                                contactManualNotesText.value = JSON.stringify(contact.value?.manual_notes || {}, null, 2);
+                                contactManualNotesText.value = manualNotesToText(contact.value?.manual_notes || {});
                             }
                             fetchSessions();
                         } else {
@@ -1732,6 +1743,18 @@
                     return String(value).trim();
                 };
 
+                const manualNotesToText = (manual) => {
+                    if (!manual || typeof manual !== 'object' || Array.isArray(manual)) return '';
+                    if (manual.补充资料) return memoryValueText(manual.补充资料);
+                    return Object.entries(manual)
+                        .map(([key, value]) => {
+                            const text = memoryValueText(value);
+                            return text ? `${key}：${text}` : '';
+                        })
+                        .filter(Boolean)
+                        .join('\n');
+                };
+
                 const contactMemoryEntries = (item) => {
                     const result = [];
                     const manual = item?.manual_notes || {};
@@ -1760,17 +1783,7 @@
 
                 const saveContactManualNotes = async () => {
                     if (!contact.value || isSavingContactNotes.value) return;
-                    let manualNotes = {};
-                    try {
-                        manualNotes = contactManualNotesText.value.trim() ? JSON.parse(contactManualNotesText.value) : {};
-                    } catch (e) {
-                        alert('人工补充资料必须是合法 JSON 对象');
-                        return;
-                    }
-                    if (!manualNotes || Array.isArray(manualNotes) || typeof manualNotes !== 'object') {
-                        alert('人工补充资料必须是 JSON 对象');
-                        return;
-                    }
+                    const manualNotesText = (contactManualNotesText.value || '').trim();
                     isSavingContactNotes.value = true;
                     try {
                         const res = await fetch(`/api/admin/contacts/${contact.value.id}/manual-notes`, {
@@ -1779,12 +1792,12 @@
                                 ...getAuthHeaders(),
                                 'Content-Type': 'application/json'
                             },
-                            body: JSON.stringify({ manual_notes: manualNotes })
+                            body: JSON.stringify({ manual_notes_text: manualNotesText })
                         });
                         const data = await res.json().catch(() => ({}));
                         if (res.ok && data.ok) {
                             contact.value = data.contact;
-                            contactManualNotesText.value = JSON.stringify(contact.value?.manual_notes || {}, null, 2);
+                            contactManualNotesText.value = manualNotesToText(contact.value?.manual_notes || {});
                         } else if (res.status === 401) {
                             triggerLogin();
                         } else {
@@ -1810,7 +1823,7 @@
                         const data = await res.json().catch(() => ({}));
                         if (res.ok && data.ok) {
                             contact.value = data.contact;
-                            contactManualNotesText.value = JSON.stringify(contact.value?.manual_notes || {}, null, 2);
+                            contactManualNotesText.value = manualNotesToText(contact.value?.manual_notes || {});
                         } else if (res.status === 401) {
                             triggerLogin();
                         } else {
@@ -1898,6 +1911,7 @@
                     isRefreshingRemark,
                     isMarkingRemarkApplied,
                     isSummaryCollapsed,
+                    isContactMemoryCollapsed,
                     isSummaryFromCache,
                     showAidModal,
                     showRemarkModal,
@@ -1953,6 +1967,7 @@
                     getPreferencesList,
                     summaryList,
                     contactMemoryEntries,
+                    manualNotesToText,
                     saveContactManualNotes,
                     mergeContactMemory,
                     deleteSession,

@@ -161,6 +161,7 @@ class RemarkAppliedRequest(BaseModel):
 
 class ContactManualNotesRequest(BaseModel):
     manual_notes: dict[str, Any] = {}
+    manual_notes_text: str = ""
 
 
 class AdminOutboundTaskRequest(BaseModel):
@@ -968,7 +969,10 @@ async def api_admin_update_contact_manual_notes(
     username: str = Depends(verify_admin),
 ):
     try:
-        contact = database.update_contact_manual_notes(contact_id, payload.manual_notes)
+        manual_notes = payload.manual_notes
+        if payload.manual_notes_text.strip():
+            manual_notes = {"补充资料": payload.manual_notes_text.strip()}
+        contact = database.update_contact_manual_notes(contact_id, manual_notes)
     except Exception as e:
         return JSONResponse(status_code=400, content={"ok": False, "error": str(e)})
     if not contact:
