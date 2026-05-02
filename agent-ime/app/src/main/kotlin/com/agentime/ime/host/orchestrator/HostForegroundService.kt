@@ -60,6 +60,7 @@ class HostForegroundService : Service() {
         override fun run() {
             val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
             if (!prefs.getBoolean("runtime_enabled", false)) return
+            if (!prefs.getBoolean("outbound_task_enabled", false)) return
             io.execute { pollAndRunOutboundTask() }
             mainHandler.postDelayed(this, OUTBOUND_TASK_POLL_INTERVAL_MS)
         }
@@ -70,7 +71,8 @@ class HostForegroundService : Service() {
         logger = HostLogger(this)
         createNotificationChannel()
         startForegroundCompat("Host 服务运行中", includeProjectionType = false)
-        if (getSharedPreferences("host_config", Context.MODE_PRIVATE).getBoolean("runtime_enabled", false)) {
+        val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("runtime_enabled", false) && prefs.getBoolean("outbound_task_enabled", false)) {
             startOutboundTaskPolling()
         }
     }
@@ -81,7 +83,12 @@ class HostForegroundService : Service() {
             ACTION_PREPARE_PROJECTION -> io.execute { prepareProjection() }
             ACTION_START_RUNTIME -> {
                 mainHandler.removeCallbacks(startupScanRunnable)
-                startOutboundTaskPolling()
+                val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
+                if (prefs.getBoolean("outbound_task_enabled", false)) {
+                    startOutboundTaskPolling()
+                } else {
+                    logger.log(TAG, "主动外发任务轮询未启用，保持原有自动回复链路独立运行")
+                }
                 // 延迟 2s 后首次扫描，给 MediaProjection 授权弹窗留出交互时间；
                 // 即使此时管线未就绪也没关系：prepareProjection 完成后会再补一次 post_prepare 扫描。
                 mainHandler.postDelayed(startupScanRunnable, 2000L)
@@ -149,6 +156,7 @@ class HostForegroundService : Service() {
     private fun pollAndRunOutboundTask() {
         val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
         if (!prefs.getBoolean("runtime_enabled", false)) return
+        if (!prefs.getBoolean("outbound_task_enabled", false)) return
         if (prefs.getString("execution_mode", "auto").orEmpty() != "auto") return
         if (isBusyOrCoolingDown()) return
 

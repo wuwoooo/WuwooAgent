@@ -392,7 +392,7 @@ class WechatAccessibilityService : AccessibilityService() {
                 "input_x",
                 "input_y",
                 450f / 1080f,
-                0.945f,
+                2280f / 2245f,
             )
             Log.i(TAG, "focusInputArea 坐标 ($x, $y)")
             repeat(4) { attempt ->
