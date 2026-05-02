@@ -317,7 +317,14 @@ except ImportError:
 MAX_HISTORY_TURNS = 5  # 保留最近5轮对话（10条消息）
 
 
-def run_volc_knowledge_chat(*, pure_user_text: str, wrapped_user_text: str, contact_name: str, session_id: str) -> tuple[str, dict[str, Any]]:
+def run_volc_knowledge_chat(
+    *,
+    pure_user_text: str,
+    wrapped_user_text: str,
+    contact_name: str,
+    session_id: str,
+    contact_context: str = "",
+) -> tuple[str, dict[str, Any]]:
     cfg = load_volc_config_from_env()
     
     # 低价值短语直接拦截检索，压榨速度极限
@@ -347,6 +354,8 @@ def run_volc_knowledge_chat(*, pure_user_text: str, wrapped_user_text: str, cont
     ]
     if knowledge_context:
         messages.append({"role": "system", "content": knowledge_context})
+    if contact_context:
+        messages.append({"role": "system", "content": contact_context})
         
     # 拼接历史记录和最新一条消息
     messages.extend(history)

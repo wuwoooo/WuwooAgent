@@ -39,7 +39,7 @@ import secrets
 
 try:
     import database
-    from profile_extractor import async_extract_profile, check_and_trigger_profile_update
+    from profile_extractor import async_extract_contact_memory, async_extract_profile, check_and_trigger_profile_update
     from conversation_summary import async_summarize_conversation
 except ImportError:
     pass
@@ -159,6 +159,10 @@ class RemarkAppliedRequest(BaseModel):
     applied_remark: str = ""
 
 
+class ContactManualNotesRequest(BaseModel):
+    manual_notes: dict[str, Any] = {}
+
+
 class AdminOutboundTaskRequest(BaseModel):
     agent_id: int | None = None
     session_id: str = ""
@@ -244,6 +248,70 @@ def _format_profile_for_prompt(profile: dict[str, Any] | None) -> str:
     return "\n".join(parts) if parts else "暂无已提取画像。"
 
 
+def _memory_value_text(value: Any) -> str:
+    if isinstance(value, dict):
+        value = value.get("value")
+    if isinstance(value, (list, tuple)):
+        return "、".join(str(item).strip() for item in value if str(item).strip())
+    return str(value or "").strip()
+
+
+def _format_contact_context_for_prompt(
+    contact: dict[str, Any] | None,
+    session_profile: dict[str, Any] | None = None,
+) -> str:
+    """压缩联系人长期记忆，供模型作为参考上下文使用。"""
+    lines = [
+        "联系人长期记忆（仅作参考；如与客户最新消息冲突，以最新消息为准）："
+    ]
+    if not contact:
+        lines.append("暂无长期联系人记忆。")
+    else:
+        primary_name = contact.get("primary_name") or ""
+        if primary_name:
+            lines.append(f"- 主要称呼：{primary_name}")
+
+        manual_notes = contact.get("manual_notes") or {}
+        if isinstance(manual_notes, dict):
+            for key, value in manual_notes.items():
+                text = _memory_value_text(value)
+                if text:
+                    lines.append(f"- 人工补充/{key}：{text}")
+
+        memory = contact.get("memory") or {}
+        stable_profile = memory.get("stable_profile") or {}
+        for key, value in stable_profile.items():
+            text = _memory_value_text(value)
+            if text:
+                lines.append(f"- 稳定偏好/{key}：{text}")
+
+        dynamic_state = memory.get("dynamic_state") or {}
+        for key, value in dynamic_state.items():
+            text = _memory_value_text(value)
+            if text:
+                lines.append(f"- 当前状态/{key}：{text}")
+
+        facts = memory.get("facts") or []
+        shown = 0
+        for fact in reversed(facts if isinstance(facts, list) else []):
+            if not isinstance(fact, dict):
+                continue
+            text = _memory_value_text(fact.get("value"))
+            if not text:
+                continue
+            lines.append(f"- 已知事实：{text}")
+            shown += 1
+            if shown >= 5:
+                break
+
+    session_profile_text = _format_profile_for_prompt(session_profile)
+    if session_profile_text != "暂无已提取画像。":
+        lines.append("本次咨询画像：")
+        lines.append(session_profile_text)
+
+    return "\n".join(lines)
+
+
 def _format_messages_for_prompt(messages: list[dict[str, Any]], limit: int | None = 30) -> str:
     safe_limit = max(1, min(int(limit or 30), 80))
     recent_messages = messages[-safe_limit:]
@@ -264,6 +332,7 @@ def _build_agent_continuation_prompt(
     contact_name: str,
     messages: list[dict[str, Any]],
     profile: dict[str, Any] | None,
+    contact_context: str = "",
     limit: int | None = 30,
 ) -> str:
     return (
@@ -271,6 +340,8 @@ def _build_agent_continuation_prompt(
         f"当前实际时间：{get_current_time_str()}\n\n"
         "客户画像：\n"
         f"{_format_profile_for_prompt(profile)}\n\n"
+        "联系人背景：\n"
+        f"{contact_context or '暂无长期联系人记忆。'}\n\n"
         f"最近聊天记录：\n{_format_messages_for_prompt(messages, limit)}\n\n"
         "任务：后台人员已经点击“由 Agent 出方案”，请你继续以旅游定制顾问“小鹿”的身份，"
         "直接生成一条可以发送给客户的初版行程方案。请使用微信里容易阅读和复制的排版，"
@@ -316,10 +387,14 @@ async def _generate_agent_continuation(session_id: str, limit: int | None = 30) 
         raise ValueError("当前会话还没有聊天记录，无法生成方案")
 
     contact_name = session.get("contact_name") or "客户"
+    profile = database.get_session_profile(session_id)
+    contact = database.get_contact_for_session(session_id, agent_id=session.get("agent_id"))
+    contact_context = _format_contact_context_for_prompt(contact, profile)
     prompt = _build_agent_continuation_prompt(
         contact_name=contact_name,
         messages=messages,
-        profile=database.get_session_profile(session_id),
+        profile=profile,
+        contact_context=contact_context,
         limit=limit,
     )
 
@@ -410,7 +485,7 @@ echo $! > {pid_file}
 echo "$(date '+%Y-%m-%d %H:%M:%S %z') INFO [admin.restart] restarted; new_pid=$(cat {pid_file})" >> {log_file}
 """
 
-def _build_user_prompt(contact_name: str, current_status: str = "auto") -> Tuple[str, str]:
+def _build_user_prompt(contact_name: str, current_status: str = "auto", contact_context: str = "") -> Tuple[str, str]:
     """未提供 ocr_text 时：仅截图场景，服务端不做 OCR，用占位描述发给智能体。"""
     name = (contact_name or "").strip() or "客户"
     current_time = get_current_time_str()
@@ -424,13 +499,14 @@ def _build_user_prompt(contact_name: str, current_status: str = "auto") -> Tuple
         f"（系统提示：当前实际时间是 {current_time}。注意：仅在第一轮对话或主动打招呼时才进行时间问候，在后续连续的对话中直接回答用户的问题，绝对不要重复问候！你在问候客户时必须以此为准判断今天是星期几，绝对不要参考下方文本中可能出现的旧时间标签（如“周一16:40”等是微信界面上旧消息的时间戳，不代表当前时间）。请以此作为判断今天、明天、下周等相对时间的基准。\n"
         "【HANDOFF 规则】在以下两种情况下，才可在回复末尾加上 [HANDOFF] 标记：1) 客户在本轮消息中明确表达了要你出方案/报价/下单的意图（例如‘帮我安排一下’、‘出个方案吧’、‘可以报价了’）；2) 虽然客户没有直接说‘出方案’，但从对话上下文判断客户意愿已经非常强烈，目的地、人数、时间等关键信息都已明确，且客户表现出明显的决策倾向（例如‘就这个行程吧’、‘五一就走’、‘两个人确定了’）。如果客户只是打招呼、闲聊、问问题、或者你自己还在提问收集基本信息，**绝对不要**加 [HANDOFF]。触发 [HANDOFF] 时，你的回复**必须是一句确认性的第一人称过渡话术**（例如‘好的，我这就给您整理具体的行程方案和报价～’），**绝对不能是提问句**，也绝对不能说‘转交给人工’或‘转交给定制师’，因为你本身就是这位专属的定制师小鹿。）\n\n"
         f"{receptionist_rule}"
+        f"{contact_context + chr(10) if contact_context else ''}"
         f"当前微信会话联系人是「{name}」。用户上传了一张聊天截图，但服务端未能拿到具体聊天文字。\n"
         "请作为旅游定制顾问，直接给出一句简短的回复建议。"
     )
     return pure_text, wrapped_text
 
 
-def _build_user_prompt_from_ocr(contact_name: str, ocr_text: str, current_status: str = "auto") -> Tuple[str, str]:
+def _build_user_prompt_from_ocr(contact_name: str, ocr_text: str, current_status: str = "auto", contact_context: str = "") -> Tuple[str, str]:
     """客户端已完成本地 OCR 时，仅把最新一条客户消息发给智能体。"""
     name = (contact_name or "").strip() or "客户"
     text = (ocr_text or "").strip()
@@ -445,6 +521,7 @@ def _build_user_prompt_from_ocr(contact_name: str, ocr_text: str, current_status
         f"（系统提示：当前实际时间是 {current_time}。注意：仅在第一轮对话或主动打招呼时才进行时间问候，在后续连续的对话中直接回答用户的问题，绝对不要重复问候！你在问候客户时必须以此为准判断今天是星期几，绝对不要参考下方 OCR 文本中可能出现的旧时间标签（如“周一16:40”等是微信界面上旧消息的时间戳，不代表当前时间）。如果在聊天中客户提到诸如“下月”、“明天”等相对时间，也请以此为基准推算。\n"
         "【HANDOFF 规则】在以下两种情况下，才可在回复末尾加上 [HANDOFF] 标记：1) 客户在本轮消息中明确表达了要你出方案/报价/下单的意图（例如‘帮我安排一下’、‘出个方案吧’、‘可以报价了’）；2) 虽然客户没有直接说‘出方案’，但从对话上下文判断客户意愿已经非常强烈，目的地、人数、时间等关键信息都已明确，且客户表现出明显的决策倾向（例如‘就这个行程吧’、‘五一就走’、‘两个人确定了’）。如果客户只是打招呼、闲聊、问问题、或者你自己还在提问收集基本信息，**绝对不要**加 [HANDOFF]。触发 [HANDOFF] 时，你的回复**必须是一句确认性的第一人称过渡话术**（例如‘好的，我这就给您整理具体的行程方案和报价～’），**绝对不能是提问句**，也绝对不能说‘转交给人工’或‘转交给定制师’，因为你本身就是这位专属的定制师小鹿。）\n\n"
         f"{receptionist_rule}"
+        f"{contact_context + chr(10) if contact_context else ''}"
         f"代聊微信联系人「{name}」。对方刚刚发来的最新消息：\n\n{text}"
     )
     return pure_text, wrapped_text
@@ -556,6 +633,18 @@ async def wechat_chat(
         current_status = database.get_session_status(session_id)
     except Exception:
         current_status = "auto"
+
+    contact = None
+    contact_id = None
+    session_profile = None
+    contact_context = ""
+    try:
+        contact = database.resolve_contact(session_id, contact_name, agent_id=agent_id)
+        contact_id = contact.get("id") if contact else None
+        session_profile = database.get_session_profile(session_id)
+        contact_context = _format_contact_context_for_prompt(contact, session_profile)
+    except Exception as e:
+        logger.warning("联系人长期记忆解析失败，跳过上下文注入: session_id=%s contact=%s error=%s", session_id, contact_name, e)
         
     if is_human_reply:
         # 真人客服发出了回复
@@ -615,9 +704,9 @@ async def wechat_chat(
 
     # 优先使用客户端本地 OCR 全文（与接口说明「构造 user 文本」一致）
     if ocr_ok:
-        pure_user_text, wrapped_user_text = _build_user_prompt_from_ocr(contact_name, ocr_text or "", current_status)
+        pure_user_text, wrapped_user_text = _build_user_prompt_from_ocr(contact_name, ocr_text or "", current_status, contact_context)
     else:
-        pure_user_text, wrapped_user_text = _build_user_prompt(contact_name, current_status)
+        pure_user_text, wrapped_user_text = _build_user_prompt(contact_name, current_status, contact_context)
 
     if _should_request_handoff(pure_user_text, session_id):
         reply_text = _handoff_reply_text()
@@ -625,7 +714,7 @@ async def wechat_chat(
             database.save_message(session_id, contact_name, "user", pure_user_text, agent_id=agent_id)
             database.save_message(session_id, contact_name, "assistant", reply_text, agent_id=agent_id)
             database.update_session_status(session_id, "handoff_requested", agent_id=agent_id)
-            asyncio.create_task(check_and_trigger_profile_update(session_id))
+            asyncio.create_task(check_and_trigger_profile_update(session_id, contact_id=contact_id))
         except Exception as e:
             logger.warning(
                 "确定性接管触发后保存状态失败: agent_id=%s session_id=%s contact=%s error=%s",
@@ -671,6 +760,7 @@ async def wechat_chat(
                 wrapped_user_text=wrapped_user_text,
                 contact_name=contact_name,
                 session_id=session_id,
+                contact_context=contact_context,
             )
             messages = [
                 {"role": "user", "text": pure_user_text},
@@ -701,7 +791,7 @@ async def wechat_chat(
     try:
         database.save_message(session_id, contact_name, "user", pure_user_text, agent_id=agent_id)
         database.save_message(session_id, contact_name, "assistant", reply_text, agent_id=agent_id)
-        asyncio.create_task(check_and_trigger_profile_update(session_id))
+        asyncio.create_task(check_and_trigger_profile_update(session_id, contact_id=contact_id))
     except Exception as e:
         pass # Ignore db errors to not fail the main chat
 
@@ -782,7 +872,10 @@ async def api_get_session_detail(session_id: str, username: str = Depends(verify
     session = database.get_session(session_id)
     messages = database.get_session_messages(session_id)
     profile = database.get_session_profile(session_id)
-    return {"session": session, "messages": messages, "profile": profile}
+    contact = None
+    if session and session.get("contact_id"):
+        contact = database.get_contact(int(session["contact_id"]))
+    return {"session": session, "messages": messages, "profile": profile, "contact": contact}
 
 
 @app.get("/api/admin/outbound-tasks")
@@ -859,12 +952,58 @@ async def api_admin_set_agent_password(agent_id: int, payload: AdminAgentPasswor
     except Exception as e:
         return JSONResponse(status_code=400, content={"ok": False, "error": str(e)})
 
+
+@app.get("/api/admin/contacts/{contact_id}")
+async def api_admin_get_contact(contact_id: int, username: str = Depends(verify_admin)):
+    contact = database.get_contact(contact_id)
+    if not contact:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "联系人不存在"})
+    return {"ok": True, "contact": contact}
+
+
+@app.post("/api/admin/contacts/{contact_id}/manual-notes")
+async def api_admin_update_contact_manual_notes(
+    contact_id: int,
+    payload: ContactManualNotesRequest,
+    username: str = Depends(verify_admin),
+):
+    try:
+        contact = database.update_contact_manual_notes(contact_id, payload.manual_notes)
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"ok": False, "error": str(e)})
+    if not contact:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "联系人不存在"})
+    logger.info("管理员 %s 更新联系人长期记忆人工资料: contact_id=%s", username, contact_id)
+    return {"ok": True, "contact": contact}
+
+
+@app.post("/api/admin/contacts/{contact_id}/merge")
+async def api_admin_merge_contact_memory(contact_id: int, session_id: str = "", username: str = Depends(verify_admin)):
+    try:
+        if not session_id:
+            contact = database.get_contact(contact_id)
+            if not contact:
+                return JSONResponse(status_code=404, content={"ok": False, "error": "联系人不存在"})
+            return {"ok": True, "contact": contact}
+        await async_extract_contact_memory(session_id, contact_id=contact_id)
+        contact = database.get_contact(contact_id)
+        return {"ok": True, "contact": contact}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
 @app.post("/api/admin/sessions/{session_id}/profile")
 async def api_extract_profile(session_id: str, username: str = Depends(verify_admin)):
     try:
         profile = await async_extract_profile(session_id)
         session = database.get_session(session_id)
-        return {"ok": True, "profile": profile, "session": session}
+        contact = None
+        if session and session.get("contact_id"):
+            try:
+                await async_extract_contact_memory(session_id, contact_id=int(session["contact_id"]))
+                contact = database.get_contact(int(session["contact_id"]))
+            except Exception as e:
+                logger.warning("管理员手动提取画像时，联系人长期记忆更新失败: session_id=%s error=%s", session_id, e)
+        return {"ok": True, "profile": profile, "session": session, "contact": contact}
     except Exception as e:
         return JSONResponse(
             status_code=500,

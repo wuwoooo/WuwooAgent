@@ -59,6 +59,16 @@ def _json_list(value: str | None) -> list[str]:
     return [str(item).strip() for item in parsed if str(item).strip()]
 
 
+def _json_dict(value: str | None) -> Dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _compact_profile_value(value: Any) -> str:
     if isinstance(value, (list, tuple)):
         return "、".join(str(item).strip() for item in value if str(item).strip())
@@ -83,6 +93,22 @@ def _add_contact_alias(cursor: sqlite3.Cursor, session_id: str, contact_name: st
         cursor.execute(
             "UPDATE sessions SET contact_aliases_json = ? WHERE session_id = ?",
             (json.dumps(aliases[-20:], ensure_ascii=False), session_id),
+        )
+
+
+def _add_contact_record_alias(cursor: sqlite3.Cursor, contact_id: int, alias: str | None) -> None:
+    alias = canonicalize_contact_name(alias, default="")
+    if not alias or alias in {"客户", "当前联系人"}:
+        return
+
+    cursor.execute("SELECT aliases_json FROM contacts WHERE id = ?", (contact_id,))
+    row = cursor.fetchone()
+    aliases = _json_list(row["aliases_json"] if row else None)
+    if alias not in aliases:
+        aliases.append(alias)
+        cursor.execute(
+            "UPDATE contacts SET aliases_json = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(aliases[-50:], ensure_ascii=False), get_beijing_time(), contact_id),
         )
 
 
@@ -196,6 +222,7 @@ def init_db():
     for column_sql in [
         "ALTER TABLE sessions ADD COLUMN status TEXT DEFAULT 'auto'",
         "ALTER TABLE sessions ADD COLUMN agent_id INTEGER",
+        "ALTER TABLE sessions ADD COLUMN contact_id INTEGER",
         "ALTER TABLE sessions ADD COLUMN contact_aliases_json TEXT",
         "ALTER TABLE sessions ADD COLUMN suggested_remark TEXT",
         "ALTER TABLE sessions ADD COLUMN suggested_remark_reason TEXT",
@@ -207,6 +234,22 @@ def init_db():
             cursor.execute(column_sql)
         except sqlite3.OperationalError:
             pass
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS contacts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id INTEGER,
+            primary_name TEXT NOT NULL,
+            aliases_json TEXT,
+            manual_notes_json TEXT,
+            memory_json TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (agent_id) REFERENCES agents (id)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_contacts_agent_name ON contacts(agent_id, primary_name)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_contact ON sessions(contact_id)")
 
     # Create messages table
     cursor.execute("""
@@ -514,6 +557,306 @@ def resolve_session_id(session_id: str, contact_name: str, agent_id: int | None 
 
     return incoming_session_id
 
+
+def _contact_public(row: sqlite3.Row | Dict[str, Any] | None) -> Optional[Dict[str, Any]]:
+    if not row:
+        return None
+    item = dict(row)
+    item["aliases"] = _json_list(item.get("aliases_json"))
+    item["manual_notes"] = _json_dict(item.get("manual_notes_json"))
+    item["memory"] = _json_dict(item.get("memory_json"))
+    return item
+
+
+def _find_contact_row(
+    cursor: sqlite3.Cursor,
+    contact_name: str,
+    agent_id: int | None = None,
+) -> Optional[sqlite3.Row]:
+    canonical_name = canonicalize_contact_name(contact_name, default="")
+    if not canonical_name:
+        return None
+
+    if agent_id is None:
+        cursor.execute(
+            """
+            SELECT * FROM contacts
+            WHERE agent_id IS NULL
+            ORDER BY updated_at DESC, id DESC
+            """
+        )
+    else:
+        cursor.execute(
+            """
+            SELECT * FROM contacts
+            WHERE agent_id = ?
+            ORDER BY updated_at DESC, id DESC
+            """,
+            (agent_id,),
+        )
+    for row in cursor.fetchall():
+        known_names = [row["primary_name"], *_json_list(row["aliases_json"])]
+        if any(canonicalize_contact_name(name, default="") == canonical_name for name in known_names):
+            return row
+    return None
+
+
+def resolve_contact(session_id: str, contact_name: str, agent_id: int | None = None) -> Dict[str, Any]:
+    """解析或创建真实联系人，并把当前会话关联到联系人。"""
+    canonical_name = canonicalize_contact_name(contact_name)
+    now_bj = get_beijing_time()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT c.*
+            FROM sessions s
+            JOIN contacts c ON c.id = s.contact_id
+            WHERE s.session_id = ? AND (? IS NULL OR s.agent_id = ?)
+            """,
+            (session_id, agent_id, agent_id),
+        )
+        contact_row = cursor.fetchone()
+        if not contact_row:
+            contact_row = _find_contact_row(cursor, canonical_name, agent_id=agent_id)
+
+        if contact_row:
+            contact_id = int(contact_row["id"])
+            _add_contact_record_alias(cursor, contact_id, canonical_name)
+            cursor.execute(
+                """
+                UPDATE sessions
+                SET contact_id = ?, agent_id = COALESCE(agent_id, ?), updated_at = ?
+                WHERE session_id = ?
+                """,
+                (contact_id, agent_id, now_bj, session_id),
+            )
+            if cursor.rowcount == 0:
+                cursor.execute(
+                    """
+                    INSERT INTO sessions (session_id, agent_id, contact_id, contact_name, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (session_id, agent_id, contact_id, canonical_name, now_bj, now_bj),
+                )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO contacts (
+                    agent_id, primary_name, aliases_json, manual_notes_json, memory_json,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    agent_id,
+                    canonical_name,
+                    json.dumps([canonical_name], ensure_ascii=False),
+                    "{}",
+                    "{}",
+                    now_bj,
+                    now_bj,
+                ),
+            )
+            contact_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                UPDATE sessions
+                SET contact_id = ?, agent_id = COALESCE(agent_id, ?), updated_at = ?
+                WHERE session_id = ?
+                """,
+                (contact_id, agent_id, now_bj, session_id),
+            )
+            if cursor.rowcount == 0:
+                cursor.execute(
+                    """
+                    INSERT INTO sessions (session_id, agent_id, contact_id, contact_name, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (session_id, agent_id, contact_id, canonical_name, now_bj, now_bj),
+                )
+
+        conn.commit()
+        cursor.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,))
+        return _contact_public(cursor.fetchone()) or {}
+    finally:
+        conn.close()
+
+
+def link_session_contact(session_id: str, contact_id: int, agent_id: int | None = None) -> Optional[Dict[str, Any]]:
+    now_bj = get_beijing_time()
+    conn = get_connection()
+    cursor = conn.cursor()
+    if agent_id is None:
+        cursor.execute(
+            "UPDATE sessions SET contact_id = ?, updated_at = ? WHERE session_id = ?",
+            (contact_id, now_bj, session_id),
+        )
+    else:
+        cursor.execute(
+            "UPDATE sessions SET contact_id = ?, updated_at = ? WHERE session_id = ? AND agent_id = ?",
+            (contact_id, now_bj, session_id, agent_id),
+        )
+    conn.commit()
+    cursor.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,))
+    contact = _contact_public(cursor.fetchone())
+    conn.close()
+    return contact
+
+
+def get_contact(contact_id: int | None, agent_id: int | None = None) -> Optional[Dict[str, Any]]:
+    if not contact_id:
+        return None
+    conn = get_connection()
+    cursor = conn.cursor()
+    if agent_id is None:
+        cursor.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,))
+    else:
+        cursor.execute("SELECT * FROM contacts WHERE id = ? AND agent_id = ?", (contact_id, agent_id))
+    contact = _contact_public(cursor.fetchone())
+    conn.close()
+    return contact
+
+
+def get_contact_for_session(session_id: str, agent_id: int | None = None) -> Optional[Dict[str, Any]]:
+    session = get_session(session_id, agent_id=agent_id)
+    if not session:
+        return None
+    contact_id = session.get("contact_id")
+    if contact_id:
+        return get_contact(int(contact_id), agent_id=agent_id)
+    return resolve_contact(session_id, session.get("contact_name") or "客户", agent_id=session.get("agent_id"))
+
+
+def update_contact_manual_notes(contact_id: int, manual_notes: Dict[str, Any], agent_id: int | None = None) -> Optional[Dict[str, Any]]:
+    if not isinstance(manual_notes, dict):
+        raise ValueError("人工补充资料必须是 JSON 对象")
+    now_bj = get_beijing_time()
+    conn = get_connection()
+    cursor = conn.cursor()
+    params: tuple[Any, ...]
+    if agent_id is None:
+        sql = "UPDATE contacts SET manual_notes_json = ?, updated_at = ? WHERE id = ?"
+        params = (json.dumps(manual_notes, ensure_ascii=False), now_bj, contact_id)
+    else:
+        sql = "UPDATE contacts SET manual_notes_json = ?, updated_at = ? WHERE id = ? AND agent_id = ?"
+        params = (json.dumps(manual_notes, ensure_ascii=False), now_bj, contact_id, agent_id)
+    cursor.execute(sql, params)
+    if cursor.rowcount == 0:
+        conn.commit()
+        conn.close()
+        return None
+    conn.commit()
+    cursor.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,))
+    contact = _contact_public(cursor.fetchone())
+    conn.close()
+    return contact
+
+
+def _merge_mapping(target: Dict[str, Any], incoming: Dict[str, Any], now_bj: str, session_id: str | None) -> Dict[str, Any]:
+    result = dict(target or {})
+    for key, value in (incoming or {}).items():
+        if not _is_meaningful_profile_value(value):
+            continue
+        if isinstance(value, dict) and "value" in value:
+            stored_value = value.get("value")
+            confidence = value.get("confidence") or "medium"
+        else:
+            stored_value = value
+            confidence = "medium"
+        if not _is_meaningful_profile_value(stored_value):
+            continue
+        result[key] = {
+            "value": stored_value,
+            "source": "conversation",
+            "confidence": confidence,
+            "updated_at": now_bj,
+            "session_id": session_id,
+        }
+    return result
+
+
+def merge_contact_memory(
+    contact_id: int,
+    extracted_memory: Dict[str, Any],
+    session_id: str | None = None,
+    agent_id: int | None = None,
+) -> Optional[Dict[str, Any]]:
+    """把模型抽取的增量记忆合并到联系人长期记忆，不覆盖人工补充资料。"""
+    if not extracted_memory:
+        return get_contact(contact_id, agent_id=agent_id)
+
+    now_bj = get_beijing_time()
+    conn = get_connection()
+    cursor = conn.cursor()
+    if agent_id is None:
+        cursor.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,))
+    else:
+        cursor.execute("SELECT * FROM contacts WHERE id = ? AND agent_id = ?", (contact_id, agent_id))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return None
+
+    memory = _json_dict(row["memory_json"])
+    stable_profile = _merge_mapping(
+        _json_dict(json.dumps(memory.get("stable_profile") or {}, ensure_ascii=False)),
+        extracted_memory.get("stable_profile") or {},
+        now_bj,
+        session_id,
+    )
+    dynamic_state = _merge_mapping(
+        _json_dict(json.dumps(memory.get("dynamic_state") or {}, ensure_ascii=False)),
+        extracted_memory.get("dynamic_state") or {},
+        now_bj,
+        session_id,
+    )
+
+    facts = list(memory.get("facts") or [])
+    incoming_facts = extracted_memory.get("facts") or []
+    if isinstance(incoming_facts, dict):
+        incoming_facts = [incoming_facts]
+    for fact in incoming_facts:
+        if isinstance(fact, dict):
+            value = fact.get("value") or fact.get("text") or fact.get("fact")
+            confidence = fact.get("confidence") or "medium"
+            category = fact.get("category") or "背景事实"
+        else:
+            value = str(fact or "").strip()
+            confidence = "medium"
+            category = "背景事实"
+        if not _is_meaningful_profile_value(value):
+            continue
+        item = {
+            "category": category,
+            "value": value,
+            "source": "conversation",
+            "confidence": confidence,
+            "updated_at": now_bj,
+            "session_id": session_id,
+        }
+        if not any(str(existing.get("value")) == str(value) for existing in facts if isinstance(existing, dict)):
+            facts.append(item)
+
+    memory.update(
+        {
+            "stable_profile": stable_profile,
+            "dynamic_state": dynamic_state,
+            "facts": facts[-80:],
+            "last_merged_at": now_bj,
+        }
+    )
+    cursor.execute(
+        "UPDATE contacts SET memory_json = ?, updated_at = ? WHERE id = ?",
+        (json.dumps(memory, ensure_ascii=False), now_bj, contact_id),
+    )
+    conn.commit()
+    cursor.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,))
+    contact = _contact_public(cursor.fetchone())
+    conn.close()
+    return contact
+
 def _save_message_with_cursor(
     cursor: sqlite3.Cursor,
     session_id: str,
@@ -571,7 +914,7 @@ def get_all_sessions(agent_id: int | None = None, limit: int = 50, offset: int =
     cursor.execute(
         f"""
         WITH page_sessions AS (
-            SELECT s.session_id, s.agent_id, s.contact_name, s.updated_at, s.profile_json, s.status,
+            SELECT s.session_id, s.agent_id, s.contact_id, s.contact_name, s.updated_at, s.profile_json, s.status,
                    s.contact_aliases_json, s.suggested_remark, s.suggested_remark_reason,
                    s.suggested_remark_confidence, s.suggested_remark_status, s.suggested_remark_updated_at
             FROM sessions s
@@ -585,7 +928,7 @@ def get_all_sessions(agent_id: int | None = None, limit: int = 50, offset: int =
             JOIN page_sessions ps ON ps.session_id = m.session_id
             GROUP BY m.session_id
         )
-        SELECT ps.session_id, ps.agent_id, ps.contact_name, ps.updated_at, ps.profile_json, ps.status,
+        SELECT ps.session_id, ps.agent_id, ps.contact_id, ps.contact_name, ps.updated_at, ps.profile_json, ps.status,
                ps.contact_aliases_json, ps.suggested_remark, ps.suggested_remark_reason,
                ps.suggested_remark_confidence, ps.suggested_remark_status, ps.suggested_remark_updated_at,
                a.username AS agent_username, a.display_name AS agent_display_name,
@@ -645,11 +988,14 @@ def get_session(session_id: str, agent_id: int | None = None) -> Optional[Dict[s
     if agent_id is None:
         cursor.execute(
             """
-            SELECT s.session_id, s.agent_id, s.contact_name, s.updated_at, s.profile_json, s.status,
+            SELECT s.session_id, s.agent_id, s.contact_id, s.contact_name, s.updated_at, s.profile_json, s.status,
                    s.contact_aliases_json, s.suggested_remark, s.suggested_remark_reason,
                    s.suggested_remark_confidence, s.suggested_remark_status, s.suggested_remark_updated_at,
+                   c.primary_name AS contact_primary_name, c.manual_notes_json AS contact_manual_notes_json,
+                   c.memory_json AS contact_memory_json,
                    a.username AS agent_username, a.display_name AS agent_display_name
             FROM sessions s
+            LEFT JOIN contacts c ON c.id = s.contact_id
             LEFT JOIN agents a ON a.id = s.agent_id
             WHERE s.session_id = ?
             """,
@@ -658,11 +1004,14 @@ def get_session(session_id: str, agent_id: int | None = None) -> Optional[Dict[s
     else:
         cursor.execute(
             """
-            SELECT s.session_id, s.agent_id, s.contact_name, s.updated_at, s.profile_json, s.status,
+            SELECT s.session_id, s.agent_id, s.contact_id, s.contact_name, s.updated_at, s.profile_json, s.status,
                    s.contact_aliases_json, s.suggested_remark, s.suggested_remark_reason,
                    s.suggested_remark_confidence, s.suggested_remark_status, s.suggested_remark_updated_at,
+                   c.primary_name AS contact_primary_name, c.manual_notes_json AS contact_manual_notes_json,
+                   c.memory_json AS contact_memory_json,
                    a.username AS agent_username, a.display_name AS agent_display_name
             FROM sessions s
+            LEFT JOIN contacts c ON c.id = s.contact_id
             LEFT JOIN agents a ON a.id = s.agent_id
             WHERE s.session_id = ? AND s.agent_id = ?
             """,
@@ -674,6 +1023,8 @@ def get_session(session_id: str, agent_id: int | None = None) -> Optional[Dict[s
         return None
     item = dict(row)
     item["status"] = normalize_session_status(item.get("status"))
+    item["contact_manual_notes"] = _json_dict(item.get("contact_manual_notes_json"))
+    item["contact_memory"] = _json_dict(item.get("contact_memory_json"))
     return item
 
 def update_session_profile(session_id: str, profile_dict: Dict[str, Any]):
@@ -758,7 +1109,7 @@ def refresh_remark_suggestion(session_id: str) -> Optional[Dict[str, Any]]:
 def mark_remark_applied(session_id: str, applied_remark: str | None = None) -> Optional[Dict[str, Any]]:
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT contact_name, suggested_remark FROM sessions WHERE session_id = ?", (session_id,))
+    cursor.execute("SELECT contact_id, contact_name, suggested_remark FROM sessions WHERE session_id = ?", (session_id,))
     row = cursor.fetchone()
     if not row:
         conn.close()
@@ -770,6 +1121,10 @@ def mark_remark_applied(session_id: str, applied_remark: str | None = None) -> O
         _add_contact_alias(cursor, session_id, row["contact_name"])
         _add_contact_alias(cursor, session_id, row["suggested_remark"])
         _add_contact_alias(cursor, session_id, remark)
+        if row["contact_id"]:
+            _add_contact_record_alias(cursor, int(row["contact_id"]), row["contact_name"])
+            _add_contact_record_alias(cursor, int(row["contact_id"]), row["suggested_remark"])
+            _add_contact_record_alias(cursor, int(row["contact_id"]), remark)
     cursor.execute(
         """
         UPDATE sessions
@@ -829,6 +1184,7 @@ def create_outbound_task(
         contact_name,
         agent_id=agent_id,
     )
+    resolve_contact(resolved_session_id, contact_name, agent_id=agent_id)
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
