@@ -311,7 +311,7 @@
                 <!-- 头部 -->
                 <div class="h-14 border-b border-slate-200 bg-white/80 flex items-center px-6 shadow-sm backdrop-blur-md justify-between">
                     <div class="flex items-center">
-                        <h2 class="text-lg font-semibold text-slate-700">跟进记录：{{ currentSession.contact_name }}</h2>
+                        <h2 class="text-lg font-semibold text-slate-700">跟进记录：{{ (contact && contact.display_name) || currentSession.contact_name }}</h2>
                         <span class="ml-3 text-xs px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full">
                             {{ currentSession.agent_display_name || currentSession.agent_username || '未归属' }}
                         </span>
@@ -484,7 +484,13 @@
                         </div>
                     <div v-if="contact" class="space-y-3">
                         <div class="text-sm text-slate-700">
-                            <span class="text-xs text-slate-400">联系人：</span>{{ contact.primary_name || currentSession.contact_name }}
+                            <span class="text-xs text-slate-400">联系人：</span>
+                            <span class="font-bold">{{ contact.display_name || contact.primary_name || currentSession.contact_name }}</span>
+                            <span v-if="contact.preferred_name" class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700">已纠正</span>
+                            <span v-if="contact.preferred_name && contact.primary_name !== contact.preferred_name" class="ml-1 text-[10px] text-slate-400 line-through">{{ contact.primary_name }}</span>
+                            <button @click="editPreferredName" class="ml-2 text-[10px] text-indigo-500 hover:text-indigo-700 font-bold" title="修正联系人称呼">
+                                <i class="fa-solid fa-pen-to-square"></i> 修正称呼
+                            </button>
                             <span v-if="contact.updated_at" class="ml-2 text-[10px] text-slate-400">更新 {{ formatTime(contact.updated_at) }}</span>
                         </div>
                         <div v-if="contactMemoryEntries(contact).length" class="space-y-1.5">
@@ -826,6 +832,7 @@
                 const contactManualNotesText = ref('');
                 const isExtracting = ref(false);
                 const isSavingContactNotes = ref(false);
+                const isSavingPreferredName = ref(false);
                 const isMergingContactMemory = ref(false);
                 const conversationSummary = ref(null);
                 const conversationSummaryMeta = ref({ used: 0, total: 0 });
@@ -1811,6 +1818,47 @@
                     }
                 };
 
+                const editPreferredName = async () => {
+                    if (!contact.value) return;
+                    const currentName = contact.value.preferred_name || contact.value.display_name || contact.value.primary_name || '';
+                    const newName = window.prompt(
+                        '请输入客户的正确称呼（Agent 之后会使用这个名字来称呼客户）：\n\n' +
+                        '当前 OCR 识别名：' + (contact.value.primary_name || '未知') + '\n' +
+                        '当前使用称呼：' + currentName,
+                        currentName
+                    );
+                    if (newName === null) return;
+                    const trimmed = newName.trim();
+                    if (!trimmed) {
+                        if (!confirm('称呼为空将清除人工修正，恢复使用 OCR 识别名。确定？')) return;
+                    }
+                    isSavingPreferredName.value = true;
+                    try {
+                        const res = await fetch(`/api/admin/contacts/${contact.value.id}/preferred-name`, {
+                            method: 'POST',
+                            headers: {
+                                ...getAuthHeaders(),
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({ preferred_name: trimmed })
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if (res.ok && data.ok) {
+                            contact.value = data.contact;
+                            alert(trimmed ? '称呼已修正为「' + trimmed + '」，Agent 后续会使用此名称。' : '已清除人工修正，恢复使用 OCR 识别名。');
+                        } else if (res.status === 401) {
+                            triggerLogin();
+                        } else {
+                            alert(data.error || '修正称呼失败');
+                        }
+                    } catch (e) {
+                        console.error('修正称呼失败', e);
+                        alert('修正称呼请求失败');
+                    } finally {
+                        isSavingPreferredName.value = false;
+                    }
+                };
+
                 const mergeContactMemory = async () => {
                     if (!contact.value || !currentSession.value || isMergingContactMemory.value) return;
                     isMergingContactMemory.value = true;
@@ -1969,6 +2017,7 @@
                     contactMemoryEntries,
                     manualNotesToText,
                     saveContactManualNotes,
+                    editPreferredName,
                     mergeContactMemory,
                     deleteSession,
                     deleteMessage,

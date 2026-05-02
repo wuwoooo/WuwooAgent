@@ -248,6 +248,14 @@ def init_db():
             FOREIGN KEY (agent_id) REFERENCES agents (id)
         )
     """)
+    # 新增 preferred_name 字段（人工纠错称呼）
+    for col_sql in [
+        "ALTER TABLE contacts ADD COLUMN preferred_name TEXT",
+    ]:
+        try:
+            cursor.execute(col_sql)
+        except sqlite3.OperationalError:
+            pass
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_contacts_agent_name ON contacts(agent_id, primary_name)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_contact ON sessions(contact_id)")
 
@@ -565,6 +573,8 @@ def _contact_public(row: sqlite3.Row | Dict[str, Any] | None) -> Optional[Dict[s
     item["aliases"] = _json_list(item.get("aliases_json"))
     item["manual_notes"] = _json_dict(item.get("manual_notes_json"))
     item["memory"] = _json_dict(item.get("memory_json"))
+    # 人工纠错称呼：优先使用 preferred_name，否则 fallback 到 primary_name
+    item["display_name"] = item.get("preferred_name") or item.get("primary_name") or ""
     return item
 
 
@@ -742,6 +752,31 @@ def update_contact_manual_notes(contact_id: int, manual_notes: Dict[str, Any], a
     else:
         sql = "UPDATE contacts SET manual_notes_json = ?, updated_at = ? WHERE id = ? AND agent_id = ?"
         params = (json.dumps(manual_notes, ensure_ascii=False), now_bj, contact_id, agent_id)
+    cursor.execute(sql, params)
+    if cursor.rowcount == 0:
+        conn.commit()
+        conn.close()
+        return None
+    conn.commit()
+    cursor.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,))
+    contact = _contact_public(cursor.fetchone())
+    conn.close()
+    return contact
+
+
+def update_contact_preferred_name(contact_id: int, preferred_name: str, agent_id: int | None = None) -> Optional[Dict[str, Any]]:
+    """人工修正联系人称呼，会同步更新 preferred_name 字段。"""
+    preferred_name = (preferred_name or "").strip()
+    now_bj = get_beijing_time()
+    conn = get_connection()
+    cursor = conn.cursor()
+    params: tuple[Any, ...]
+    if agent_id is None:
+        sql = "UPDATE contacts SET preferred_name = ?, updated_at = ? WHERE id = ?"
+        params = (preferred_name or None, now_bj, contact_id)
+    else:
+        sql = "UPDATE contacts SET preferred_name = ?, updated_at = ? WHERE id = ? AND agent_id = ?"
+        params = (preferred_name or None, now_bj, contact_id, agent_id)
     cursor.execute(sql, params)
     if cursor.rowcount == 0:
         conn.commit()

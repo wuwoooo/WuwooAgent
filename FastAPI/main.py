@@ -268,9 +268,9 @@ def _format_contact_context_for_prompt(
     if not contact:
         lines.append("暂无长期联系人记忆。")
     else:
-        primary_name = contact.get("primary_name") or ""
-        if primary_name:
-            lines.append(f"- 主要称呼：{primary_name}")
+        display_name = contact.get("display_name") or contact.get("preferred_name") or contact.get("primary_name") or ""
+        if display_name:
+            lines.append(f"- 主要称呼：{display_name}")
 
         manual_notes = contact.get("manual_notes") or {}
         if isinstance(manual_notes, dict):
@@ -339,6 +339,7 @@ def _build_agent_continuation_prompt(
     return (
         f"当前微信联系人：{contact_name or '客户'}\n"
         f"当前实际时间：{get_current_time_str()}\n\n"
+        f"【称呼规则】称呼客户时必须使用「{contact_name or '客户'}」，不要使用聊天记录中出现的其他名字（可能存在 OCR 同音字误差）。\n\n"
         "客户画像：\n"
         f"{_format_profile_for_prompt(profile)}\n\n"
         "联系人背景：\n"
@@ -391,6 +392,9 @@ async def _generate_agent_continuation(session_id: str, limit: int | None = 30) 
     profile = database.get_session_profile(session_id)
     contact = database.get_contact_for_session(session_id, agent_id=session.get("agent_id"))
     contact_context = _format_contact_context_for_prompt(contact, profile)
+    # 人工纠错称呼：如果联系人设置了 preferred_name，优先使用它
+    if contact and contact.get("preferred_name"):
+        contact_name = contact["preferred_name"]
     prompt = _build_agent_continuation_prompt(
         contact_name=contact_name,
         messages=messages,
@@ -498,6 +502,7 @@ def _build_user_prompt(contact_name: str, current_status: str = "auto", contact_
 
     wrapped_text = (
         f"（系统提示：当前实际时间是 {current_time}。注意：仅在第一轮对话或主动打招呼时才进行时间问候，在后续连续的对话中直接回答用户的问题，绝对不要重复问候！你在问候客户时必须以此为准判断今天是星期几，绝对不要参考下方文本中可能出现的旧时间标签（如“周一16:40”等是微信界面上旧消息的时间戳，不代表当前时间）。请以此作为判断今天、明天、下周等相对时间的基准。\n"
+        f"【称呼规则】称呼客户时，必须严格使用系统提供的联系人名「{name}」，不要使用聊天记录或 OCR 文本中出现的名字。因为 OCR 识别存在同音字误差（如索被识别为素），聊天记录中的名字不可靠，以系统提供的联系人名为唯一准确来源。\n"
         "【HANDOFF 规则】在以下两种情况下，才可在回复末尾加上 [HANDOFF] 标记：1) 客户在本轮消息中明确表达了要你出方案/报价/下单的意图（例如‘帮我安排一下’、‘出个方案吧’、‘可以报价了’）；2) 虽然客户没有直接说‘出方案’，但从对话上下文判断客户意愿已经非常强烈，目的地、人数、时间等关键信息都已明确，且客户表现出明显的决策倾向（例如‘就这个行程吧’、‘五一就走’、‘两个人确定了’）。如果客户只是打招呼、闲聊、问问题、或者你自己还在提问收集基本信息，**绝对不要**加 [HANDOFF]。触发 [HANDOFF] 时，你的回复**必须是一句确认性的第一人称过渡话术**（例如‘好的，我这就给您整理具体的行程方案和报价～’），**绝对不能是提问句**，也绝对不能说‘转交给人工’或‘转交给定制师’，因为你本身就是这位专属的定制师小鹿。）\n\n"
         f"{receptionist_rule}"
         f"{contact_context + chr(10) if contact_context else ''}"
@@ -520,6 +525,7 @@ def _build_user_prompt_from_ocr(contact_name: str, ocr_text: str, current_status
 
     wrapped_text = (
         f"（系统提示：当前实际时间是 {current_time}。注意：仅在第一轮对话或主动打招呼时才进行时间问候，在后续连续的对话中直接回答用户的问题，绝对不要重复问候！你在问候客户时必须以此为准判断今天是星期几，绝对不要参考下方 OCR 文本中可能出现的旧时间标签（如“周一16:40”等是微信界面上旧消息的时间戳，不代表当前时间）。如果在聊天中客户提到诸如“下月”、“明天”等相对时间，也请以此为基准推算。\n"
+        f"【称呼规则】称呼客户时，必须严格使用系统提供的联系人名「{name}」，不要使用聊天记录或 OCR 文本中出现的名字。因为 OCR 识别存在同音字误差（如索被识别为素），聊天记录中的名字不可靠，以系统提供的联系人名为唯一准确来源。\n"
         "【HANDOFF 规则】在以下两种情况下，才可在回复末尾加上 [HANDOFF] 标记：1) 客户在本轮消息中明确表达了要你出方案/报价/下单的意图（例如‘帮我安排一下’、‘出个方案吧’、‘可以报价了’）；2) 虽然客户没有直接说‘出方案’，但从对话上下文判断客户意愿已经非常强烈，目的地、人数、时间等关键信息都已明确，且客户表现出明显的决策倾向（例如‘就这个行程吧’、‘五一就走’、‘两个人确定了’）。如果客户只是打招呼、闲聊、问问题、或者你自己还在提问收集基本信息，**绝对不要**加 [HANDOFF]。触发 [HANDOFF] 时，你的回复**必须是一句确认性的第一人称过渡话术**（例如‘好的，我这就给您整理具体的行程方案和报价～’），**绝对不能是提问句**，也绝对不能说‘转交给人工’或‘转交给定制师’，因为你本身就是这位专属的定制师小鹿。）\n\n"
         f"{receptionist_rule}"
         f"{contact_context + chr(10) if contact_context else ''}"
@@ -644,6 +650,9 @@ async def wechat_chat(
         contact_id = contact.get("id") if contact else None
         session_profile = database.get_session_profile(session_id)
         contact_context = _format_contact_context_for_prompt(contact, session_profile)
+        # 人工纠错称呼：如果联系人设置了 preferred_name，优先使用它
+        if contact and contact.get("preferred_name"):
+            contact_name = contact["preferred_name"]
     except Exception as e:
         logger.warning("联系人长期记忆解析失败，跳过上下文注入: session_id=%s contact=%s error=%s", session_id, contact_name, e)
         
@@ -994,6 +1003,30 @@ async def api_admin_merge_contact_memory(contact_id: int, session_id: str = "", 
         return {"ok": True, "contact": contact}
     except Exception as e:
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
+class ContactPreferredNameRequest(BaseModel):
+    preferred_name: str = ""
+
+
+@app.post("/api/admin/contacts/{contact_id}/preferred-name")
+async def api_admin_update_contact_preferred_name(
+    contact_id: int,
+    payload: ContactPreferredNameRequest,
+    username: str = Depends(verify_admin),
+):
+    """人工修正联系人的正确称呼（用于纠正 OCR 识别错误）。"""
+    try:
+        contact = database.update_contact_preferred_name(contact_id, payload.preferred_name)
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"ok": False, "error": str(e)})
+    if not contact:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "联系人不存在"})
+    logger.info(
+        "管理员 %s 修正联系人称呼: contact_id=%s preferred_name=%s",
+        username, contact_id, payload.preferred_name,
+    )
+    return {"ok": True, "contact": contact}
+
 
 @app.post("/api/admin/sessions/{session_id}/profile")
 async def api_extract_profile(session_id: str, username: str = Depends(verify_admin)):
