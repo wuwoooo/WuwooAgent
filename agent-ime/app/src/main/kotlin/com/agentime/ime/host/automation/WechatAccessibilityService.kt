@@ -386,32 +386,21 @@ class WechatAccessibilityService : AccessibilityService() {
         fun focusInputArea(): Boolean {
             val svc = instance ?: return false
             val prefs = svc.getSharedPreferences("host_config", Context.MODE_PRIVATE)
-            val dm = svc.resources.displayMetrics
-            val w = dm.widthPixels.toFloat().coerceAtLeast(1f)
-            val h = dm.heightPixels.toFloat().coerceAtLeast(1f)
-            val candidates = buildList {
-                // 微信聊天页底部输入框通常在左下方白色输入栏内，优先使用安全比例坐标。
-                add("bottom_input_primary" to Pair(w * 0.44f, h * 0.955f))
-                add("bottom_input_left" to Pair(w * 0.28f, h * 0.955f))
-                add("bottom_input_high" to Pair(w * 0.44f, h * 0.925f))
-                if (prefs.contains("input_x") || prefs.contains("input_y")) {
-                    add(
-                        "configured_legacy" to resolveTapPair(
-                            prefs,
-                            svc,
-                            "input_x",
-                            "input_y",
-                            450f / 1080f,
-                            0.945f,
-                        ),
-                    )
+            val (x, y) = resolveTapPair(
+                prefs,
+                svc,
+                "input_x",
+                "input_y",
+                450f / 1080f,
+                0.945f,
+            )
+            Log.i(TAG, "focusInputArea 坐标 ($x, $y)")
+            repeat(4) { attempt ->
+                if (svc.tap(x, y)) {
+                    if (attempt > 0) Log.i(TAG, "focusInputArea 第 ${attempt + 1} 次点击成功")
+                    return true
                 }
-            }
-            candidates.forEachIndexed { index, (label, point) ->
-                val (x, y) = point
-                Log.i(TAG, "focusInputArea 尝试 ${index + 1}/${candidates.size} $label 坐标 ($x, $y)")
-                if (svc.tap(x, y)) return true
-                Thread.sleep(260)
+                Thread.sleep(280)
             }
             return false
         }
