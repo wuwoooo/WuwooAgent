@@ -60,7 +60,7 @@ class HostForegroundService : Service() {
         override fun run() {
             val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
             if (!prefs.getBoolean("runtime_enabled", false)) return
-            if (!prefs.getBoolean("outbound_task_enabled", false)) return
+            if (!prefs.getBoolean("outbound_task_enabled", true)) return
             io.execute { pollAndRunOutboundTask() }
             mainHandler.postDelayed(this, OUTBOUND_TASK_POLL_INTERVAL_MS)
         }
@@ -72,7 +72,7 @@ class HostForegroundService : Service() {
         createNotificationChannel()
         startForegroundCompat("Host 服务运行中", includeProjectionType = false)
         val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
-        if (prefs.getBoolean("runtime_enabled", false) && prefs.getBoolean("outbound_task_enabled", false)) {
+        if (prefs.getBoolean("runtime_enabled", false) && prefs.getBoolean("outbound_task_enabled", true)) {
             startOutboundTaskPolling()
         }
     }
@@ -84,7 +84,7 @@ class HostForegroundService : Service() {
             ACTION_START_RUNTIME -> {
                 mainHandler.removeCallbacks(startupScanRunnable)
                 val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
-                if (prefs.getBoolean("outbound_task_enabled", false)) {
+                if (prefs.getBoolean("outbound_task_enabled", true)) {
                     startOutboundTaskPolling()
                 } else {
                     logger.log(TAG, "主动外发任务轮询未启用，保持原有自动回复链路独立运行")
@@ -159,17 +159,23 @@ class HostForegroundService : Service() {
     private fun pollAndRunOutboundTask() {
         val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
         if (!prefs.getBoolean("runtime_enabled", false)) return
-        if (!prefs.getBoolean("outbound_task_enabled", false)) return
+        if (!prefs.getBoolean("outbound_task_enabled", true)) return
         if (prefs.getString("execution_mode", "auto").orEmpty() != "auto") return
         if (isBusyOrCoolingDown()) return
+        if (!running.compareAndSet(false, true)) return
 
         val agentClient = HttpAgentClient(this)
         try {
-            val task = agentClient.claimNextOutboundTask() ?: return
+            val task = agentClient.claimNextOutboundTask()
+            if (task == null) {
+                running.set(false)
+                return
+            }
             logger.log(TAG, "领取主动外发任务: id=${task.id} contact=${task.contactName} autoSend=${task.autoSend}")
-            runOutboundTask(task, agentClient)
+            runOutboundTask(task, agentClient, alreadyReserved = true)
         } catch (e: Exception) {
             logger.log(TAG, "主动外发任务轮询失败: ${e.message}")
+            running.set(false)
         }
     }
 
@@ -197,8 +203,8 @@ class HostForegroundService : Service() {
         }
     }
 
-    private fun runOutboundTask(task: OutboundTask, agentClient: HttpAgentClient) {
-        if (!running.compareAndSet(false, true)) {
+    private fun runOutboundTask(task: OutboundTask, agentClient: HttpAgentClient, alreadyReserved: Boolean = false) {
+        if (!alreadyReserved && !running.compareAndSet(false, true)) {
             logger.log(TAG, "已有任务在执行中，主动外发任务暂不处理: ${task.id}")
             runCatching { agentClient.completeOutboundTask(task.id, false, "手机端正忙，请稍后重试") }
             return
