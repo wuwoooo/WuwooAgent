@@ -510,19 +510,23 @@ def resolve_session_id(session_id: str, contact_name: str, agent_id: int | None 
             if agent_id is None:
                 cursor.execute(
                     """
-                    SELECT session_id, contact_name, contact_aliases_json, suggested_remark
-                    FROM sessions
-                    WHERE agent_id IS NULL
-                    ORDER BY updated_at DESC
+                    SELECT s.session_id, s.contact_name, s.contact_aliases_json, s.suggested_remark,
+                           c.preferred_name AS contact_preferred_name
+                    FROM sessions s
+                    LEFT JOIN contacts c ON c.id = s.contact_id
+                    WHERE s.agent_id IS NULL
+                    ORDER BY s.updated_at DESC
                     """
                 )
             else:
                 cursor.execute(
                     """
-                    SELECT session_id, contact_name, contact_aliases_json, suggested_remark
-                    FROM sessions
-                    WHERE agent_id = ?
-                    ORDER BY updated_at DESC
+                    SELECT s.session_id, s.contact_name, s.contact_aliases_json, s.suggested_remark,
+                           c.preferred_name AS contact_preferred_name
+                    FROM sessions s
+                    LEFT JOIN contacts c ON c.id = s.contact_id
+                    WHERE s.agent_id = ?
+                    ORDER BY s.updated_at DESC
                     """,
                     (agent_id,),
                 )
@@ -531,6 +535,7 @@ def resolve_session_id(session_id: str, contact_name: str, agent_id: int | None 
                 known_names = [
                     row["contact_name"],
                     row["suggested_remark"],
+                    row["contact_preferred_name"],
                     *_json_list(row["contact_aliases_json"]),
                 ]
                 if any(canonicalize_contact_name(name, default="") == canonical_name for name in known_names):
@@ -605,7 +610,8 @@ def _find_contact_row(
             (agent_id,),
         )
     for row in cursor.fetchall():
-        known_names = [row["primary_name"], *_json_list(row["aliases_json"])]
+        # 匹配时同时检查 primary_name、preferred_name 和所有别名
+        known_names = [row["primary_name"], row["preferred_name"], *_json_list(row["aliases_json"])]
         if any(canonicalize_contact_name(name, default="") == canonical_name for name in known_names):
             return row
     return None
@@ -765,11 +771,20 @@ def update_contact_manual_notes(contact_id: int, manual_notes: Dict[str, Any], a
 
 
 def update_contact_preferred_name(contact_id: int, preferred_name: str, agent_id: int | None = None) -> Optional[Dict[str, Any]]:
-    """人工修正联系人称呼，会同步更新 preferred_name 字段。"""
+    """人工修正联系人称呼，会同步更新 preferred_name 字段。
+    同时把旧 primary_name 和新 preferred_name 都加入 aliases，
+    确保 Agent 无论传入哪个名称都能匹配到同一个联系人/会话。
+    """
     preferred_name = (preferred_name or "").strip()
     now_bj = get_beijing_time()
     conn = get_connection()
     cursor = conn.cursor()
+    # 先查出旧记录，用于后续别名同步
+    cursor.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,))
+    old_row = cursor.fetchone()
+    if not old_row:
+        conn.close()
+        return None
     params: tuple[Any, ...]
     if agent_id is None:
         sql = "UPDATE contacts SET preferred_name = ?, updated_at = ? WHERE id = ?"
@@ -782,6 +797,21 @@ def update_contact_preferred_name(contact_id: int, preferred_name: str, agent_id
         conn.commit()
         conn.close()
         return None
+    # 把旧 primary_name（可能是 OCR 错误名）和新 preferred_name 都加入 contact 别名
+    old_primary = old_row["primary_name"] or ""
+    if old_primary:
+        _add_contact_record_alias(cursor, contact_id, old_primary)
+    if preferred_name:
+        _add_contact_record_alias(cursor, contact_id, preferred_name)
+    # 同步到关联的 sessions 的 contact_aliases_json，确保 resolve_session_id 也能匹配
+    cursor.execute("SELECT session_id FROM sessions WHERE contact_id = ?", (contact_id,))
+    linked_sessions = cursor.fetchall()
+    for sess_row in linked_sessions:
+        sid = sess_row["session_id"]
+        if old_primary:
+            _add_contact_alias(cursor, sid, old_primary)
+        if preferred_name:
+            _add_contact_alias(cursor, sid, preferred_name)
     conn.commit()
     cursor.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,))
     contact = _contact_public(cursor.fetchone())
