@@ -6,4 +6,8 @@ interface AutomationController {
     fun focusInputArea(): Boolean
     fun clickSend(): Boolean
     fun clickBack(): Boolean
+    fun openWechatSearch(): Boolean
+    fun focusWechatSearchInput(): Boolean
+    fun tapWechatSearchResult(contactName: String, keyword: String): Boolean
+    fun isCurrentChatTarget(contactName: String): Boolean
 }

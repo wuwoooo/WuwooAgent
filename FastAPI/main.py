@@ -159,6 +159,20 @@ class RemarkAppliedRequest(BaseModel):
     applied_remark: str = ""
 
 
+class AdminOutboundTaskRequest(BaseModel):
+    agent_id: int | None = None
+    session_id: str = ""
+    contact_name: str
+    search_keyword: str = ""
+    message: str
+    auto_send: bool = False
+
+
+class AgentOutboundTaskResultRequest(BaseModel):
+    success: bool
+    error: str = ""
+
+
 def get_current_time_str() -> str:
     now = datetime.datetime.now(LOCAL_TZ)
     weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
@@ -453,6 +467,31 @@ async def api_agent_login(payload: AgentLoginRequest):
     return {"ok": True, "access_token": token, "agent": agent}
 
 
+@app.get("/agent/outbound-tasks/next")
+@app.get("/api/agent/outbound-tasks/next")
+async def api_agent_claim_outbound_task(agent: dict = Depends(verify_agent)):
+    task = database.claim_next_outbound_task(int(agent["id"]))
+    return {"ok": True, "task": task}
+
+
+@app.post("/agent/outbound-tasks/{task_id}/result")
+@app.post("/api/agent/outbound-tasks/{task_id}/result")
+async def api_agent_complete_outbound_task(
+    task_id: int,
+    payload: AgentOutboundTaskResultRequest,
+    agent: dict = Depends(verify_agent),
+):
+    task = database.complete_outbound_task(
+        task_id=task_id,
+        agent_id=int(agent["id"]),
+        success=payload.success,
+        error=payload.error,
+    )
+    if not task:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "任务不存在或不属于当前 Agent"})
+    return {"ok": True, "task": task}
+
+
 @app.post("/api/wechat/chat")
 @app.post("/wechat/chat")
 async def wechat_chat(
@@ -744,6 +783,39 @@ async def api_get_session_detail(session_id: str, username: str = Depends(verify
     messages = database.get_session_messages(session_id)
     profile = database.get_session_profile(session_id)
     return {"session": session, "messages": messages, "profile": profile}
+
+
+@app.get("/api/admin/outbound-tasks")
+async def api_admin_list_outbound_tasks(
+    agent_id: Optional[int] = None,
+    limit: int = 30,
+    username: str = Depends(verify_admin),
+):
+    return {"ok": True, "items": database.list_outbound_tasks(agent_id=agent_id, limit=limit)}
+
+
+@app.post("/api/admin/outbound-tasks")
+async def api_admin_create_outbound_task(payload: AdminOutboundTaskRequest, username: str = Depends(verify_admin)):
+    try:
+        task = database.create_outbound_task(
+            agent_id=payload.agent_id,
+            session_id=payload.session_id,
+            contact_name=payload.contact_name,
+            search_keyword=payload.search_keyword or payload.contact_name,
+            message=payload.message,
+            auto_send=payload.auto_send,
+        )
+        logger.info(
+            "管理员 %s 创建主动外发任务: task_id=%s agent_id=%s contact=%s auto_send=%s",
+            username,
+            task.get("id"),
+            task.get("agent_id"),
+            task.get("contact_name"),
+            task.get("auto_send"),
+        )
+        return {"ok": True, "task": task}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"ok": False, "error": str(e)})
 
 
 @app.get("/api/admin/agents")

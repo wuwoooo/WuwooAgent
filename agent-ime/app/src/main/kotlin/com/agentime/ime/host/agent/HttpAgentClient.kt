@@ -74,13 +74,18 @@ class HttpAgentClient(private val context: Context) : AgentClient {
         }
 
         private fun buildLoginUrls(endpoint: String): List<String> {
+            return buildApiUrls(endpoint, "agent/login")
+        }
+
+        private fun buildApiUrls(endpoint: String, path: String): List<String> {
             val trimmed = endpoint.trim().trimEnd('/')
             val base = when {
                 trimmed.endsWith("/api/wechat/chat") -> trimmed.removeSuffix("/api/wechat/chat")
                 trimmed.endsWith("/wechat/chat") -> trimmed.removeSuffix("/wechat/chat")
                 else -> trimmed
             }
-            return listOf("$base/api/agent/login", "$base/agent/login").distinct()
+            val cleanPath = path.trimStart('/')
+            return listOf("$base/api/$cleanPath", "$base/$cleanPath").distinct()
         }
     }
 
@@ -137,6 +142,67 @@ class HttpAgentClient(private val context: Context) : AgentClient {
         )
     }
 
+    fun claimNextOutboundTask(): OutboundTask? {
+        val prefs = context.getSharedPreferences("host_config", Context.MODE_PRIVATE)
+        val endpoint = prefs.getString("agent_chat_endpoint", "")?.trim().orEmpty().ifBlank { DEFAULT_ENDPOINT }
+        val token = prefs.getString("agent_access_token", "")?.trim().orEmpty()
+        if (token.isBlank()) throw IllegalStateException("Agent 账号未登录，请先在主界面输入用户名和密码登录")
+
+        var lastError = ""
+        for (url in buildApiUrls(endpoint, "agent/outbound-tasks/next")) {
+            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 10000
+                readTimeout = 20000
+                setRequestProperty("Authorization", "Bearer $token")
+            }
+            val code = conn.responseCode
+            val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                ?.bufferedReader()?.use { it.readText() }
+                .orEmpty()
+            if (code in 200..299) {
+                val taskJson = JSONObject(text).optJSONObject("task") ?: return null
+                return OutboundTask.fromJson(taskJson)
+            }
+            lastError = "领取主动外发任务失败($code): $text"
+            if (code != 404) throw IllegalStateException(lastError)
+        }
+        if (lastError.isNotBlank()) throw IllegalStateException(lastError)
+        return null
+    }
+
+    fun completeOutboundTask(taskId: Long, success: Boolean, error: String = "") {
+        val prefs = context.getSharedPreferences("host_config", Context.MODE_PRIVATE)
+        val endpoint = prefs.getString("agent_chat_endpoint", "")?.trim().orEmpty().ifBlank { DEFAULT_ENDPOINT }
+        val token = prefs.getString("agent_access_token", "")?.trim().orEmpty()
+        if (token.isBlank()) throw IllegalStateException("Agent 账号未登录，请先在主界面输入用户名和密码登录")
+
+        val payload = JSONObject().apply {
+            put("success", success)
+            put("error", error.take(500))
+        }.toString()
+        var lastError = ""
+        for (url in buildApiUrls(endpoint, "agent/outbound-tasks/$taskId/result")) {
+            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                doOutput = true
+                connectTimeout = 10000
+                readTimeout = 20000
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                setRequestProperty("Authorization", "Bearer $token")
+            }
+            conn.outputStream.use { out -> out.write(payload.toByteArray(Charsets.UTF_8)) }
+            val code = conn.responseCode
+            val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                ?.bufferedReader()?.use { it.readText() }
+                .orEmpty()
+            if (code in 200..299) return
+            lastError = "回报主动外发任务失败($code): $text"
+            if (code != 404) throw IllegalStateException(lastError)
+        }
+        if (lastError.isNotBlank()) throw IllegalStateException(lastError)
+    }
+
     private fun writeMultipartField(out: OutputStream, boundary: String, name: String, value: String) {
         val part = buildString {
             append("--").append(boundary).append("\r\n")
@@ -154,3 +220,25 @@ data class AgentLoginResult(
     val displayName: String,
     val accessToken: String,
 )
+
+data class OutboundTask(
+    val id: Long,
+    val sessionId: String,
+    val contactName: String,
+    val searchKeyword: String,
+    val message: String,
+    val autoSend: Boolean,
+) {
+    companion object {
+        fun fromJson(json: JSONObject): OutboundTask {
+            return OutboundTask(
+                id = json.optLong("id"),
+                sessionId = json.optString("session_id", "").trim(),
+                contactName = json.optString("contact_name", "").trim(),
+                searchKeyword = json.optString("search_keyword", "").trim(),
+                message = json.optString("message", "").trim(),
+                autoSend = json.optBoolean("auto_send", false),
+            )
+        }
+    }
+}

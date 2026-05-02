@@ -222,6 +222,25 @@ def init_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_agent_updated ON sessions(agent_id, updated_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_agent_contact ON sessions(agent_id, contact_name)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_session_created ON messages(session_id, created_at)")
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS outbound_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id INTEGER,
+            session_id TEXT,
+            contact_name TEXT NOT NULL,
+            search_keyword TEXT NOT NULL,
+            message TEXT NOT NULL,
+            auto_send INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'pending',
+            error TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            claimed_at TIMESTAMP,
+            completed_at TIMESTAMP,
+            FOREIGN KEY (agent_id) REFERENCES agents (id)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_outbound_tasks_agent_status ON outbound_tasks(agent_id, status, id)")
     conn.commit()
     conn.close()
 
@@ -767,6 +786,159 @@ def delete_message(message_id: int):
     cursor.execute("DELETE FROM messages WHERE id = ?", (message_id,))
     conn.commit()
     conn.close()
+
+def create_outbound_task(
+    agent_id: int | None,
+    session_id: str | None,
+    contact_name: str,
+    search_keyword: str,
+    message: str,
+    auto_send: bool = False,
+) -> Dict[str, Any]:
+    contact_name = canonicalize_contact_name(contact_name, default="")
+    search_keyword = (search_keyword or contact_name).strip()
+    message = (message or "").strip()
+    if not contact_name:
+        raise ValueError("联系人不能为空")
+    if not search_keyword:
+        raise ValueError("搜索关键词不能为空")
+    if not message:
+        raise ValueError("发送内容不能为空")
+
+    now_bj = get_beijing_time()
+    resolved_session_id = resolve_session_id(
+        session_id or f"manual_outbound:{contact_name}",
+        contact_name,
+        agent_id=agent_id,
+    )
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO outbound_tasks (
+            agent_id, session_id, contact_name, search_keyword, message,
+            auto_send, status, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+        """,
+        (
+            agent_id,
+            resolved_session_id,
+            contact_name,
+            search_keyword,
+            message,
+            1 if auto_send else 0,
+            now_bj,
+            now_bj,
+        ),
+    )
+    task_id = cursor.lastrowid
+    conn.commit()
+    task = _get_outbound_task_by_id(cursor, task_id)
+    conn.close()
+    return task or {}
+
+
+def list_outbound_tasks(agent_id: int | None = None, limit: int = 30) -> List[Dict[str, Any]]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    safe_limit = max(1, min(int(limit or 30), 100))
+    if agent_id is None:
+        cursor.execute(
+            "SELECT * FROM outbound_tasks ORDER BY id DESC LIMIT ?",
+            (safe_limit,),
+        )
+    else:
+        cursor.execute(
+            "SELECT * FROM outbound_tasks WHERE agent_id = ? ORDER BY id DESC LIMIT ?",
+            (agent_id, safe_limit),
+        )
+    rows = cursor.fetchall()
+    conn.close()
+    return [_outbound_task_public(row) for row in rows]
+
+
+def claim_next_outbound_task(agent_id: int) -> Optional[Dict[str, Any]]:
+    now_bj = get_beijing_time()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("BEGIN IMMEDIATE")
+    cursor.execute(
+        """
+        SELECT * FROM outbound_tasks
+        WHERE status = 'pending' AND (agent_id = ? OR agent_id IS NULL)
+        ORDER BY CASE WHEN agent_id = ? THEN 0 ELSE 1 END, id ASC
+        LIMIT 1
+        """,
+        (agent_id, agent_id),
+    )
+    row = cursor.fetchone()
+    if not row:
+        conn.commit()
+        conn.close()
+        return None
+
+    cursor.execute(
+        """
+        UPDATE outbound_tasks
+        SET status = 'running', agent_id = COALESCE(agent_id, ?), claimed_at = ?, updated_at = ?
+        WHERE id = ? AND status = 'pending'
+        """,
+        (agent_id, now_bj, now_bj, row["id"]),
+    )
+    conn.commit()
+    task = _get_outbound_task_by_id(cursor, row["id"])
+    conn.close()
+    return task
+
+
+def complete_outbound_task(task_id: int, agent_id: int, success: bool, error: str = "") -> Optional[Dict[str, Any]]:
+    now_bj = get_beijing_time()
+    status = "succeeded" if success else "failed"
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        UPDATE outbound_tasks
+        SET status = ?, error = ?, completed_at = ?, updated_at = ?
+        WHERE id = ? AND agent_id = ?
+        """,
+        (status, (error or "").strip()[:500], now_bj, now_bj, task_id, agent_id),
+    )
+    if cursor.rowcount == 0:
+        conn.commit()
+        conn.close()
+        return None
+
+    task = _get_outbound_task_by_id(cursor, task_id)
+    conn.commit()
+    conn.close()
+    if task and success and task.get("auto_send"):
+        save_outbound_message_after_task(
+            session_id=str(task.get("session_id") or ""),
+            contact_name=str(task.get("contact_name") or ""),
+            message=str(task.get("message") or ""),
+            agent_id=agent_id,
+        )
+    return task
+
+
+def save_outbound_message_after_task(session_id: str, contact_name: str, message: str, agent_id: int | None = None) -> None:
+    if not session_id or not message.strip():
+        return
+    save_message(session_id, contact_name, "assistant", message, agent_id=agent_id)
+
+
+def _get_outbound_task_by_id(cursor: sqlite3.Cursor, task_id: int) -> Optional[Dict[str, Any]]:
+    cursor.execute("SELECT * FROM outbound_tasks WHERE id = ?", (task_id,))
+    row = cursor.fetchone()
+    return _outbound_task_public(row) if row else None
+
+
+def _outbound_task_public(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
+    item = dict(row)
+    item["auto_send"] = bool(item.get("auto_send"))
+    return item
 
 def get_session_status(session_id: str) -> str:
     conn = get_connection()

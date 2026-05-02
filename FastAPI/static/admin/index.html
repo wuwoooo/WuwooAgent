@@ -380,6 +380,9 @@
                         <button @click="showRemarkModal = true" class="text-xs bg-indigo-600 text-white px-3 py-1.5 rounded-full hover:bg-indigo-700 transition font-medium flex items-center">
                             <i class="fa-solid fa-tag mr-1"></i>备注建议
                         </button>
+                        <button @click="openOutboundModal" class="text-xs bg-emerald-600 text-white px-3 py-1.5 rounded-full hover:bg-emerald-700 transition font-medium flex items-center">
+                            <i class="fa-solid fa-paper-plane mr-1"></i>主动外发
+                        </button>
                         <button @click="extractProfile" :disabled="isExtracting" class="text-xs bg-indigo-100 text-indigo-600 px-3 py-1.5 rounded-full hover:bg-indigo-200 transition font-medium disabled:opacity-50 flex items-center">
                             <i class="fa-solid fa-wand-magic-sparkles mr-1" :class="{'fa-spin': isExtracting}"></i>
                             {{ isExtracting ? '提取中...' : '用户画像' }}
@@ -563,6 +566,58 @@
             </div>
         </div>
 
+        <!-- 主动外发弹窗 -->
+        <div v-if="currentSession && showOutboundModal" class="fixed inset-0 bg-slate-900/45 backdrop-blur-sm z-50 flex items-center justify-center p-6" @click.self="showOutboundModal = false">
+            <div class="w-full max-w-2xl bg-white rounded-3xl shadow-2xl overflow-hidden border border-white/60">
+                <div class="px-6 py-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+                    <div>
+                        <h3 class="font-bold text-slate-800 text-lg"><i class="fa-solid fa-paper-plane text-emerald-500 mr-2"></i>主动外发到微信</h3>
+                        <p class="text-xs text-slate-400 mt-1">手机端会优先点微信右上角搜索，搜索联系人后进入聊天页注入文本。</p>
+                    </div>
+                    <button @click="showOutboundModal = false" class="w-9 h-9 rounded-full bg-white border border-slate-200 text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition">
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
+                </div>
+
+                <div class="p-6 space-y-4">
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <label class="text-xs font-bold text-slate-500">微信联系人</label>
+                            <input v-model="outboundForm.contact_name" class="mt-1 w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" placeholder="例如 Rain">
+                        </div>
+                        <div>
+                            <label class="text-xs font-bold text-slate-500">搜索关键词</label>
+                            <input v-model="outboundForm.search_keyword" class="mt-1 w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" placeholder="备注名 / 手机号 / 微信号">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="text-xs font-bold text-slate-500">要注入的内容</label>
+                        <textarea v-model="outboundForm.message" rows="6" class="mt-1 w-full px-3 py-2 rounded-xl border border-slate-200 text-sm leading-6" placeholder="输入要发送给该联系人的内容"></textarea>
+                    </div>
+                    <label class="flex items-center gap-2 text-sm text-slate-600">
+                        <input v-model="outboundForm.auto_send" type="checkbox" class="rounded border-slate-300">
+                        自动点击发送。未勾选时只填入微信输入框，等待人工确认。
+                    </label>
+                    <div class="flex justify-between items-center">
+                        <button @click="fetchOutboundTasks" class="text-xs text-slate-500 hover:text-indigo-600 font-bold">刷新最近任务</button>
+                        <button @click="createOutboundTask" :disabled="isCreatingOutboundTask" class="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 disabled:opacity-50">
+                            <i class="fa-solid mr-1" :class="isCreatingOutboundTask ? 'fa-spinner fa-spin' : 'fa-paper-plane'"></i>{{ isCreatingOutboundTask ? '提交中...' : '提交任务' }}
+                        </button>
+                    </div>
+                    <div v-if="outboundTasks.length" class="border-t border-slate-100 pt-4 space-y-2 max-h-48 overflow-y-auto">
+                        <div v-for="task in outboundTasks" :key="task.id" class="p-3 rounded-2xl bg-slate-50 border border-slate-100 text-xs">
+                            <div class="flex items-center justify-between gap-3">
+                                <span class="font-bold text-slate-700 truncate">#{{ task.id }} {{ task.contact_name }}</span>
+                                <span class="px-2 py-0.5 rounded-full" :class="outboundStatusClass(task.status)">{{ outboundStatusLabel(task.status) }}</span>
+                            </div>
+                            <p class="mt-1 text-slate-500 truncate">{{ task.message }}</p>
+                            <p v-if="task.error" class="mt-1 text-rose-500">{{ task.error }}</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- 接管辅助大弹窗 -->
         <div v-if="currentSession && showAidModal" class="fixed inset-0 bg-slate-900/45 backdrop-blur-sm z-50 flex items-center justify-center p-6" @click.self="showAidModal = false">
             <div class="w-full max-w-6xl max-h-[88vh] bg-white rounded-3xl shadow-2xl flex flex-col overflow-hidden">
@@ -730,6 +785,15 @@
                 const isSummaryFromCache = ref(false);
                 const showAidModal = ref(false);
                 const showRemarkModal = ref(false);
+                const showOutboundModal = ref(false);
+                const isCreatingOutboundTask = ref(false);
+                const outboundTasks = ref([]);
+                const outboundForm = ref({
+                    contact_name: '',
+                    search_keyword: '',
+                    message: '',
+                    auto_send: false
+                });
                 const messageBox = ref(null);
                 const summaryCachePrefix = 'admin_conversation_summary_v1';
 
@@ -901,6 +965,7 @@
                     isSummaryCollapsed.value = true;
                     showAidModal.value = false;
                     showRemarkModal.value = false;
+                    showOutboundModal.value = false;
                 };
 
                 const triggerLogin = () => {
@@ -1267,6 +1332,96 @@
                     return labels[confidence] || '待确认';
                 };
 
+                const openOutboundModal = async () => {
+                    if (!currentSession.value) return;
+                    const contactName = currentSession.value.suggested_remark || currentSession.value.contact_name || '';
+                    outboundForm.value = {
+                        contact_name: currentSession.value.contact_name || contactName,
+                        search_keyword: contactName,
+                        message: conversationSummary.value?.suggested_next_reply || '',
+                        auto_send: false
+                    };
+                    showOutboundModal.value = true;
+                    await fetchOutboundTasks();
+                };
+
+                const fetchOutboundTasks = async () => {
+                    if (!currentSession.value) return;
+                    try {
+                        const params = new URLSearchParams({ limit: '20' });
+                        if (currentSession.value.agent_id) params.set('agent_id', String(currentSession.value.agent_id));
+                        const res = await fetch(`/api/admin/outbound-tasks?${params.toString()}`, { headers: getAuthHeaders() });
+                        const data = await res.json().catch(() => ({}));
+                        if (res.ok && data.ok) {
+                            outboundTasks.value = data.items || [];
+                        } else if (res.status === 401) {
+                            triggerLogin();
+                        }
+                    } catch (e) {
+                        console.error('获取主动外发任务失败', e);
+                    }
+                };
+
+                const createOutboundTask = async () => {
+                    if (!currentSession.value || isCreatingOutboundTask.value) return;
+                    const payload = {
+                        agent_id: currentSession.value.agent_id || null,
+                        session_id: currentSession.value.session_id || '',
+                        contact_name: (outboundForm.value.contact_name || '').trim(),
+                        search_keyword: (outboundForm.value.search_keyword || outboundForm.value.contact_name || '').trim(),
+                        message: (outboundForm.value.message || '').trim(),
+                        auto_send: !!outboundForm.value.auto_send
+                    };
+                    if (!payload.contact_name || !payload.search_keyword || !payload.message) {
+                        alert('请填写联系人、搜索关键词和发送内容');
+                        return;
+                    }
+                    isCreatingOutboundTask.value = true;
+                    try {
+                        const res = await fetch('/api/admin/outbound-tasks', {
+                            method: 'POST',
+                            headers: {
+                                ...getAuthHeaders(),
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify(payload)
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if (res.ok && data.ok) {
+                            outboundForm.value.message = '';
+                            await fetchOutboundTasks();
+                            alert(payload.auto_send ? '任务已提交，手机端会定位联系人并发送。' : '任务已提交，手机端会定位联系人并填入输入框。');
+                        } else if (res.status === 401) {
+                            triggerLogin();
+                        } else {
+                            alert(data.error || '提交主动外发任务失败');
+                        }
+                    } catch (e) {
+                        console.error('提交主动外发任务失败', e);
+                        alert('提交主动外发任务请求失败');
+                    } finally {
+                        isCreatingOutboundTask.value = false;
+                    }
+                };
+
+                const outboundStatusLabel = (status) => {
+                    const labels = {
+                        pending: '待领取',
+                        running: '执行中',
+                        succeeded: '已完成',
+                        failed: '失败',
+                        cancelled: '已取消'
+                    };
+                    return labels[status] || status || '未知';
+                };
+
+                const outboundStatusClass = (status) => {
+                    if (status === 'succeeded') return 'bg-emerald-100 text-emerald-700';
+                    if (status === 'failed') return 'bg-rose-100 text-rose-700';
+                    if (status === 'running') return 'bg-indigo-100 text-indigo-700';
+                    return 'bg-slate-200 text-slate-600';
+                };
+
                 const refreshRemarkSuggestion = async () => {
                     if(!currentSession.value || isRefreshingRemark.value) return;
                     isRefreshingRemark.value = true;
@@ -1591,6 +1746,10 @@
                     isSummaryFromCache,
                     showAidModal,
                     showRemarkModal,
+                    showOutboundModal,
+                    isCreatingOutboundTask,
+                    outboundTasks,
+                    outboundForm,
                     messageBox,
                     showLogin,
                     loginAnimate,
@@ -1625,6 +1784,11 @@
                     selectSession,
                     extractProfile,
                     confidenceLabel,
+                    openOutboundModal,
+                    fetchOutboundTasks,
+                    createOutboundTask,
+                    outboundStatusLabel,
+                    outboundStatusClass,
                     refreshRemarkSuggestion,
                     copyRemarkSuggestion,
                     markRemarkApplied,

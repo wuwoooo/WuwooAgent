@@ -18,6 +18,7 @@ import com.agentime.ime.IssueHintActivity
 import com.agentime.ime.R
 import com.agentime.ime.host.agent.ConversationTextExtractor
 import com.agentime.ime.host.agent.HttpAgentClient
+import com.agentime.ime.host.agent.OutboundTask
 import com.agentime.ime.host.agent.SessionIdentity
 import com.agentime.ime.host.automation.AccessibilityAutomationController
 import com.agentime.ime.host.automation.ConversationListUnreadDetector
@@ -55,12 +56,23 @@ class HostForegroundService : Service() {
         if (!prefs.getBoolean("runtime_enabled", false)) return@Runnable
         io.execute { scanConversationListAndRun(scanSource = "startup") }
     }
+    private val outboundTaskPollRunnable = object : Runnable {
+        override fun run() {
+            val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
+            if (!prefs.getBoolean("runtime_enabled", false)) return
+            io.execute { pollAndRunOutboundTask() }
+            mainHandler.postDelayed(this, OUTBOUND_TASK_POLL_INTERVAL_MS)
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
         logger = HostLogger(this)
         createNotificationChannel()
         startForegroundCompat("Host 服务运行中", includeProjectionType = false)
+        if (getSharedPreferences("host_config", Context.MODE_PRIVATE).getBoolean("runtime_enabled", false)) {
+            startOutboundTaskPolling()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -69,6 +81,7 @@ class HostForegroundService : Service() {
             ACTION_PREPARE_PROJECTION -> io.execute { prepareProjection() }
             ACTION_START_RUNTIME -> {
                 mainHandler.removeCallbacks(startupScanRunnable)
+                startOutboundTaskPolling()
                 // 延迟 2s 后首次扫描，给 MediaProjection 授权弹窗留出交互时间；
                 // 即使此时管线未就绪也没关系：prepareProjection 完成后会再补一次 post_prepare 扫描。
                 mainHandler.postDelayed(startupScanRunnable, 2000L)
@@ -95,6 +108,7 @@ class HostForegroundService : Service() {
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(startupScanRunnable)
+        mainHandler.removeCallbacks(outboundTaskPollRunnable)
         io.shutdownNow()
         super.onDestroy()
     }
@@ -123,6 +137,98 @@ class HostForegroundService : Service() {
                     io.execute { scanConversationListAndRun(scanSource = "post_prepare") }
                 }, 500L)
             }
+        }
+    }
+
+    private fun startOutboundTaskPolling() {
+        mainHandler.removeCallbacks(outboundTaskPollRunnable)
+        mainHandler.postDelayed(outboundTaskPollRunnable, 1_200L)
+        logger.log(TAG, "已启动主动外发任务轮询")
+    }
+
+    private fun pollAndRunOutboundTask() {
+        val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("runtime_enabled", false)) return
+        if (prefs.getString("execution_mode", "auto").orEmpty() != "auto") return
+        if (isBusyOrCoolingDown()) return
+
+        val agentClient = HttpAgentClient(this)
+        try {
+            val task = agentClient.claimNextOutboundTask() ?: return
+            logger.log(TAG, "领取主动外发任务: id=${task.id} contact=${task.contactName} autoSend=${task.autoSend}")
+            runOutboundTask(task, agentClient)
+        } catch (e: Exception) {
+            logger.log(TAG, "主动外发任务轮询失败: ${e.message}")
+        }
+    }
+
+    private fun runOutboundTask(task: OutboundTask, agentClient: HttpAgentClient) {
+        if (!running.compareAndSet(false, true)) {
+            logger.log(TAG, "已有任务在执行中，主动外发任务暂不处理: ${task.id}")
+            runCatching { agentClient.completeOutboundTask(task.id, false, "手机端正忙，请稍后重试") }
+            return
+        }
+        val automation = AccessibilityAutomationController(this)
+        val ime = BroadcastImeController(this)
+        try {
+            moveState(HostState.IDLE, "开始主动外发任务: ${task.contactName}")
+            if (task.contactName.isBlank() || task.searchKeyword.isBlank() || task.message.isBlank()) {
+                error("任务缺少联系人、搜索词或消息内容")
+            }
+            if (!WechatAccessibilityService.waitServiceConnected()) {
+                error("无障碍服务未连接，无法主动定位联系人")
+            }
+            if (!automation.isWechatForeground()) {
+                if (!automation.launchWechat()) error("无法启动微信，请检查微信是否已安装")
+                WechatAccessibilityService.waitWechatForeground(6000)
+                Thread.sleep(1200)
+            }
+
+            if (!automation.isCurrentChatTarget(task.contactName)) {
+                if (WechatAccessibilityService.isLikelyOnChatPage()) {
+                    logger.log(TAG, "当前不是目标聊天页，先返回微信列表页")
+                    automation.clickBack()
+                    Thread.sleep(900)
+                }
+                moveState(HostState.WECHAT_READY, "准备通过微信搜索定位联系人")
+                if (!automation.openWechatSearch()) error("点击微信搜索失败")
+                Thread.sleep(500)
+                if (!automation.focusWechatSearchInput()) error("聚焦微信搜索框失败")
+                Thread.sleep(250)
+                if (!ime.injectText(task.searchKeyword)) error("注入搜索关键词失败")
+                Thread.sleep(1200)
+                if (!automation.tapWechatSearchResult(task.contactName, task.searchKeyword)) {
+                    error("点击搜索结果失败")
+                }
+                Thread.sleep(1600)
+                if (!automation.isCurrentChatTarget(task.contactName)) {
+                    error("进入聊天页后联系人校验失败，已停止以避免误发")
+                }
+            } else {
+                logger.log(TAG, "手机已在目标联系人聊天页，直接准备输入")
+            }
+
+            if (!automation.focusInputArea()) error("聚焦微信输入框失败")
+            Thread.sleep(450)
+            if (!ime.injectText(task.message)) error("注入主动外发文本失败")
+            moveState(HostState.TEXT_INJECTED, "主动外发文本已注入")
+
+            if (task.autoSend) {
+                Thread.sleep(650)
+                if (!automation.clickSend()) error("点击发送失败")
+                moveState(HostState.SENT, "主动外发已发送")
+            } else {
+                moveState(HostState.SENT, "主动外发已填入，等待人工确认发送")
+            }
+            agentClient.completeOutboundTask(task.id, true)
+            logger.log(TAG, "主动外发任务完成: id=${task.id}")
+        } catch (e: Exception) {
+            val errorMessage = e.message.orEmpty().ifBlank { e::class.java.simpleName }
+            logger.log(TAG, "主动外发任务失败: id=${task.id} error=$errorMessage")
+            runCatching { agentClient.completeOutboundTask(task.id, false, errorMessage) }
+        } finally {
+            lastFinishedAt = System.currentTimeMillis()
+            running.set(false)
         }
     }
 
@@ -1584,6 +1690,7 @@ class HostForegroundService : Service() {
         private const val POST_SEND_FOLLOWUP_RETRY1_DELAY_MS = 3_500L
         private const val POST_SEND_FOLLOWUP_RETRY2_DELAY_MS = 7_000L
         private const val URGENT_CHAT_FOLLOWUP_DELAY_MS = 1_400L
+        private const val OUTBOUND_TASK_POLL_INTERVAL_MS = 4_000L
 
         fun isBusyOrCoolingDown(): Boolean {
             val coolingDown = System.currentTimeMillis() - lastFinishedAt < 8_000L

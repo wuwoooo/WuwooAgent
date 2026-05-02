@@ -258,6 +258,65 @@ class WechatAccessibilityService : AccessibilityService() {
             return findLikelyChatTitle(root)
         }
 
+        fun isCurrentChatTarget(contactName: String): Boolean {
+            val current = getCurrentChatContactName().orEmpty()
+            return namesLookSame(current, contactName)
+        }
+
+        fun openWechatSearch(): Boolean {
+            val svc = instance ?: return false
+            val root = svc.rootInActiveWindow
+            if (root?.packageName?.toString() == WECHAT_PACKAGE) {
+                findNodeByLabel(root, "搜索", topOnly = true)?.let { node ->
+                    if (clickNodeOrParent(node)) {
+                        Log.i(TAG, "已通过无障碍节点点击微信搜索")
+                        return true
+                    }
+                }
+            }
+            val dm = svc.resources.displayMetrics
+            val x = dm.widthPixels * 0.84f
+            val y = dm.heightPixels * 0.075f
+            Log.i(TAG, "未找到搜索节点，使用坐标点击搜索 ($x,$y)")
+            return svc.tap(x, y)
+        }
+
+        fun focusWechatSearchInput(): Boolean {
+            val svc = instance ?: return false
+            val root = svc.rootInActiveWindow
+            if (root?.packageName?.toString() == WECHAT_PACKAGE) {
+                findEditableNode(root)?.let { node ->
+                    if (clickNodeOrParent(node)) {
+                        Log.i(TAG, "已通过无障碍节点聚焦搜索输入框")
+                        return true
+                    }
+                }
+            }
+            val dm = svc.resources.displayMetrics
+            val x = dm.widthPixels * 0.45f
+            val y = dm.heightPixels * 0.075f
+            Log.i(TAG, "未找到搜索输入框节点，使用坐标聚焦搜索框 ($x,$y)")
+            return svc.tap(x, y)
+        }
+
+        fun tapWechatSearchResult(contactName: String, keyword: String): Boolean {
+            val svc = instance ?: return false
+            val root = svc.rootInActiveWindow
+            if (root?.packageName?.toString() == WECHAT_PACKAGE) {
+                findBestSearchResultNode(root, contactName, keyword)?.let { node ->
+                    if (clickNodeOrParent(node)) {
+                        Log.i(TAG, "已点击搜索结果节点: ${node.text ?: node.contentDescription}")
+                        return true
+                    }
+                }
+            }
+            val dm = svc.resources.displayMetrics
+            val x = dm.widthPixels * 0.43f
+            val y = dm.heightPixels * 0.205f
+            Log.i(TAG, "未找到搜索结果节点，点击首个联系人结果坐标 ($x,$y)")
+            return svc.tap(x, y)
+        }
+
         fun getLatestVisibleInboundText(): String? {
             val svc = instance ?: return null
             val root = svc.rootInActiveWindow ?: return null
@@ -342,6 +401,97 @@ class WechatAccessibilityService : AccessibilityService() {
             return inputSignalCount > 0 &&
                 bottomTabHitCount < 2 &&
                 (hasTopBackSignal || !findLikelyChatTitle(root).isNullOrBlank())
+        }
+
+        private fun namesLookSame(left: String, right: String): Boolean {
+            val a = normalizeNameForCompare(left)
+            val b = normalizeNameForCompare(right)
+            if (a.isBlank() || b.isBlank()) return false
+            return a == b || a.contains(b) || b.contains(a)
+        }
+
+        private fun normalizeNameForCompare(value: String): String {
+            return value
+                .replace("\\s".toRegex(), "")
+                .replace("（", "(")
+                .replace("）", ")")
+                .lowercase()
+                .trim()
+        }
+
+        private fun findEditableNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+            fun walk(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+                if (node == null) return null
+                if (node.isEditable || node.className?.toString()?.contains("EditText") == true) return node
+                for (i in 0 until node.childCount) {
+                    walk(node.getChild(i))?.let { return it }
+                }
+                return null
+            }
+            return walk(root)
+        }
+
+        private fun findNodeByLabel(root: AccessibilityNodeInfo, keyword: String, topOnly: Boolean = false): AccessibilityNodeInfo? {
+            val screen = Rect().also { root.getBoundsInScreen(it) }
+            fun walk(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+                if (node == null) return null
+                val label = listOf(
+                    node.text?.toString()?.trim().orEmpty(),
+                    node.contentDescription?.toString()?.trim().orEmpty(),
+                ).firstOrNull { it.isNotBlank() }.orEmpty()
+                if (label.contains(keyword)) {
+                    val bounds = Rect().also { node.getBoundsInScreen(it) }
+                    if (!topOnly || bounds.top < screen.height() * 0.18f) return node
+                }
+                for (i in 0 until node.childCount) {
+                    walk(node.getChild(i))?.let { return it }
+                }
+                return null
+            }
+            return walk(root)
+        }
+
+        private fun findBestSearchResultNode(root: AccessibilityNodeInfo, contactName: String, keyword: String): AccessibilityNodeInfo? {
+            val screen = Rect().also { root.getBoundsInScreen(it) }
+            val wanted = listOf(contactName, keyword).map { normalizeNameForCompare(it) }.filter { it.isNotBlank() }
+            val candidates = mutableListOf<Pair<AccessibilityNodeInfo, Int>>()
+
+            fun walk(node: AccessibilityNodeInfo?) {
+                if (node == null) return
+                val label = listOf(
+                    node.text?.toString()?.trim().orEmpty(),
+                    node.contentDescription?.toString()?.trim().orEmpty(),
+                ).firstOrNull { it.isNotBlank() }.orEmpty()
+                if (label.isNotBlank()) {
+                    val normalized = normalizeNameForCompare(label)
+                    val bounds = Rect().also { node.getBoundsInScreen(it) }
+                    val inResultArea = bounds.top > screen.height() * 0.11f &&
+                        bounds.top < screen.height() * 0.42f &&
+                        bounds.left < screen.width() * 0.82f
+                    if (inResultArea && wanted.any { normalized == it || normalized.contains(it) || it.contains(normalized) }) {
+                        candidates += node to bounds.top
+                    }
+                }
+                for (i in 0 until node.childCount) walk(node.getChild(i))
+            }
+
+            walk(root)
+            return candidates.minByOrNull { it.second }?.first
+        }
+
+        private fun clickNodeOrParent(node: AccessibilityNodeInfo): Boolean {
+            var current: AccessibilityNodeInfo? = node
+            repeat(6) {
+                val candidate = current ?: return@repeat
+                if (candidate.isClickable && candidate.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                    return true
+                }
+                current = candidate.parent
+            }
+            val svc = instance ?: return false
+            val bounds = Rect().also { node.getBoundsInScreen(it) }
+            if (bounds.width() <= 0 || bounds.height() <= 0) return false
+            return svc.tap(bounds.centerX().toFloat(), bounds.centerY().toFloat())
         }
 
         fun onRuntimeEnabledChanged(enabled: Boolean) {
