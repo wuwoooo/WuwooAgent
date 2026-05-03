@@ -332,7 +332,7 @@ def _strip_repeated_customer_address(reply_text: str, contact_name: str, session
     """连续对话中去掉生硬的开头称呼，保留首次问候的自然感。"""
     text = (reply_text or "").strip()
     name = (contact_name or "").strip()
-    if not text or not name or name == "客户":
+    if not text or not name:
         return text
 
     try:
@@ -346,9 +346,17 @@ def _strip_repeated_customer_address(reply_text: str, contact_name: str, session
     if not has_prior_assistant_reply:
         return text
 
-    escaped_name = re.escape(name)
+    if name and name != "客户":
+        escaped_name = re.escape(name)
+        text = re.sub(
+            rf"^{escaped_name}\s*(?:您好|你好|早上好|上午好|中午好|下午好|晚上好)?[，,、：:！!\s~。.]*",
+            "",
+            text,
+            count=1,
+        ).lstrip()
+
     stripped = re.sub(
-        rf"^{escaped_name}\s*(您好|你好|早上好|上午好|中午好|下午好|晚上好)?[，,、：:！!\s]*",
+        r"^[^，,、：:！!\s~。]{0,8}\s*(?:您好|你好|早上好|上午好|中午好|下午好|晚上好)[，,、：:！!\s~。.]*",
         "",
         text,
         count=1,

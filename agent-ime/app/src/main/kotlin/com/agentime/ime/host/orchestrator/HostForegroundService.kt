@@ -107,7 +107,14 @@ class HostForegroundService : Service() {
                 val sessionId = intent.getStringExtra(EXTRA_SESSION_ID).orEmpty().ifBlank {
                     SessionIdentity.buildSessionId(this@HostForegroundService, contactName)
                 }
-                io.execute { runOnce(sessionId, contactName) }
+                val triggerTime = intent.getLongExtra("trigger_time", 0L)
+                io.execute {
+                    if (triggerTime > 0 && System.currentTimeMillis() - triggerTime > 15000L) {
+                        logger.log(TAG, "忽略超时的 runOnce 请求: $sessionId/$contactName (延迟=${System.currentTimeMillis() - triggerTime}ms)")
+                        return@execute
+                    }
+                    runOnce(sessionId, contactName)
+                }
             }
             ACTION_RUN_OUTBOUND_TASK -> io.execute {
                 runNextOutboundTaskOnce()
@@ -810,12 +817,31 @@ class HostForegroundService : Service() {
                 val headerOcrText = recognizeHeaderWithFallbacks(ocr, cap)
                 ocrText = recognizePageWithFallbacks(ocr, cap)
                 logger.log(TAG, "OCR 文本: ${ocrText.take(200)}")
-                val resolvedContactName = SessionIdentity.normalizeContactName(
-                    this@HostForegroundService,
-                    ConversationListUnreadDetector.extractChatContactNameFromOcr(headerOcrText),
+                val chatAnalysis = ConversationListUnreadDetector.analyzeChatPage(ocrText, headerOcrText)
+                if (!chatAnalysis.looksLikeChatPage) {
+                    val listAnalysis = ConversationListUnreadDetector.analyzeConversationListPage(cap.imagePath, ocrText, headerOcrText)
+                    if (listAnalysis.looksLikeListPage) {
+                        logger.log(TAG, "runOnce 识别到当前处于会话列表页，而非聊天页，中止执行 (可能是过期任务)")
+                        error("当前已返回列表页，已取消过期的回复任务")
+                    } else {
+                        logger.log(TAG, "runOnce 识别到当前非聊天页，中止执行: ${chatAnalysis.debugSummary}")
+                        error("当前页面非聊天页，已取消回复任务")
+                    }
+                }
+
+                val binding = resolveChatContactBinding(
+                    ocr = ocr,
+                    cap = cap,
+                    headerOcrText = headerOcrText,
+                    listRowContactHint = "",
                 )
+                val resolvedContactName = binding.contactName
                 if (resolvedContactName.isNotBlank() && resolvedContactName != "当前联系人") {
-                    logger.log(TAG, "顶部栏识别联系人: $resolvedContactName")
+                    logger.log(TAG, "当前聊天页绑定联系人: $resolvedContactName")
+                    if (!outboundNamesMatch(resolvedContactName, contactName)) {
+                        logger.log(TAG, "runOnce 识别到当前聊天页联系人($resolvedContactName)与目标($contactName)不匹配，中止执行，防止串会话")
+                        error("聊天页联系人不匹配，已取消回复防止串会话")
+                    }
                 }
                 var inboundCandidate = extractInboundCandidate(
                     ocr = ocr,
