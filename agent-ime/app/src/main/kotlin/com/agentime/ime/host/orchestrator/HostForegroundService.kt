@@ -619,9 +619,9 @@ class HostForegroundService : Service() {
                     val agentClient = HttpAgentClient(this@HostForegroundService)
                     val sessionId = SessionIdentity.buildSessionId(this@HostForegroundService, contactName)
                     try {
-                        agentClient.chat(postClickCap.imagePath, currentOutboundText, sessionId, contactName, isHumanReply = true)
+                        agentClient.chat(postClickCap.imagePath, "", sessionId, contactName, isHumanReply = true)
                         lastReportedOutboundText = currentOutboundText
-                        logger.log(TAG, "检测到真人介入并发送消息: [${currentOutboundText.take(20)}]，已同步至后台接管流程")
+                        logger.log(TAG, "检测到真人介入并发送消息: [${currentOutboundText.take(20)}]，已同步至后台接管流程 (VLM)")
                     } catch (e: Exception) {
                         logger.log(TAG, "同步真人介入状态失败: ${e.message}")
                     }
@@ -903,7 +903,8 @@ class HostForegroundService : Service() {
                 return
             }
 
-            val reply = agentClient.chat(cap.imagePath, latestInbound, sessionId, contactName)
+            logger.log(TAG, "触发后端 API 调用，强制使用图片进行 VLM OCR 提取")
+            val reply = agentClient.chat(cap.imagePath, "", sessionId, contactName)
             moveState(HostState.REPLY_READY, "reply_text 长度=${reply.replyText.length}")
 
             if (reply.replyText.isBlank()) {

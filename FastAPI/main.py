@@ -11,6 +11,8 @@ from collections import deque
 import datetime
 import logging
 import os
+import requests
+import json
 from pathlib import Path
 import re
 import shlex
@@ -613,6 +615,59 @@ async def api_agent_complete_outbound_task(
     return {"ok": True, "task": task}
 
 
+import base64
+
+def _run_vision_ocr(image_bytes: bytes) -> list[dict[str, Any]]:
+    api_key = os.environ.get("ARK_VISION_API_KEY", "ark-0773e8a1-0054-4243-83b9-b1a4f06b67da-d677d")
+    model_id = os.environ.get("ARK_VISION_MODEL_ID", "doubao-seed-2-0-pro-260215")
+    base_url = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+    
+    base64_image = base64.b64encode(image_bytes).decode('utf-8')
+    prompt = (
+        "你是一个微信聊天记录提取专家。请提取图片中的所有聊天记录，按时间顺序输出。\n"
+        "请注意：绿色气泡表示'我方(agent)'发送的，白色/其他非绿色气泡表示'客户(client)'发送的。\n"
+        "请忽略顶部标题栏、底部输入框等无关元素。严格只返回一个 JSON 数组，不要包裹在任何 Markdown 标记中，格式如下：\n"
+        '[{"sender": "client", "text": "你好"}, {"sender": "agent", "text": "您好，需要什么旅游定制服务？"}]'
+    )
+    
+    payload = {
+        "model": model_id,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}"}}
+                ]
+            }
+        ],
+        "temperature": 0.1
+    }
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+    
+    try:
+        response = requests.post(base_url, headers=headers, json=payload, timeout=40)
+        if response.status_code == 200:
+            result = response.json()
+            content = result["choices"][0]["message"]["content"].strip()
+            if content.startswith("```json"):
+                content = content[7:]
+            if content.startswith("```"):
+                content = content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
+            return json.loads(content)
+        else:
+            logger.error(f"VLM OCR 请求失败: {response.status_code} {response.text}")
+    except Exception as e:
+        logger.error(f"VLM OCR 发生异常: {e}")
+    return []
+
 @app.post("/api/wechat/chat")
 @app.post("/wechat/chat")
 async def wechat_chat(
@@ -653,6 +708,35 @@ async def wechat_chat(
         safe_name = (image.filename or "upload.bin").replace("/", "_")[:200]
         dest = UPLOAD_DIR / safe_name
         dest.write_bytes(image_bytes)
+        
+        # 阶段一：用 VLM 做高级云端 OCR 提取
+        if not ocr_ok:
+            logger.info(f"客户端未提供 ocr_text，触发 VLM 视觉大模型提取: {safe_name}")
+            extracted_msgs = await asyncio.to_thread(_run_vision_ocr, image_bytes)
+            last_agent_idx = -1
+            for i, msg in enumerate(extracted_msgs):
+                if msg.get("sender") == "agent":
+                    last_agent_idx = i
+                    
+            if is_human_reply:
+                if last_agent_idx >= 0:
+                    ocr_text = extracted_msgs[last_agent_idx].get("text", "")
+                    ocr_ok = bool(ocr_text.strip())
+                    logger.info(f"VLM OCR 成功提取真人回复: {ocr_text}")
+                else:
+                    logger.info("VLM OCR 未能找到 agent 发送的真人回复")
+            else:
+                new_client_texts = []
+                for i in range(last_agent_idx + 1, len(extracted_msgs)):
+                    if extracted_msgs[i].get("sender") == "client":
+                        new_client_texts.append(extracted_msgs[i].get("text", ""))
+                
+                if new_client_texts:
+                    ocr_text = "\n".join(new_client_texts)
+                    ocr_ok = True
+                    logger.info(f"VLM OCR 成功提取 {len(new_client_texts)} 条客户新消息: {ocr_text}")
+                else:
+                    logger.info("VLM OCR 未提取到客户新消息")
 
     agent_id = int(agent["id"])
     raw_session_id = session_id
