@@ -328,6 +328,34 @@ def _format_messages_for_prompt(messages: list[dict[str, Any]], limit: int | Non
     return "\n".join(lines) if lines else "暂无有效聊天记录。"
 
 
+def _strip_repeated_customer_address(reply_text: str, contact_name: str, session_id: str) -> str:
+    """连续对话中去掉生硬的开头称呼，保留首次问候的自然感。"""
+    text = (reply_text or "").strip()
+    name = (contact_name or "").strip()
+    if not text or not name or name == "客户":
+        return text
+
+    try:
+        has_prior_assistant_reply = any(
+            msg.get("role") == "assistant" and str(msg.get("content") or "").strip()
+            for msg in database.get_session_messages(session_id)
+        )
+    except Exception:
+        has_prior_assistant_reply = False
+
+    if not has_prior_assistant_reply:
+        return text
+
+    escaped_name = re.escape(name)
+    stripped = re.sub(
+        rf"^{escaped_name}\s*(您好|你好|早上好|上午好|中午好|下午好|晚上好)?[，,、：:！!\s]*",
+        "",
+        text,
+        count=1,
+    ).lstrip()
+    return stripped or text
+
+
 def _build_agent_continuation_prompt(
     *,
     contact_name: str,
@@ -339,7 +367,7 @@ def _build_agent_continuation_prompt(
     return (
         f"当前微信联系人：{contact_name or '客户'}\n"
         f"当前实际时间：{get_current_time_str()}\n\n"
-        f"【称呼规则】称呼客户时必须使用「{contact_name or '客户'}」，不要使用聊天记录中出现的其他名字（可能存在 OCR 同音字误差）。\n\n"
+        f"【称呼规则】如果确实需要称呼客户，只能使用「{contact_name or '客户'}」；但不要每条消息都以客户姓名开头，连续对话中应直接回应客户问题。不要使用聊天记录中出现的其他名字（可能存在 OCR 同音字误差）。\n\n"
         "客户画像：\n"
         f"{_format_profile_for_prompt(profile)}\n\n"
         "联系人背景：\n"
@@ -420,6 +448,7 @@ async def _generate_agent_continuation(session_id: str, limit: int | None = 30) 
 
     if not reply_text:
         raise ValueError("Agent 未生成可用方案，请稍后重试")
+    reply_text = _strip_repeated_customer_address(reply_text, contact_name, session_id)
 
     agent_id = session.get("agent_id")
     database.save_message(session_id, contact_name, "assistant", reply_text, agent_id=agent_id)
@@ -502,7 +531,7 @@ def _build_user_prompt(contact_name: str, current_status: str = "auto", contact_
 
     wrapped_text = (
         f"（系统提示：当前实际时间是 {current_time}。注意：仅在第一轮对话或主动打招呼时才进行时间问候，在后续连续的对话中直接回答用户的问题，绝对不要重复问候！你在问候客户时必须以此为准判断今天是星期几，绝对不要参考下方文本中可能出现的旧时间标签（如“周一16:40”等是微信界面上旧消息的时间戳，不代表当前时间）。请以此作为判断今天、明天、下周等相对时间的基准。\n"
-        f"【称呼规则】称呼客户时，必须严格使用系统提供的联系人名「{name}」，不要使用聊天记录或 OCR 文本中出现的名字。因为 OCR 识别存在同音字误差（如索被识别为素），聊天记录中的名字不可靠，以系统提供的联系人名为唯一准确来源。\n"
+        f"【称呼规则】如果确实需要称呼客户，只能使用系统提供的联系人名「{name}」；但不要每条消息都以客户姓名开头，连续对话中应直接回应客户问题。不要使用聊天记录或 OCR 文本中出现的名字。因为 OCR 识别存在同音字误差（如索被识别为素），聊天记录中的名字不可靠，以系统提供的联系人名为唯一准确来源。\n"
         "【HANDOFF 规则】在以下两种情况下，才可在回复末尾加上 [HANDOFF] 标记：1) 客户在本轮消息中明确表达了要你出方案/报价/下单的意图（例如‘帮我安排一下’、‘出个方案吧’、‘可以报价了’）；2) 虽然客户没有直接说‘出方案’，但从对话上下文判断客户意愿已经非常强烈，目的地、人数、时间等关键信息都已明确，且客户表现出明显的决策倾向（例如‘就这个行程吧’、‘五一就走’、‘两个人确定了’）。如果客户只是打招呼、闲聊、问问题、或者你自己还在提问收集基本信息，**绝对不要**加 [HANDOFF]。触发 [HANDOFF] 时，你的回复**必须是一句确认性的第一人称过渡话术**（例如‘好的，我这就给您整理具体的行程方案和报价～’），**绝对不能是提问句**，也绝对不能说‘转交给人工’或‘转交给定制师’，因为你本身就是这位专属的定制师小鹿。）\n\n"
         f"{receptionist_rule}"
         f"{contact_context + chr(10) if contact_context else ''}"
@@ -525,7 +554,7 @@ def _build_user_prompt_from_ocr(contact_name: str, ocr_text: str, current_status
 
     wrapped_text = (
         f"（系统提示：当前实际时间是 {current_time}。注意：仅在第一轮对话或主动打招呼时才进行时间问候，在后续连续的对话中直接回答用户的问题，绝对不要重复问候！你在问候客户时必须以此为准判断今天是星期几，绝对不要参考下方 OCR 文本中可能出现的旧时间标签（如“周一16:40”等是微信界面上旧消息的时间戳，不代表当前时间）。如果在聊天中客户提到诸如“下月”、“明天”等相对时间，也请以此为基准推算。\n"
-        f"【称呼规则】称呼客户时，必须严格使用系统提供的联系人名「{name}」，不要使用聊天记录或 OCR 文本中出现的名字。因为 OCR 识别存在同音字误差（如索被识别为素），聊天记录中的名字不可靠，以系统提供的联系人名为唯一准确来源。\n"
+        f"【称呼规则】如果确实需要称呼客户，只能使用系统提供的联系人名「{name}」；但不要每条消息都以客户姓名开头，连续对话中应直接回应客户问题。不要使用聊天记录或 OCR 文本中出现的名字。因为 OCR 识别存在同音字误差（如索被识别为素），聊天记录中的名字不可靠，以系统提供的联系人名为唯一准确来源。\n"
         "【HANDOFF 规则】在以下两种情况下，才可在回复末尾加上 [HANDOFF] 标记：1) 客户在本轮消息中明确表达了要你出方案/报价/下单的意图（例如‘帮我安排一下’、‘出个方案吧’、‘可以报价了’）；2) 虽然客户没有直接说‘出方案’，但从对话上下文判断客户意愿已经非常强烈，目的地、人数、时间等关键信息都已明确，且客户表现出明显的决策倾向（例如‘就这个行程吧’、‘五一就走’、‘两个人确定了’）。如果客户只是打招呼、闲聊、问问题、或者你自己还在提问收集基本信息，**绝对不要**加 [HANDOFF]。触发 [HANDOFF] 时，你的回复**必须是一句确认性的第一人称过渡话术**（例如‘好的，我这就给您整理具体的行程方案和报价～’），**绝对不能是提问句**，也绝对不能说‘转交给人工’或‘转交给定制师’，因为你本身就是这位专属的定制师小鹿。）\n\n"
         f"{receptionist_rule}"
         f"{contact_context + chr(10) if contact_context else ''}"
@@ -796,6 +825,12 @@ async def wechat_chat(
             database.update_session_status(session_id, "handoff_requested", agent_id=agent_id)
         except Exception:
             pass
+
+    reply_text = _strip_repeated_customer_address(reply_text, contact_name, session_id)
+    for msg in messages:
+        if msg.get("role") == "assistant":
+            msg["text"] = reply_text
+            break
 
     # Save messages to database and trigger async profile check
     try:
