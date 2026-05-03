@@ -101,8 +101,8 @@ class HttpAgentClient(private val context: Context) : AgentClient {
         val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             doOutput = true
-            connectTimeout = 10000
-            readTimeout = 30000
+            connectTimeout = 15000
+            readTimeout = 60000
             setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
             setRequestProperty("Authorization", "Bearer $token")
         }
