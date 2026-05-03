@@ -460,10 +460,7 @@ object ConversationListUnreadDetector {
                     line.contains("您好") ||
                     line.startsWith("我是")
             }
-        val latinCandidate = candidates.firstOrNull { candidate ->
-            candidate.matches(Regex("""[A-Za-z][A-Za-z0-9_. -]{1,20}"""))
-        }
-        if (!latinCandidate.isNullOrBlank()) return latinCandidate
+        // 移除对纯英文昵称的强制优先匹配，避免误把聊天里的英文文本（如 HostEore）当成联系人
 
         return candidates.firstOrNull { candidate ->
             candidate.length in 2..24 &&

@@ -610,17 +610,17 @@ async def api_agent_complete_outbound_task(
 
 import base64
 
-def _run_vision_ocr(image_bytes: bytes) -> list[dict[str, Any]]:
+def _run_vision_ocr(image_bytes: bytes) -> dict[str, Any]:
     api_key = os.environ.get("ARK_VISION_API_KEY", "ark-0773e8a1-0054-4243-83b9-b1a4f06b67da-d677d")
     model_id = os.environ.get("ARK_VISION_MODEL_ID", "doubao-seed-2-0-pro-260215")
     base_url = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
     
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
     prompt = (
-        "你是一个微信聊天记录提取专家。请提取图片中的所有聊天记录，按时间顺序输出。\n"
+        "你是一个微信界面提取专家。请提取图片中顶部标题栏的「联系人名称」以及所有的「聊天记录」。\n"
         "请注意：绿色气泡表示'我方(agent)'发送的，白色/其他非绿色气泡表示'客户(client)'发送的。\n"
-        "请忽略顶部标题栏、底部输入框等无关元素。严格只返回一个 JSON 数组，不要包裹在任何 Markdown 标记中，格式如下：\n"
-        '[{"sender": "client", "text": "你好"}, {"sender": "agent", "text": "您好，需要什么旅游定制服务？"}]'
+        "严格返回一个 JSON 对象，不要包裹在任何 Markdown 标记中，格式如下：\n"
+        '{"contact_name": "张三", "messages": [{"sender": "client", "text": "你好"}, {"sender": "agent", "text": "您好，需要什么旅游定制服务？"}]}'
     )
     
     payload = {
@@ -658,8 +658,8 @@ def _run_vision_ocr(image_bytes: bytes) -> list[dict[str, Any]]:
         else:
             logger.error(f"VLM OCR 请求失败: {response.status_code} {response.text}")
     except Exception as e:
-        logger.error(f"VLM OCR 发生异常: {e}")
-    return []
+        logger.error(f"VLM OCR 异常: {e}")
+    return {"contact_name": "", "messages": []}
 
 @app.post("/api/wechat/chat")
 @app.post("/wechat/chat")
@@ -702,10 +702,14 @@ async def wechat_chat(
         dest = UPLOAD_DIR / safe_name
         dest.write_bytes(image_bytes)
         
+        vlm_contact_name = None
         # 阶段一：用 VLM 做高级云端 OCR 提取
         if not ocr_ok:
             logger.info(f"客户端未提供 ocr_text，触发 VLM 视觉大模型提取: {safe_name}")
-            extracted_msgs = await asyncio.to_thread(_run_vision_ocr, image_bytes)
+            extracted_data = await asyncio.to_thread(_run_vision_ocr, image_bytes)
+            extracted_msgs = extracted_data.get("messages", [])
+            vlm_contact_name = extracted_data.get("contact_name")
+            
             last_agent_idx = -1
             for i, msg in enumerate(extracted_msgs):
                 if msg.get("sender") == "agent":
@@ -764,7 +768,17 @@ async def wechat_chat(
         contact_id = contact.get("id") if contact else None
         session_profile = database.get_session_profile(session_id)
         contact_context = _format_contact_context_for_prompt(contact, session_profile)
-        # 人工纠错称呼：如果联系人设置了 preferred_name，优先使用它
+        
+        # 使用 VLM 提取的联系人名称自动纠错本地 OCR 误差
+        if contact_id and locals().get("vlm_contact_name"):
+            vlm_canonical = database.canonicalize_contact_name(vlm_contact_name)
+            if vlm_canonical and vlm_canonical != contact_name and len(vlm_canonical) >= 2:
+                logger.info(f"VLM 视觉模型自动纠正联系人名: 本地={contact_name} VLM={vlm_canonical}")
+                database.update_contact_preferred_name(contact_id, vlm_canonical, agent_id=agent_id)
+                contact_name = vlm_canonical
+                contact["preferred_name"] = vlm_canonical
+
+        # 人工纠错称呼或 VLM 自动纠错后：如果联系人设置了 preferred_name，优先使用它
         if contact and contact.get("preferred_name"):
             contact_name = contact["preferred_name"]
     except Exception as e:
