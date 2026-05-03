@@ -114,6 +114,12 @@ class HttpAgentClient(private val context: Context) : AgentClient {
             if (isHumanReply) {
                 writeMultipartField(out, boundary, "is_human_reply", "true")
             }
+            if (imagePath.isNotBlank()) {
+                val file = java.io.File(imagePath)
+                if (file.exists()) {
+                    writeMultipartFile(out, boundary, "image", file.name, file.readBytes())
+                }
+            }
             val end = "--$boundary--\r\n"
             out.write(end.toByteArray(Charsets.UTF_8))
         }
@@ -211,6 +217,17 @@ class HttpAgentClient(private val context: Context) : AgentClient {
             append(value).append("\r\n")
         }
         out.write(part.toByteArray(Charsets.UTF_8))
+    }
+
+    private fun writeMultipartFile(out: OutputStream, boundary: String, name: String, fileName: String, fileBytes: ByteArray) {
+        val part = buildString {
+            append("--").append(boundary).append("\r\n")
+            append("Content-Disposition: form-data; name=\"").append(name).append("\"; filename=\"").append(fileName).append("\"\r\n")
+            append("Content-Type: application/octet-stream\r\n\r\n")
+        }
+        out.write(part.toByteArray(Charsets.UTF_8))
+        out.write(fileBytes)
+        out.write("\r\n".toByteArray(Charsets.UTF_8))
     }
 }
 
