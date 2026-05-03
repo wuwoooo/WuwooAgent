@@ -33,9 +33,31 @@ import java.util.concurrent.TimeUnit
 class WechatAccessibilityService : AccessibilityService() {
     private var stopOverlayView: View? = null
     private var screenWakeLock: PowerManager.WakeLock? = null
+    private var wasOnChatPage = false
     private val pollHandler = Handler(Looper.getMainLooper())
     private val foregroundPoll = object : Runnable {
         override fun run() {
+            runCatching {
+                val currentlyOnChatPage = isLikelyOnChatPage()
+                if (currentlyOnChatPage != wasOnChatPage) {
+                    wasOnChatPage = currentlyOnChatPage
+                    val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
+                    if (currentlyOnChatPage) {
+                        val currentEnabled = prefs.getBoolean("notification_auto_enabled", false)
+                        prefs.edit()
+                            .putBoolean("notification_auto_enabled_backup", currentEnabled)
+                            .putBoolean("notification_auto_enabled", false)
+                            .apply()
+                        Log.i(TAG, "已进入聊天页，暂时关闭后台通知自动触发 (原状态: $currentEnabled)")
+                    } else {
+                        val backupEnabled = prefs.getBoolean("notification_auto_enabled_backup", false)
+                        if (backupEnabled) {
+                            prefs.edit().putBoolean("notification_auto_enabled", true).apply()
+                            Log.i(TAG, "已退出聊天页，恢复开启后台通知自动触发")
+                        }
+                    }
+                }
+            }
             runCatching { scanForegroundWechatUi(triggerSource = "poll") }
             pollHandler.postDelayed(this, 1800L)
         }
@@ -440,6 +462,15 @@ class WechatAccessibilityService : AccessibilityService() {
                 svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
             }
             return ok1
+        }
+
+        fun goHome(): Boolean {
+            val svc = instance ?: run {
+                Log.w(TAG, "goHome 失败：无障碍服务实例为空")
+                return false
+            }
+            Log.i(TAG, "准备执行系统级回到主屏动作 (GLOBAL_ACTION_HOME)")
+            return svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
         }
 
         /** 仅当对应 key 从未写入时，用屏幕比例作为默认坐标（像素默认值易在不同分辨率上失效）。 */

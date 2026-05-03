@@ -505,7 +505,8 @@ class HostForegroundService : Service() {
             val hit = ConversationListUnreadDetector.findTopUnreadConversation(cap.imagePath, badgeDebugLog)
             //logger.log(TAG, "红点扫描诊断: $badgeDebugLog")
             if (hit == null) {
-                logger.log(TAG, "截图分析结果：已识别为会话列表页，但未识别到可点击的未读红点")
+                logger.log(TAG, "截图分析结果：已识别为会话列表页，但未识别到可点击的未读红点，返回系统主屏")
+                com.agentime.ime.host.automation.WechatAccessibilityService.goHome()
                 if (scanSource.startsWith("post_send_back_followup")) {
                     schedulePostSendAdaptiveRetry(scanSource)
                 }
