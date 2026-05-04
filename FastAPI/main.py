@@ -684,7 +684,8 @@ async def wechat_chat(
     - 若两者同时提供：按接口说明优先使用 ocr_text。
     - is_human_reply：标识此条消息是否为真人客服手动发出的回复。
     """
-    ocr_ok = bool((ocr_text or "").strip())
+    ocr_text = (ocr_text or "").strip()
+    ocr_ok = bool(ocr_text)
     image_bytes: bytes | None = None
     if image is not None:
         image_bytes = await image.read()
@@ -710,46 +711,48 @@ async def wechat_chat(
         
         vlm_contact_name = None
         # 阶段一：用 VLM 做高级云端 OCR 提取
-        if not ocr_ok:
-            logger.info(f"客户端未提供 ocr_text，触发 VLM 视觉大模型提取: {safe_name}")
-            extracted_data = await asyncio.to_thread(_run_vision_ocr, image_bytes)
-            
-            if extracted_data.get("is_group_chat"):
-                logger.info("VLM 识别出这是群聊，返回主屏信号并停止处理")
-                return {
-                    "ok": True,
-                    "is_group_chat": True,
-                    "messages": [],
-                    "reply_text": "",
-                }
+        # 只要有图片，强制使用 VLM 提取，忽略本地传入的 ocr_text
+        logger.info(f"接收到截图，强制触发 VLM 视觉大模型提取: {safe_name}")
+        extracted_data = await asyncio.to_thread(_run_vision_ocr, image_bytes)
+        
+        if extracted_data.get("is_group_chat"):
+            logger.info("VLM 识别出这是群聊，返回主屏信号并停止处理")
+            return {
+                "ok": True,
+                "is_group_chat": True,
+                "messages": [],
+                "reply_text": "",
+            }
 
-            extracted_msgs = extracted_data.get("messages", [])
-            vlm_contact_name = extracted_data.get("contact_name")
-            
-            last_agent_idx = -1
-            for i, msg in enumerate(extracted_msgs):
-                if msg.get("sender") == "agent":
-                    last_agent_idx = i
-                    
-            if is_human_reply:
-                if last_agent_idx >= 0:
-                    ocr_text = extracted_msgs[last_agent_idx].get("text", "")
-                    ocr_ok = bool(ocr_text.strip())
-                    logger.info(f"VLM OCR 成功提取真人回复: {ocr_text}")
-                else:
-                    logger.info("VLM OCR 未能找到 agent 发送的真人回复")
-            else:
-                new_client_texts = []
-                for i in range(last_agent_idx + 1, len(extracted_msgs)):
-                    if extracted_msgs[i].get("sender") == "client":
-                        new_client_texts.append(extracted_msgs[i].get("text", ""))
+        extracted_msgs = extracted_data.get("messages", [])
+        vlm_contact_name = extracted_data.get("contact_name")
+        
+        last_agent_idx = -1
+        for i, msg in enumerate(extracted_msgs):
+            if msg.get("sender") == "agent":
+                last_agent_idx = i
                 
-                if new_client_texts:
-                    ocr_text = "\n".join(new_client_texts)
-                    ocr_ok = True
-                    logger.info(f"VLM OCR 成功提取 {len(new_client_texts)} 条客户新消息: {ocr_text}")
-                else:
-                    logger.info("VLM OCR 未提取到客户新消息")
+        if is_human_reply:
+            if last_agent_idx >= 0:
+                ocr_text = extracted_msgs[last_agent_idx].get("text", "")
+                ocr_ok = bool(ocr_text.strip())
+                logger.info(f"VLM OCR 成功提取真人回复: {ocr_text}")
+            else:
+                logger.info("VLM OCR 未能找到 agent 发送的真人回复")
+        else:
+            new_client_texts = []
+            for i in range(last_agent_idx + 1, len(extracted_msgs)):
+                if extracted_msgs[i].get("sender") == "client":
+                    new_client_texts.append(extracted_msgs[i].get("text", ""))
+            
+            if new_client_texts:
+                ocr_text = "\n".join(new_client_texts)
+                ocr_ok = True
+                logger.info(f"VLM OCR 成功提取 {len(new_client_texts)} 条客户新消息: {ocr_text}")
+            else:
+                ocr_text = ""
+                ocr_ok = False
+                logger.info("VLM OCR 未提取到客户新消息")
 
     agent_id = int(agent["id"])
     raw_session_id = session_id
