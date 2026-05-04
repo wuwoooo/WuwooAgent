@@ -1024,6 +1024,15 @@ async def wechat_chat(
             ]
             if debug_payload.get("provider"):
                 messages.append({"role": "system", "text": f"provider={debug_payload['provider']}"})
+            logger.info(
+                "火山知识库对话调试: session=%s contact=%s provider=%s search_query=%s skipped=%s context_bridge=%s",
+                session_id,
+                contact_name,
+                debug_payload.get("provider", ""),
+                str(debug_payload.get("search_query") or "")[:300],
+                debug_payload.get("search_skipped_reason", ""),
+                json.dumps(debug_payload.get("context_bridge") or {}, ensure_ascii=False)[:500],
+            )
     except Exception as e:
         return JSONResponse(
             status_code=503,

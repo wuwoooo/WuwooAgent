@@ -195,27 +195,150 @@ def get_content_for_prompt(point: dict[str, Any]) -> str:
     return content
 
 
-def is_greeting_or_short(text: str) -> bool:
-    """如果只是一些常规简短寒暄，则跳过知识库检索以提升响应速度。"""
+def is_pure_social_phrase(text: str) -> bool:
+    """只有纯寒暄、感谢等低业务信息短语才跳过知识库检索。"""
     cleaned = text.strip()
     if not cleaned:
         return True
-    
-    # 极短词汇且仅包含寒暄意图
-    if len(cleaned) <= 4:
-        # 直接匹配常见短语
-        common_phrases = {"你好", "在吗", "在不在", "有人吗", "谢谢", "好的", "好", "可以", "嗯", "嗯嗯", "ok", "OK", "哈喽", "hi", "hello"}
-        if cleaned.lower() in common_phrases:
-            return True
-            
-    # 正则匹配常见的开头寒暄 (不超过 6 个字)
+
+    common_phrases = {
+        "你好", "您好", "在吗", "在不在", "有人吗", "谢谢", "谢谢你", "谢谢啦",
+        "辛苦了", "收到", "嗯嗯收到", "哈喽", "hello", "hi",
+    }
+    if cleaned.lower() in common_phrases:
+        return True
+
+    # 正则匹配常见的开头寒暄（不超过 6 个字）
     if len(cleaned) <= 6:
-        patterns = ["^哈喽", "^hello", "^hi", "^你好", "^在吗", "^收到", "^谢谢"]
+        patterns = ["^哈喽", "^hello", "^hi", "^你好", "^您好", "^在吗", "^谢谢"]
         for p in patterns:
             if re.match(p, cleaned, re.IGNORECASE):
                 return True
-                
+
     return False
+
+
+def is_greeting_or_short(text: str) -> bool:
+    """兼容旧调用名：不再按“短”跳过，只判断纯寒暄。"""
+    return is_pure_social_phrase(text)
+
+
+def is_fallback_assistant_message(text: str) -> bool:
+    cleaned = text.strip()
+    if not cleaned:
+        return True
+    fallback_keywords = [
+        "没听清", "没看清", "再发一遍", "打字告诉", "发一遍或者打字",
+        "用户上传了一张聊天截图", "发了一条语音", "系统未能读取到文字内容",
+    ]
+    return any(keyword in cleaned for keyword in fallback_keywords)
+
+
+def is_placeholder_user_message(text: str) -> bool:
+    cleaned = text.strip()
+    if not cleaned:
+        return True
+    placeholder_keywords = [
+        "用户上传了一张聊天截图", "发了一条语音", "系统未能读取到文字内容",
+    ]
+    return any(keyword in cleaned for keyword in placeholder_keywords)
+
+
+def is_low_information_message(text: str) -> bool:
+    cleaned = text.strip()
+    if not cleaned:
+        return True
+    compact = re.sub(r"[\s,，。.!！?？、；;：:~～]+", "", cleaned.lower())
+    if not compact:
+        return True
+    if len(compact) <= 12:
+        return True
+    return False
+
+
+def find_recent_substantive_message(history_messages: list[dict[str, Any]], role: str) -> str:
+    for msg in reversed(history_messages):
+        if msg.get("role") != role:
+            continue
+        content = str(msg.get("content") or "").strip()
+        if role == "assistant" and is_fallback_assistant_message(content):
+            continue
+        if role == "user" and is_placeholder_user_message(content):
+            continue
+        if content:
+            return content
+    return ""
+
+
+def format_context_for_interpretation(history_messages: list[dict[str, Any]], limit: int = 6) -> str:
+    rows: list[str] = []
+    for msg in history_messages[-limit:]:
+        role = msg.get("role")
+        content = str(msg.get("content") or "").strip()
+        if not content or role not in {"user", "assistant"}:
+            continue
+        if role == "user" and is_placeholder_user_message(content):
+            label = "客户[系统占位]"
+        elif role == "assistant" and is_fallback_assistant_message(content):
+            label = "Agent[系统兜底]"
+        elif role == "user":
+            label = "客户"
+        else:
+            label = "Agent"
+        rows.append(f"{label}：{content[:220]}")
+    return "\n".join(rows)
+
+
+def build_context_bridge(
+    pure_user_text: str,
+    history_messages: list[dict[str, Any]],
+) -> tuple[str, str, dict[str, str]]:
+    """整理短句/符号消息的上下文，不替模型硬判意图。"""
+    latest_is_low_info = is_low_information_message(pure_user_text)
+    recent_history = history_messages[-6:]
+    has_fallback_noise = any(
+        (msg.get("role") == "assistant" and is_fallback_assistant_message(str(msg.get("content") or ""))) or
+        (msg.get("role") == "user" and is_placeholder_user_message(str(msg.get("content") or "")))
+        for msg in recent_history
+    )
+    recent_user = find_recent_substantive_message(history_messages, "user")
+    recent_assistant = find_recent_substantive_message(history_messages, "assistant")
+
+    if latest_is_low_info and (recent_user or recent_assistant):
+        search_query = "\n".join(
+            part for part in [
+                f"最近实质客户消息：{recent_user}" if recent_user else "",
+                f"最近实质Agent回复：{recent_assistant}" if recent_assistant else "",
+                f"客户最新短消息：{pure_user_text}",
+            ] if part
+        )
+    else:
+        search_query = pure_user_text
+
+    if not (latest_is_low_info or has_fallback_noise):
+        return search_query, "", {
+            "latest_is_low_info": str(latest_is_low_info),
+            "has_fallback_noise": str(has_fallback_noise),
+            "recent_user": recent_user,
+            "recent_assistant": recent_assistant,
+        }
+
+    annotated_context = format_context_for_interpretation(history_messages)
+    instruction = (
+        "【上下文理解提示】客户最新消息可能是短句、符号、追问、确认、质疑或纠偏。"
+        "不要孤立理解客户最新消息，请结合最近聊天记录判断其真实意图，并优先回应最近的有效业务上下文。"
+        "标注为“系统占位”或“系统兜底”的消息只代表 OCR/VLM 未识别或系统兜底话术，除非客户明确回应它，否则不要把它当成业务问题。"
+        "如果客户像是在同意上一条提议，请继续上一条提议；如果像是在质疑或不满上一条回复，请先解释、纠偏或致歉；如果是在追问，请围绕最近有效话题回答。\n"
+        f"最近实质客户消息：{recent_user or '无'}\n"
+        f"最近实质Agent回复：{recent_assistant or '无'}\n"
+        f"最近上下文标注：\n{annotated_context or '无'}"
+    )
+    return search_query, instruction, {
+        "latest_is_low_info": str(latest_is_low_info),
+        "has_fallback_noise": str(has_fallback_noise),
+        "recent_user": recent_user,
+        "recent_assistant": recent_assistant,
+    }
 
 
 def build_knowledge_context(search_payload: dict[str, Any]) -> str:
@@ -336,15 +459,7 @@ def run_volc_knowledge_chat(
     contact_context: str = "",
 ) -> tuple[str, dict[str, Any]]:
     cfg = load_volc_config_from_env()
-    
-    # 低价值短语直接拦截检索，压榨速度极限
-    if is_greeting_or_short(pure_user_text):
-        search_payload = {}
-        knowledge_context = ""
-    else:
-        search_payload = search_knowledge(pure_user_text, cfg)
-        knowledge_context = build_knowledge_context(search_payload)
-    
+
     # 从数据库提取历史记录，并截取最近 MAX_HISTORY_TURNS 轮
     try:
         db_messages = get_session_messages(session_id)
@@ -357,6 +472,24 @@ def run_volc_knowledge_chat(
     except Exception:
         # 兼容未接入数据库的错误情况
         history = []
+
+    context_search_query, context_instruction, context_meta = build_context_bridge(
+        pure_user_text,
+        history,
+    )
+
+    # 只有纯寒暄/感谢跳过检索；短句、符号、追问等用上下文桥接后的 query 检索。
+    if is_pure_social_phrase(pure_user_text):
+        search_payload = {}
+        knowledge_context = ""
+        search_query = ""
+        search_skipped_reason = "pure_social_phrase"
+        context_instruction = ""
+    else:
+        search_query = context_search_query
+        search_payload = search_knowledge(search_query, cfg)
+        knowledge_context = build_knowledge_context(search_payload)
+        search_skipped_reason = ""
     
     # 彻底拆分系统规则、知识库检索内容，把变动部分放在后面，确保深度命中 Prefix Caching
     messages = [
@@ -368,6 +501,8 @@ def run_volc_knowledge_chat(
         messages.append({"role": "system", "content": contact_context})
     if system_prompt_addition:
         messages.append({"role": "system", "content": system_prompt_addition})
+    if context_instruction:
+        messages.append({"role": "system", "content": context_instruction})
         
     # 拼接历史记录和最新一条消息
     messages.extend(history)
@@ -379,4 +514,7 @@ def run_volc_knowledge_chat(
         "provider": "volc_knowledge",
         "messages": messages,
         "search_payload": search_payload,
+        "search_query": search_query,
+        "search_skipped_reason": search_skipped_reason,
+        "context_bridge": context_meta,
     }
