@@ -286,7 +286,15 @@ def sanitize_reply_text(text: str) -> str:
     cleaned = re.sub(r"title[:：]?[^\n]*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\n{2,}", "\n", cleaned)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
-    return cleaned.strip()
+    cleaned = cleaned.strip()
+    
+    # 防系统提示词泄漏检测
+    leak_keywords = ["系统提示", "称呼规则", "HANDOFF 规则", "代聊微信联系人", "系统提供的联系人名", "当前实际时间是"]
+    for kw in leak_keywords:
+        if kw in cleaned:
+            return "收到～"
+            
+    return cleaned
 
 
 def chat_completion(messages: list[dict[str, Any]], cfg: dict[str, Any]) -> str:
@@ -321,7 +329,8 @@ MAX_HISTORY_TURNS = 5  # 保留最近5轮对话（10条消息）
 def run_volc_knowledge_chat(
     *,
     pure_user_text: str,
-    wrapped_user_text: str,
+    user_message: str,
+    system_prompt_addition: str,
     contact_name: str,
     session_id: str,
     contact_context: str = "",
@@ -357,10 +366,12 @@ def run_volc_knowledge_chat(
         messages.append({"role": "system", "content": knowledge_context})
     if contact_context:
         messages.append({"role": "system", "content": contact_context})
+    if system_prompt_addition:
+        messages.append({"role": "system", "content": system_prompt_addition})
         
     # 拼接历史记录和最新一条消息
     messages.extend(history)
-    messages.append({"role": "user", "content": wrapped_user_text})
+    messages.append({"role": "user", "content": user_message})
     
     reply = chat_completion(messages, cfg)
     

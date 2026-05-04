@@ -522,17 +522,24 @@ echo $! > {pid_file}
 echo "$(date '+%Y-%m-%d %H:%M:%S %z') INFO [admin.restart] restarted; new_pid=$(cat {pid_file})" >> {log_file}
 """
 
-def _build_user_prompt(contact_name: str, ocr_text: str = "", current_status: str = "auto", contact_context: str = "") -> Tuple[str, str]:
+def _build_user_prompt(contact_name: str, ocr_text: str = "", current_status: str = "auto") -> Tuple[str, str, str]:
     """构建发给智能体的 user prompt。
 
-    - 有 ocr_text 时（VLM 提取成功或客户端本地 OCR）：将客户最新消息拼入 prompt。
-    - 无 ocr_text 时（VLM 提取失败的兜底）：使用占位描述。
+    返回:
+    - pure_user_text: 客户最新消息原文（用于存库）
+    - system_additions: 系统动态提示增补内容（如时间、接管规则等）
+    - final_user_text: 真正包装后的 user 消息
     """
     name = (contact_name or "").strip() or "客户"
     text = (ocr_text or "").strip()
     current_time = get_current_time_str()
+    
+    # 过滤语音秒数等无意义文本（例如：4" 或 12'）
+    if re.match(r"^\d+[\"\'”’秒]$", text):
+        text = ""
+
     has_text = bool(text)
-    pure_text = text if has_text else "[用户上传了一张聊天截图]"
+    pure_text = text if has_text else "[用户上传了一张聊天截图或发了一条语音]"
 
     receptionist_rule = ""
     if current_status == "handoff_requested":
@@ -546,19 +553,17 @@ def _build_user_prompt(contact_name: str, ocr_text: str = "", current_status: st
         message_section = f"代聊微信联系人「{name}」。对方刚刚发来的最新消息：\n\n{text}"
     else:
         message_section = (
-            f"当前微信会话联系人是「{name}」。用户上传了一张聊天截图，但服务端未能拿到具体聊天文字。\n"
-            "请作为旅游定制顾问，直接给出一句简短的回复建议。"
+            f"当前微信会话联系人是「{name}」。用户发了一条语音或图片，但系统未能读取到文字内容。\n"
+            "请作为旅游定制顾问，给出一句简短自然的话术建议（如：'您好，我刚刚没听清/没看清，能麻烦您再发一遍或者打字告诉我吗？'），切忌生硬。"
         )
 
-    wrapped_text = (
+    system_additions = (
         f'（系统提示：当前实际时间是 {current_time}。注意：仅在第一轮对话或主动打招呼时才进行时间问候，在后续连续的对话中直接回答用户的问题，绝对不要重复问候！你在问候客户时必须以此为准判断今天是星期几，绝对不要参考下方文本中可能出现的旧时间标签（如"周一16:40"等是微信界面上旧消息的时间戳，不代表当前时间）。{time_extra}\n'
         f'【称呼规则】如果确实需要称呼客户，只能使用系统提供的联系人名「{name}」；但【绝对不要】在每条消息开头加"你好"、"晚上好"等问候语，更不要重复称呼客户姓名。这是连续对话，请开门见山直接回答客户问题。不要使用聊天记录或 OCR 文本中出现的名字。因为 OCR 识别存在同音字误差（如索被识别为素），聊天记录中的名字不可靠，以系统提供的联系人名为唯一准确来源。\n'
         "【HANDOFF 规则】在以下两种情况下，才可在回复末尾加上 [HANDOFF] 标记：1) 客户在本轮消息中明确表达了要进行【最终方案确定】、【要求核算最终报价】或【准备下单打款】的意图（例如'算一下报价吧'、'方案确定了'、'怎么付款'）；2) 虽然客户没有直接说'报价'或'下单'，但从对话上下文判断客户对当前的行程方案已经完全满意并确认，表现出最终的决策倾向（例如'就按这个定'、'确定了，算下多少钱'）。如果客户只是在初步讨论方案、要一个大概的行程、询问价格估算、或者你自己还在完善方案细节，**绝对不要**加 [HANDOFF]。触发 [HANDOFF] 时，你的回复**必须是一句确认性的第一人称过渡话术**（例如'好的，我这就为您核算最终的报价并整理确认方案～'），**绝对不能是提问句**，也绝对不能说'转交给人工'或'转交给定制师'，因为你本身就是这位专属的定制师小鹿。）\n\n"
         f"{receptionist_rule}"
-        f"{contact_context + chr(10) if contact_context else ''}"
-        f"{message_section}"
     )
-    return pure_text, wrapped_text
+    return pure_text, system_additions, message_section
 
 
 
@@ -885,8 +890,8 @@ async def wechat_chat(
             "reply_text": "",
         }
 
-    # 统一构建 prompt：ocr_text 为空时自动降级为截图兜底描述
-    pure_user_text, wrapped_user_text = _build_user_prompt(contact_name, ocr_text or "", current_status, contact_context)
+    # 统一构建 prompt：ocr_text 为空时自动降级为兜底描述
+    pure_user_text, system_prompt_addition, final_user_text = _build_user_prompt(contact_name, ocr_text or "", current_status)
 
 
     if _should_request_handoff(pure_user_text, session_id):
@@ -928,7 +933,7 @@ async def wechat_chat(
                 region=region,
                 bot_app_key=app_key,
                 session_id=session_id,
-                user_text=wrapped_user_text,
+                user_text=f"{system_prompt_addition}\n{final_user_text}",
             )
             messages = [
                 {"role": "user", "text": pure_user_text},
@@ -938,7 +943,8 @@ async def wechat_chat(
             reply_text, debug_payload = await asyncio.to_thread(
                 run_volc_knowledge_chat,
                 pure_user_text=pure_user_text,
-                wrapped_user_text=wrapped_user_text,
+                user_message=final_user_text,
+                system_prompt_addition=system_prompt_addition,
                 contact_name=contact_name,
                 session_id=session_id,
                 contact_context=contact_context,
@@ -1282,12 +1288,40 @@ async def api_generate_agent_continuation(
 ):
     try:
         reply_text, session = await _generate_agent_continuation(session_id, payload.limit)
-        logger.info(
-            "管理员 %s 触发 Agent 继续出方案: session_id=%s contact=%s",
-            username,
-            session_id,
-            session.get("contact_name"),
-        )
+        contact_name = session.get("contact_name") or "未知客户"
+        agent_id = session.get("agent_id")
+
+        if reply_text:
+            # 自动切换到“Agent 接管”模式
+            database.update_session_status(session_id, "auto")
+
+            # 将生成的方案写入对话历史
+            database.save_message(session_id, contact_name, "assistant", reply_text, agent_id=agent_id)
+
+            # 调用主动外发模块发送方案
+            task = database.create_outbound_task(
+                agent_id=agent_id,
+                session_id=session_id,
+                contact_name=contact_name,
+                search_keyword=contact_name,
+                message=reply_text,
+                auto_send=True,
+            )
+            logger.info(
+                "管理员 %s 触发 Agent 继续出方案并自动创建外发任务: session_id=%s contact=%s task_id=%s",
+                username,
+                session_id,
+                contact_name,
+                task.get("id"),
+            )
+        else:
+            logger.info(
+                "管理员 %s 触发 Agent 继续出方案，但生成为空: session_id=%s contact=%s",
+                username,
+                session_id,
+                contact_name,
+            )
+
         return {
             "ok": True,
             "status": "auto",
