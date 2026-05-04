@@ -263,6 +263,12 @@
                                 {{ statusLabel(session.status) }}
                             </span>
                             <span class="text-xs text-slate-400 whitespace-nowrap">{{ formatTime(session.updated_at) }}</span>
+                            <button v-if="currentSession && currentSession.session_id !== session.session_id"
+                                    @click.stop="mergeSessionInto(session.session_id, currentSession.session_id)"
+                                    class="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-indigo-500 transition-all p-1"
+                                    :title="`合并到当前选中的会话（${currentSession.contact_name}）`">
+                                <i class="fa-solid fa-code-merge text-xs"></i>
+                            </button>
                             <button @click.stop="deleteSession(session.session_id)" 
                                     class="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-rose-500 transition-all p-1"
                                     title="清除会话">
@@ -1739,6 +1745,56 @@
                     });
                 };
 
+                const isMergingSessions = ref(false);
+
+                const mergeSessionInto = async (sourceSessionId, targetSessionId) => {
+                    if (!sourceSessionId || !targetSessionId || sourceSessionId === targetSessionId) return;
+                    // 找到 source 和 target 的名称用于提示
+                    const sourceSession = sessions.value.find(s => s.session_id === sourceSessionId);
+                    const targetSession = sessions.value.find(s => s.session_id === targetSessionId);
+                    const sourceName = sourceSession?.contact_name || sourceSessionId;
+                    const targetName = targetSession?.contact_name || targetSessionId;
+                    if (!confirm(`确定要将「${sourceName}」（${sourceSession?.msg_count || 0} 条消息）的所有聊天记录合并到「${targetName}」中吗？\n\n合并后将自动更新用户画像和联系人长期记忆。\n此操作不可恢复。`)) return;
+
+                    isMergingSessions.value = true;
+                    try {
+                        const res = await fetch('/api/admin/sessions/merge', {
+                            method: 'POST',
+                            headers: {
+                                ...getAuthHeaders(),
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                source_session_id: sourceSessionId,
+                                target_session_id: targetSessionId
+                            })
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if (res.ok && data.ok) {
+                            alert(`合并成功！已将「${sourceName}」的 ${data.result?.migrated_messages || 0} 条消息迁移到「${targetName}」。`);
+                            removeSessionSummaryCache(sourceSessionId);
+                            removeSessionSummaryCache(targetSessionId);
+                            await fetchSessions();
+                            // 刷新当前选中的会话详情
+                            if (currentSession.value?.session_id === targetSessionId) {
+                                const matched = sessions.value.find(s => s.session_id === targetSessionId);
+                                if (matched) {
+                                    await selectSession(matched);
+                                }
+                            }
+                        } else if (res.status === 401) {
+                            triggerLogin();
+                        } else {
+                            alert(data.error || '合并失败');
+                        }
+                    } catch (e) {
+                        console.error('合并会话失败', e);
+                        alert('合并会话请求失败');
+                    } finally {
+                        isMergingSessions.value = false;
+                    }
+                };
+
                 const deleteSession = async (sid) => {
                     if (!confirm('确定要清除该客户的所有对话记录吗？此操作不可恢复。')) return;
                     try {
@@ -2086,6 +2142,8 @@
                     mergeContactMemory,
                     deleteSession,
                     deleteMessage,
+                    mergeSessionInto,
+                    isMergingSessions,
                     setSessionStatus,
                     statusLabel,
                     statusBadgeClass

@@ -1206,6 +1206,282 @@ def mark_remark_applied(session_id: str, applied_remark: str | None = None) -> O
     updated["status"] = normalize_session_status(updated.get("status"))
     return updated
 
+def merge_sessions(
+    source_session_id: str,
+    target_session_id: str,
+    agent_id: int | None = None,
+) -> Dict[str, Any]:
+    """将 source 会话的所有消息和元数据物理合并到 target 会话中，然后删除 source 会话。
+
+    合并逻辑：
+    1. 消息：source 的所有 messages 搬到 target（按 created_at 自然排序）
+    2. 别名：source 的所有别名合并进 target 和 target 的 contact
+    3. 画像：如果 target 没有画像但 source 有，继承 source 的画像
+    4. 联系人：如果 source 关联了不同 contact，将其记忆合并到 target 的 contact
+    5. 状态：保留 target 的 status（如果 target 是 auto 且 source 有人工接管等状态，继承 source 的）
+    6. 外发任务：将 source 的 outbound_tasks 关联到 target
+    7. 删除 source 会话
+    """
+    if source_session_id == target_session_id:
+        raise ValueError("不能将会话合并到自己")
+
+    now_bj = get_beijing_time()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        # 查询两个会话的信息
+        cursor.execute("SELECT * FROM sessions WHERE session_id = ?", (source_session_id,))
+        source_row = cursor.fetchone()
+        if not source_row:
+            raise ValueError(f"源会话不存在: {source_session_id}")
+
+        cursor.execute("SELECT * FROM sessions WHERE session_id = ?", (target_session_id,))
+        target_row = cursor.fetchone()
+        if not target_row:
+            raise ValueError(f"目标会话不存在: {target_session_id}")
+
+        # --- 1. 迁移所有消息 ---
+        cursor.execute(
+            "UPDATE messages SET session_id = ? WHERE session_id = ?",
+            (target_session_id, source_session_id),
+        )
+        migrated_count = cursor.rowcount
+
+        # --- 2. 合并别名 ---
+        source_aliases = _json_list(source_row["contact_aliases_json"])
+        target_aliases = _json_list(target_row["contact_aliases_json"])
+        # 把 source 的 contact_name 也加入别名
+        source_contact_name = canonicalize_contact_name(source_row["contact_name"], default="")
+        if source_contact_name and source_contact_name not in {"客户", "当前联系人"}:
+            if source_contact_name not in source_aliases:
+                source_aliases.append(source_contact_name)
+
+        merged_aliases = list(target_aliases)
+        for alias in source_aliases:
+            if alias and alias not in merged_aliases:
+                merged_aliases.append(alias)
+        cursor.execute(
+            "UPDATE sessions SET contact_aliases_json = ? WHERE session_id = ?",
+            (json.dumps(merged_aliases[-30:], ensure_ascii=False), target_session_id),
+        )
+
+        # --- 3. 合并画像 (profile_json) ---
+        target_profile = _json_dict(target_row["profile_json"])
+        source_profile = _json_dict(source_row["profile_json"])
+        if not target_profile and source_profile:
+            # target 没有画像但 source 有，直接继承
+            cursor.execute(
+                "UPDATE sessions SET profile_json = ? WHERE session_id = ?",
+                (json.dumps(source_profile, ensure_ascii=False), target_session_id),
+            )
+        elif target_profile and source_profile:
+            # 两个都有画像，补充 target 中缺失的字段
+            for key, value in source_profile.items():
+                if key not in target_profile or not _is_meaningful_profile_value(target_profile[key]):
+                    if _is_meaningful_profile_value(value):
+                        target_profile[key] = value
+            cursor.execute(
+                "UPDATE sessions SET profile_json = ? WHERE session_id = ?",
+                (json.dumps(target_profile, ensure_ascii=False), target_session_id),
+            )
+
+        # --- 4. 合并状态：如果 target 是 auto 且 source 有更高优先级状态，继承之 ---
+        target_status = normalize_session_status(target_row["status"])
+        source_status = normalize_session_status(source_row["status"])
+        status_priority = {"auto": 0, "handoff_requested": 1, "human_takeover": 2, "muted": 3}
+        if status_priority.get(source_status, 0) > status_priority.get(target_status, 0):
+            cursor.execute(
+                "UPDATE sessions SET status = ? WHERE session_id = ?",
+                (source_status, target_session_id),
+            )
+
+        # --- 5. 合并联系人 (Contact) ---
+        source_contact_id = source_row["contact_id"]
+        target_contact_id = target_row["contact_id"]
+
+        if source_contact_id and target_contact_id and int(source_contact_id) != int(target_contact_id):
+            # 两个会话绑定了不同的联系人，需要合并联系人记忆
+            cursor.execute("SELECT * FROM contacts WHERE id = ?", (source_contact_id,))
+            source_contact = cursor.fetchone()
+            cursor.execute("SELECT * FROM contacts WHERE id = ?", (target_contact_id,))
+            target_contact = cursor.fetchone()
+
+            if source_contact and target_contact:
+                # 合并联系人别名
+                src_c_aliases = _json_list(source_contact["aliases_json"])
+                tgt_c_aliases = _json_list(target_contact["aliases_json"])
+                src_primary = source_contact["primary_name"] or ""
+                if src_primary and src_primary not in src_c_aliases:
+                    src_c_aliases.append(src_primary)
+                merged_c_aliases = list(tgt_c_aliases)
+                for alias in src_c_aliases:
+                    if alias and alias not in merged_c_aliases:
+                        merged_c_aliases.append(alias)
+                cursor.execute(
+                    "UPDATE contacts SET aliases_json = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(merged_c_aliases[-50:], ensure_ascii=False), now_bj, target_contact_id),
+                )
+
+                # 合并联系人长期记忆 (memory_json)
+                src_memory = _json_dict(source_contact["memory_json"])
+                tgt_memory = _json_dict(target_contact["memory_json"])
+                if src_memory and not tgt_memory:
+                    cursor.execute(
+                        "UPDATE contacts SET memory_json = ?, updated_at = ? WHERE id = ?",
+                        (json.dumps(src_memory, ensure_ascii=False), now_bj, target_contact_id),
+                    )
+                elif src_memory and tgt_memory:
+                    # 合并 stable_profile
+                    for section in ("stable_profile", "dynamic_state"):
+                        src_section = src_memory.get(section) or {}
+                        tgt_section = tgt_memory.get(section) or {}
+                        for key, value in src_section.items():
+                            if key not in tgt_section:
+                                tgt_section[key] = value
+                        tgt_memory[section] = tgt_section
+                    # 合并 facts（去重）
+                    tgt_facts = list(tgt_memory.get("facts") or [])
+                    src_facts = list(src_memory.get("facts") or [])
+                    existing_values = {str(f.get("value", "")) for f in tgt_facts if isinstance(f, dict)}
+                    for fact in src_facts:
+                        if isinstance(fact, dict) and str(fact.get("value", "")) not in existing_values:
+                            tgt_facts.append(fact)
+                            existing_values.add(str(fact.get("value", "")))
+                    tgt_memory["facts"] = tgt_facts[-80:]
+                    tgt_memory["last_merged_at"] = now_bj
+                    cursor.execute(
+                        "UPDATE contacts SET memory_json = ?, updated_at = ? WHERE id = ?",
+                        (json.dumps(tgt_memory, ensure_ascii=False), now_bj, target_contact_id),
+                    )
+
+                # 合并人工补充资料 (manual_notes_json)
+                src_notes = _json_dict(source_contact["manual_notes_json"])
+                tgt_notes = _json_dict(target_contact["manual_notes_json"])
+                if src_notes and not tgt_notes:
+                    cursor.execute(
+                        "UPDATE contacts SET manual_notes_json = ?, updated_at = ? WHERE id = ?",
+                        (json.dumps(src_notes, ensure_ascii=False), now_bj, target_contact_id),
+                    )
+                elif src_notes and tgt_notes:
+                    for key, value in src_notes.items():
+                        if key not in tgt_notes:
+                            tgt_notes[key] = value
+                    cursor.execute(
+                        "UPDATE contacts SET manual_notes_json = ?, updated_at = ? WHERE id = ?",
+                        (json.dumps(tgt_notes, ensure_ascii=False), now_bj, target_contact_id),
+                    )
+
+                # 将指向 source_contact 的其他会话也指向 target_contact
+                cursor.execute(
+                    "UPDATE sessions SET contact_id = ? WHERE contact_id = ?",
+                    (target_contact_id, source_contact_id),
+                )
+                # 将指向 source_contact 的外发任务也指向 target session
+                cursor.execute(
+                    "UPDATE outbound_tasks SET session_id = ? WHERE session_id = ?",
+                    (target_session_id, source_session_id),
+                )
+                # 删除 source contact（已无引用）
+                cursor.execute(
+                    "SELECT COUNT(*) AS cnt FROM sessions WHERE contact_id = ?",
+                    (source_contact_id,),
+                )
+                if cursor.fetchone()["cnt"] == 0:
+                    cursor.execute("DELETE FROM contacts WHERE id = ?", (source_contact_id,))
+
+        elif source_contact_id and not target_contact_id:
+            # target 没有 contact 但 source 有，把 contact 让给 target
+            cursor.execute(
+                "UPDATE sessions SET contact_id = ? WHERE session_id = ?",
+                (source_contact_id, target_session_id),
+            )
+
+        # --- 6. 外发任务迁移 ---
+        cursor.execute(
+            "UPDATE outbound_tasks SET session_id = ? WHERE session_id = ?",
+            (target_session_id, source_session_id),
+        )
+
+        # --- 7. 更新 target 的时间戳 ---
+        cursor.execute(
+            "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+            (now_bj, target_session_id),
+        )
+
+        # --- 8. 删除 source 会话 ---
+        cursor.execute("DELETE FROM sessions WHERE session_id = ?", (source_session_id,))
+
+        conn.commit()
+
+        # 返回合并后的 target 会话信息
+        result = {
+            "target_session_id": target_session_id,
+            "source_session_id": source_session_id,
+            "migrated_messages": migrated_count,
+            "merged_aliases": merged_aliases,
+        }
+        return result
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def find_existing_session_for_contact(
+    contact_name: str,
+    exclude_session_id: str,
+    agent_id: int | None = None,
+) -> str | None:
+    """根据联系人名在已有会话中查找匹配的 session_id（排除指定的当前会话）。
+    用于 VLM 纠正名称后自动触发合并。
+    """
+    canonical_name = canonicalize_contact_name(contact_name, default="")
+    if not canonical_name or canonical_name in {"客户", "当前联系人"}:
+        return None
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        if agent_id is None:
+            cursor.execute(
+                """
+                SELECT s.session_id, s.contact_name, s.contact_aliases_json, s.suggested_remark,
+                       c.preferred_name AS contact_preferred_name
+                FROM sessions s
+                LEFT JOIN contacts c ON c.id = s.contact_id
+                WHERE s.agent_id IS NULL
+                ORDER BY s.updated_at DESC
+                """
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT s.session_id, s.contact_name, s.contact_aliases_json, s.suggested_remark,
+                       c.preferred_name AS contact_preferred_name
+                FROM sessions s
+                LEFT JOIN contacts c ON c.id = s.contact_id
+                WHERE s.agent_id = ?
+                ORDER BY s.updated_at DESC
+                """,
+                (agent_id,),
+            )
+        for row in cursor.fetchall():
+            if row["session_id"] == exclude_session_id:
+                continue
+            known_names = [
+                row["contact_name"],
+                row["suggested_remark"],
+                row["contact_preferred_name"],
+                *_json_list(row["contact_aliases_json"]),
+            ]
+            if any(canonicalize_contact_name(name, default="") == canonical_name for name in known_names):
+                return row["session_id"]
+        return None
+    finally:
+        conn.close()
+
+
 def delete_session(session_id: str, agent_id: int | None = None):
     conn = get_connection()
     cursor = conn.cursor()

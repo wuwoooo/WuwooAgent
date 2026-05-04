@@ -612,7 +612,7 @@ import base64
 
 def _run_vision_ocr(image_bytes: bytes) -> dict[str, Any]:
     api_key = os.environ.get("ARK_VISION_API_KEY", "ark-0773e8a1-0054-4243-83b9-b1a4f06b67da-d677d")
-    model_id = os.environ.get("ARK_VISION_MODEL_ID", "doubao-seed-2-0-pro-260215")
+    model_id = os.environ.get("ARK_VISION_MODEL_ID", "doubao-seed-2-0-mini-260215")
     base_url = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
     
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
@@ -636,7 +636,8 @@ def _run_vision_ocr(image_bytes: bytes) -> dict[str, Any]:
                 ]
             }
         ],
-        "temperature": 0.1
+        "temperature": 0.1,
+        "max_tokens": 2048
     }
     
     headers = {
@@ -645,7 +646,7 @@ def _run_vision_ocr(image_bytes: bytes) -> dict[str, Any]:
     }
     
     try:
-        response = requests.post(base_url, headers=headers, json=payload, timeout=40)
+        response = requests.post(base_url, headers=headers, json=payload, timeout=30)
         if response.status_code == 200:
             result = response.json()
             content = result["choices"][0]["message"]["content"].strip()
@@ -789,6 +790,40 @@ async def wechat_chat(
                 database.update_contact_preferred_name(contact_id, vlm_canonical, agent_id=agent_id)
                 contact_name = vlm_canonical
                 contact["preferred_name"] = vlm_canonical
+
+                # 自动合并：VLM 纠正名称后，检查是否已有同名会话可合并
+                try:
+                    existing_target_sid = database.find_existing_session_for_contact(
+                        vlm_canonical, exclude_session_id=session_id, agent_id=agent_id
+                    )
+                    if existing_target_sid and existing_target_sid != session_id:
+                        merge_result = database.merge_sessions(
+                            source_session_id=session_id,
+                            target_session_id=existing_target_sid,
+                            agent_id=agent_id,
+                        )
+                        logger.info(
+                            "VLM 纠正后自动合并会话: source=%s → target=%s 迁移消息=%d 条",
+                            session_id,
+                            existing_target_sid,
+                            merge_result.get("migrated_messages", 0),
+                        )
+                        # 切换到合并后的目标会话
+                        session_id = existing_target_sid
+                        try:
+                            current_status = database.get_session_status(session_id)
+                        except Exception:
+                            pass
+                        # 重新解析合并后的联系人信息
+                        try:
+                            contact = database.resolve_contact(session_id, vlm_canonical, agent_id=agent_id)
+                            contact_id = contact.get("id") if contact else contact_id
+                            session_profile = database.get_session_profile(session_id)
+                            contact_context = _format_contact_context_for_prompt(contact, session_profile)
+                        except Exception as merge_e:
+                            logger.warning("自动合并后重新解析联系人失败: %s", merge_e)
+                except Exception as e:
+                    logger.warning("VLM 纠正后自动合并会话失败（不影响主流程）: session_id=%s error=%s", session_id, e)
 
         # 人工纠错称呼或 VLM 自动纠错后：如果联系人设置了 preferred_name，优先使用它
         if contact and contact.get("preferred_name"):
@@ -1267,6 +1302,57 @@ async def api_generate_agent_continuation(
     except Exception as e:
         logger.exception("Agent 继续出方案失败: session_id=%s", session_id)
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
+class MergeSessionsRequest(BaseModel):
+    source_session_id: str
+    target_session_id: str
+
+
+@app.post("/api/admin/sessions/merge")
+async def api_merge_sessions(payload: MergeSessionsRequest, username: str = Depends(verify_admin)):
+    """手动合并两个会话：将 source 的所有消息和元数据合并到 target，然后删除 source。"""
+    try:
+        result = database.merge_sessions(
+            source_session_id=payload.source_session_id,
+            target_session_id=payload.target_session_id,
+        )
+        logger.info(
+            "管理员 %s 手动合并会话: source=%s → target=%s 迁移消息=%d 条",
+            username,
+            payload.source_session_id,
+            payload.target_session_id,
+            result.get("migrated_messages", 0),
+        )
+        # 合并完成后触发用户画像和联系人记忆的重新提取
+        target_session = database.get_session(payload.target_session_id)
+        target_contact = database.get_contact_for_session(payload.target_session_id) if target_session else None
+        if target_session:
+            try:
+                profile = await async_extract_profile(payload.target_session_id)
+                if target_contact:
+                    await async_extract_contact_memory(
+                        payload.target_session_id, contact_id=int(target_contact["id"])
+                    )
+                    target_contact = database.get_contact(int(target_contact["id"]))
+            except Exception as e:
+                logger.warning(
+                    "合并后自动更新画像/记忆失败（不影响合并结果）: target=%s error=%s",
+                    payload.target_session_id,
+                    e,
+                )
+
+        return {
+            "ok": True,
+            "result": result,
+            "session": target_session,
+            "contact": target_contact,
+        }
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"ok": False, "error": str(e)})
+    except Exception as e:
+        logger.exception("手动合并会话失败: source=%s target=%s", payload.source_session_id, payload.target_session_id)
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
 
 @app.delete("/api/admin/sessions/{session_id}")
 async def api_delete_session(session_id: str, username: str = Depends(verify_admin)):
