@@ -750,15 +750,16 @@ async def wechat_chat(
         extracted_data = await asyncio.to_thread(_run_vision_ocr, image_bytes)
 
         if extracted_data.get("vlm_error"):
-            return JSONResponse(
-                status_code=503,
-                content={
-                    "ok": False,
-                    "error": "VLM 识别失败，为避免误回复已停止本轮自动发送",
-                    "messages": [],
-                    "reply_text": "",
-                },
-            )
+            return {
+                "ok": True,
+                "ignored": True,
+                "silenced": True,
+                "retryable": True,
+                "retry_after_ms": 2500,
+                "reason": "vlm_error",
+                "messages": [{"role": "assistant", "text": ""}],
+                "reply_text": "",
+            }
         
         if extracted_data.get("is_group_chat"):
             logger.info("VLM 识别出这是群聊，返回主屏信号并停止处理")
@@ -803,6 +804,7 @@ async def wechat_chat(
             return {
                 "ok": True,
                 "ignored": True,
+                "silenced": True,
                 "reason": "non_chat_page",
                 "messages": [{"role": "assistant", "text": ""}],
                 "reply_text": "",
@@ -855,6 +857,7 @@ async def wechat_chat(
                 return {
                     "ok": True,
                     "ignored": True,
+                    "silenced": True,
                     "reason": "vlm_no_new_client_message",
                     "messages": [{"role": "assistant", "text": ""}],
                     "reply_text": "",
@@ -963,6 +966,7 @@ async def wechat_chat(
         return {
             "ok": True,
             "ignored": True,
+            "silenced": True,
             "reason": "notification_noise",
             "current_status": current_status,
             "messages": [{"role": "assistant", "text": ""}],
@@ -980,6 +984,7 @@ async def wechat_chat(
         return {
             "ok": True,
             "ignored": True,
+            "silenced": True,
             "reason": "contact_name_noise",
             "current_status": current_status,
             "messages": [{"role": "assistant", "text": ""}],

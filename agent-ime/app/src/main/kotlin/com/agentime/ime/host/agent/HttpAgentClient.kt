@@ -140,6 +140,8 @@ class HttpAgentClient(private val context: Context) : AgentClient {
         val reason = json?.optString("reason", "")?.trim().orEmpty()
         val currentStatus = json?.optString("current_status", "")?.trim().orEmpty()
         val isGroupChat = json?.optBoolean("is_group_chat", false) ?: false
+        val retryable = json?.optBoolean("retryable", false) ?: false
+        val retryAfterMs = json?.optLong("retry_after_ms", 0L) ?: 0L
         return AgentReply(
             replyText = replyText,
             raw = text,
@@ -147,6 +149,8 @@ class HttpAgentClient(private val context: Context) : AgentClient {
             reason = reason,
             currentStatus = currentStatus,
             isGroupChat = isGroupChat,
+            retryable = retryable,
+            retryAfterMs = retryAfterMs,
         )
     }
 

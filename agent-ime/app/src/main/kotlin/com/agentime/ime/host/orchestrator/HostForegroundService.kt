@@ -425,7 +425,8 @@ class HostForegroundService : Service() {
     private fun scanConversationListAndRun(scanSource: String) {
         val bypassCoolingDown =
             scanSource.contains("urgent_chat_followup") ||
-                scanSource.contains("post_send_back_followup")
+                scanSource.contains("post_send_back_followup") ||
+                scanSource.contains("vlm_retry_followup")
         if (running.get() || (!bypassCoolingDown && isBusyOrCoolingDown())) {
             logger.log(TAG, "会话列表截图分析跳过：当前正忙或冷却中")
             return
@@ -1040,6 +1041,10 @@ class HostForegroundService : Service() {
                 if (reply.silenced) {
                     logger.log(TAG, "后端会话处于静音状态，跳过本轮注入: status=${reply.currentStatus} reason=${reply.reason}")
                     moveState(HostState.SENT, "后端会话静音，已跳过: ${reply.currentStatus.ifBlank { reply.reason }}")
+                    if (reply.retryable && shouldScheduleVlmRetry(inboundSignature)) {
+                        scheduleVlmRetryFollowupScan(reply.retryAfterMs)
+                        return
+                    }
                     returnToConversationList("后端会话静音或人工接管")
                     return
                 }
@@ -2267,6 +2272,33 @@ class HostForegroundService : Service() {
         mainHandler.postDelayed({
             io.execute { scanConversationListAndRun(scanSource = "urgent_chat_followup") }
         }, URGENT_CHAT_FOLLOWUP_DELAY_MS)
+    }
+
+    private fun shouldScheduleVlmRetry(inboundSignature: String): Boolean {
+        val signature = inboundSignature.ifBlank { "blank" }
+        val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
+        val lastSignature = prefs.getString("last_vlm_retry_signature", "").orEmpty()
+        val retryCount = if (lastSignature == signature) prefs.getInt("last_vlm_retry_count", 0) else 0
+        if (retryCount >= 1) {
+            logger.log(TAG, "VLM 识别失败已重试过一次，跳过继续重试: signature=${signature.take(60)}")
+            return false
+        }
+        prefs.edit()
+            .putString("last_vlm_retry_signature", signature)
+            .putInt("last_vlm_retry_count", retryCount + 1)
+            .apply()
+        return true
+    }
+
+    private fun scheduleVlmRetryFollowupScan(retryAfterMs: Long) {
+        val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("runtime_enabled", false)) return
+        if (prefs.getString("execution_mode", "auto").orEmpty() != "auto") return
+        val delay = retryAfterMs.takeIf { it in 1000L..10000L } ?: 2500L
+        logger.log(TAG, "VLM 识别失败但可重试，已安排 ${delay}ms 后补扫一次")
+        mainHandler.postDelayed({
+            io.execute { scanConversationListAndRun(scanSource = "vlm_retry_followup") }
+        }, delay)
     }
 
     private fun detectFreshInboundAfterSend(

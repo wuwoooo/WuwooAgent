@@ -7,6 +7,8 @@ data class AgentReply(
     val reason: String = "",
     val currentStatus: String = "",
     val isGroupChat: Boolean = false,
+    val retryable: Boolean = false,
+    val retryAfterMs: Long = 0L,
 )
 
 interface AgentClient {
