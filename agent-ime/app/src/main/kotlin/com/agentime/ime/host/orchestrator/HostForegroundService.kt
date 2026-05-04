@@ -108,12 +108,13 @@ class HostForegroundService : Service() {
                     SessionIdentity.buildSessionId(this@HostForegroundService, contactName)
                 }
                 val triggerTime = intent.getLongExtra("trigger_time", 0L)
+                val isExplicit = intent.getBooleanExtra("is_explicit_trigger", false)
                 io.execute {
                     if (triggerTime > 0 && System.currentTimeMillis() - triggerTime > 15000L) {
                         logger.log(TAG, "忽略超时的 runOnce 请求: $sessionId/$contactName (延迟=${System.currentTimeMillis() - triggerTime}ms)")
                         return@execute
                     }
-                    runOnce(sessionId, contactName)
+                    runOnce(sessionId, contactName, isExplicitTrigger = isExplicit)
                 }
             }
             ACTION_RUN_OUTBOUND_TASK -> io.execute {
@@ -385,6 +386,13 @@ class HostForegroundService : Service() {
         if (!prefs.getBoolean("runtime_enabled", false)) return
         if (prefs.getString("execution_mode", "auto").orEmpty() != "auto") return
 
+        val lastNotifyTs = prefs.getLong("last_notify_timestamp", 0L)
+        val timeSinceNotify = System.currentTimeMillis() - lastNotifyTs
+        if (timeSinceNotify < 6000L) {
+            logger.log(TAG, "会话列表截图分析跳过：近期 (${timeSinceNotify}ms前) 有通知触发，避让通知栏自动打开会话的过程")
+            return
+        }
+
         val capture = CaptureProviderFactory.create(this)
         val ocr = FallbackOcrProvider(LocalOcrProvider(this), RemoteOcrProvider(this))
         try {
@@ -643,9 +651,7 @@ class HostForegroundService : Service() {
             cleanupIntermediateOcrCrops(postClickCap, inboundCandidate.path)
             logger.log(TAG, "点击进入聊天后最新客户消息预判: ${latestInbound.take(120)}")
             if (latestInbound.isBlank()) {
-                logger.log(TAG, "点击进入聊天后，未提取到有效客户新消息，取消本轮")
-                returnToConversationList("点击进入后未提取到有效客户新消息")
-                return
+                logger.log(TAG, "点击进入聊天后，未提取到有效文本，但由于是红点触发，将强行交由大模型看图处理")
             }
             if (ConversationTextExtractor.looksLikeVoiceTranscriptionUiOnly(latestInbound)) {
                 logger.log(TAG, "点击进入聊天后，提取文本疑似语音消息 UI，取消普通文字回复: ${latestInbound.take(80)}")
@@ -670,6 +676,7 @@ class HostForegroundService : Service() {
                 preOcrText = postClickOcr,
                 preLatestInbound = latestInbound,
                 preInboundSignature = inboundSignature,
+                isExplicitTrigger = true,
             )
         } catch (e: Exception) {
             val msg = e.message.orEmpty()
@@ -723,6 +730,7 @@ class HostForegroundService : Service() {
         preOcrText: String? = null,
         preLatestInbound: String? = null,
         preInboundSignature: String? = null,
+        isExplicitTrigger: Boolean = false,
     ) {
         if (!running.compareAndSet(false, true)) {
             logger.log(TAG, "已有任务在执行中，忽略新的 runOnce: $sessionId/$contactName")
@@ -888,7 +896,13 @@ class HostForegroundService : Service() {
                 logger.log(TAG, "截图质量未达 OCR 阈值，但已识别出文本，继续后续流程")
             }
             logger.log(TAG, "提炼后的最新客户消息: ${latestInbound.take(200)}")
-            if (latestInbound.isBlank()) error("未能从 OCR 中提取出最新客户消息")
+            if (latestInbound.isBlank()) {
+                if (isExplicitTrigger) {
+                    logger.log(TAG, "虽然未能从 OCR 提取出文本，但由于是明确触发的新消息(通知或红点)，将交由大模型看图兜底处理")
+                } else {
+                    error("未能从 OCR 中提取出最新客户消息")
+                }
+            }
             if (ConversationTextExtractor.looksLikeVoiceTranscriptionUiOnly(latestInbound)) {
                 logger.log(TAG, "提炼结果疑似语音消息 UI（如扬声器残影+秒数），取消本轮普通文字回复: ${latestInbound.take(80)}")
                 returnToConversationList("最新消息疑似语音，等待转文字处理")
@@ -1682,6 +1696,14 @@ class HostForegroundService : Service() {
     private fun returnToConversationList(reason: String, scheduleFollowup: Boolean = true) {
         val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
         if (prefs.getString("execution_mode", "auto").orEmpty() != "auto") return
+        
+        val lastNotifyTs = prefs.getLong("last_notify_timestamp", 0L)
+        val timeSinceNotify = System.currentTimeMillis() - lastNotifyTs
+        if (timeSinceNotify < 6000L) {
+            logger.log(TAG, "跳过返回会话列表动作：近期 (${timeSinceNotify}ms前) 有通知触发，正处于会话打开/转场阶段，避让通知流，reason=$reason")
+            return
+        }
+
         Thread.sleep(500)
         val backOk = com.agentime.ime.host.automation.WechatAccessibilityService.clickBack()
         logger.log(TAG, "跳过当前会话后返回会话列表: reason=$reason result=$backOk")

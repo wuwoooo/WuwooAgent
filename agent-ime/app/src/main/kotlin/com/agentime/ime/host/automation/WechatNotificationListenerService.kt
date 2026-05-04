@@ -98,6 +98,7 @@ class WechatNotificationListenerService : NotificationListenerService() {
                 putExtra(HostForegroundService.EXTRA_SESSION_ID, sessionId)
                 putExtra(HostForegroundService.EXTRA_CONTACT_NAME, normalizedTitle)
                 putExtra("trigger_time", System.currentTimeMillis())
+                putExtra("is_explicit_trigger", true)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 startForegroundService(intent)
