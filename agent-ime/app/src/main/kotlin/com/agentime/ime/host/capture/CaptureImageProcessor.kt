@@ -79,12 +79,8 @@ object CaptureImageProcessor {
         val sinceLastOutboundCrop = chatCrop?.let(::createInboundSinceLastOutboundCrop)
         val hasInboundAfterLatestOutbound = sinceLastOutboundCrop?.let(::hasInboundSignalInCrop) ?: false
         val sinceLastOutboundCropPath = saveBitmapIfPresent(context, sinceLastOutboundCrop, outDir, fileName, "since_last_outbound")
-        val recentInboundClusterCrop = chatCrop?.let(::createRecentInboundClusterCrop)
-        val recentInboundClusterCropPath = saveBitmapIfPresent(context, recentInboundClusterCrop, outDir, fileName, "recent_inbound_cluster")
-        val leftMessageCrop = chatCrop?.let(::createLeftMessageCrop)
-        val leftMessageCropPath = saveBitmapIfPresent(context, leftMessageCrop, outDir, fileName, "leftmsg")
-        val recentLeftMessageCrop = leftMessageCrop?.let(::createRecentLeftMessageCrop)
-        val recentLeftMessageCropPath = saveBitmapIfPresent(context, recentLeftMessageCrop, outDir, fileName, "leftmsg_recent")
+        // VLM 引入后，以下裁剪图已不再需要（VLM 可直接理解完整截图）：
+        // - recentInboundClusterCrop、leftMessageCrop、recentLeftMessageCrop
         val latestInboundBubbleCrop = createLatestInboundBubbleCrop(bitmap)
         val latestInboundBubbleCropPath = saveBitmapIfPresent(context, latestInboundBubbleCrop, outDir, fileName, "leftmsg_latest_bubble")
         val latestInboundVoiceTranscriptionCrop = createLatestInboundVoiceTranscriptionCrop(bitmap)
@@ -96,9 +92,7 @@ object CaptureImageProcessor {
         titleCrop?.recycle()
         chatCrop?.recycle()
         sinceLastOutboundCrop?.recycle()
-        recentInboundClusterCrop?.recycle()
-        leftMessageCrop?.recycle()
-        recentLeftMessageCrop?.recycle()
+
         latestInboundBubbleCrop?.recycle()
         latestInboundVoiceTranscriptionCrop?.recycle()
         latestOutboundCrop?.recycle()
@@ -114,11 +108,8 @@ object CaptureImageProcessor {
             titleCropPath = titleCropPath,
             chatCropPath = chatCropPath,
             sinceLastOutboundCropPath = sinceLastOutboundCropPath,
-            recentInboundClusterCropPath = recentInboundClusterCropPath,
             latestVisibleMessageSide = latestVisibleMessageSide,
             hasInboundAfterLatestOutbound = hasInboundAfterLatestOutbound,
-            leftMessageCropPath = leftMessageCropPath,
-            recentLeftMessageCropPath = recentLeftMessageCropPath,
             latestInboundBubbleCropPath = latestInboundBubbleCropPath,
             latestInboundVoiceTranscriptionCropPath = latestInboundVoiceTranscriptionCropPath,
             latestInboundVoiceRedDot = latestInboundVoiceRedDot != null,

@@ -1268,10 +1268,10 @@ class HostForegroundService : Service() {
                 score = scoreInboundCandidate(res.text),
             )
         }
+        // VLM 引入后，仅保留 latestInboundBubble 的本地 OCR（用于去重签名），
+        // sinceLastOutbound 和 recentInboundCluster 的 OCR 已由 VLM 替代。
         val candidates = buildList {
             cap.latestInboundBubbleCropPath?.let { add("最新左侧气泡" to it) }
-            cap.sinceLastOutboundCropPath?.let { add("我方最后一条之后会话区" to it) }
-            cap.recentInboundClusterCropPath?.let { add("最近连续入站消息块" to it) }
         }
         val tierBuckets = linkedMapOf<Int, InboundCandidate>()
 
@@ -1658,9 +1658,6 @@ class HostForegroundService : Service() {
             cap.titleCropPath,
             cap.chatCropPath,
             cap.sinceLastOutboundCropPath,
-            cap.recentInboundClusterCropPath,
-            cap.leftMessageCropPath,
-            cap.recentLeftMessageCropPath,
             cap.latestInboundBubbleCropPath,
             cap.latestInboundVoiceTranscriptionCropPath,
         )
