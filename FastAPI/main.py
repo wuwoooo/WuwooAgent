@@ -685,7 +685,9 @@ async def wechat_chat(
     - is_human_reply：标识此条消息是否为真人客服手动发出的回复。
     """
     ocr_text = (ocr_text or "").strip()
+    client_ocr_text = ocr_text
     ocr_ok = bool(ocr_text)
+    ocr_source = "client_ocr" if ocr_ok else "empty"
     image_bytes: bytes | None = None
     if image is not None:
         image_bytes = await image.read()
@@ -710,9 +712,14 @@ async def wechat_chat(
         dest.write_bytes(image_bytes)
         
         vlm_contact_name = None
-        # 阶段一：用 VLM 做高级云端 OCR 提取
-        # 只要有图片，强制使用 VLM 提取，忽略本地传入的 ocr_text
-        logger.info(f"接收到截图，强制触发 VLM 视觉大模型提取: {safe_name}")
+        # 阶段一：用 VLM 做高级云端 OCR 提取；若 VLM 漏提取，回退客户端本地 OCR。
+        logger.info(
+            "接收到截图，触发 VLM 视觉大模型提取: file=%s session=%s contact=%s client_ocr_len=%d",
+            safe_name,
+            session_id,
+            contact_name,
+            len(client_ocr_text),
+        )
         extracted_data = await asyncio.to_thread(_run_vision_ocr, image_bytes)
         
         if extracted_data.get("is_group_chat"):
@@ -726,6 +733,24 @@ async def wechat_chat(
 
         extracted_msgs = extracted_data.get("messages", [])
         vlm_contact_name = extracted_data.get("contact_name")
+        if not isinstance(extracted_msgs, list):
+            logger.warning(
+                "VLM OCR messages 字段类型异常，按空列表处理: file=%s session=%s contact=%s type=%s",
+                safe_name,
+                session_id,
+                contact_name,
+                type(extracted_msgs).__name__,
+            )
+            extracted_msgs = []
+        logger.info(
+            "VLM OCR 原始结构: file=%s session=%s contact=%s vlm_contact=%s msg_count=%d data=%s",
+            safe_name,
+            session_id,
+            contact_name,
+            vlm_contact_name,
+            len(extracted_msgs),
+            json.dumps(extracted_data, ensure_ascii=False)[:2000],
+        )
         
         last_agent_idx = -1
         for i, msg in enumerate(extracted_msgs):
@@ -736,9 +761,20 @@ async def wechat_chat(
             if last_agent_idx >= 0:
                 ocr_text = extracted_msgs[last_agent_idx].get("text", "")
                 ocr_ok = bool(ocr_text.strip())
+                ocr_source = "vlm_human_reply" if ocr_ok else "empty_vlm_human_reply"
                 logger.info(f"VLM OCR 成功提取真人回复: {ocr_text}")
             else:
-                logger.info("VLM OCR 未能找到 agent 发送的真人回复")
+                ocr_text = client_ocr_text
+                ocr_ok = bool(ocr_text.strip())
+                ocr_source = "client_ocr_fallback_human_reply" if ocr_ok else "empty"
+                logger.warning(
+                    "VLM OCR 未能找到 agent 发送的真人回复，回退客户端 OCR: file=%s session=%s contact=%s fallback_len=%d fallback_text=%s",
+                    safe_name,
+                    session_id,
+                    contact_name,
+                    len(ocr_text),
+                    ocr_text[:200],
+                )
         else:
             new_client_texts = []
             for i in range(last_agent_idx + 1, len(extracted_msgs)):
@@ -748,11 +784,41 @@ async def wechat_chat(
             if new_client_texts:
                 ocr_text = "\n".join(new_client_texts)
                 ocr_ok = True
+                ocr_source = "vlm_client_after_agent"
                 logger.info(f"VLM OCR 成功提取 {len(new_client_texts)} 条客户新消息: {ocr_text}")
             else:
-                ocr_text = ""
-                ocr_ok = False
-                logger.info("VLM OCR 未提取到客户新消息")
+                ocr_text = client_ocr_text
+                ocr_ok = bool(ocr_text.strip())
+                if ocr_ok:
+                    ocr_source = "client_ocr_fallback"
+                    logger.warning(
+                        "VLM OCR 未提取到客户新消息，回退客户端 OCR: file=%s session=%s contact=%s last_agent_idx=%d msg_count=%d fallback_text=%s",
+                        safe_name,
+                        session_id,
+                        contact_name,
+                        last_agent_idx,
+                        len(extracted_msgs),
+                        ocr_text[:200],
+                    )
+                else:
+                    ocr_source = "empty"
+                    logger.warning(
+                        "VLM OCR 未提取到客户新消息且客户端 OCR 为空，将触发占位兜底: file=%s session=%s contact=%s last_agent_idx=%d msg_count=%d",
+                        safe_name,
+                        session_id,
+                        contact_name,
+                        last_agent_idx,
+                        len(extracted_msgs),
+                    )
+
+        logger.info(
+            "聊天输入文本确认: session=%s contact=%s source=%s text_len=%d text=%s",
+            session_id,
+            contact_name,
+            ocr_source,
+            len((ocr_text or "").strip()),
+            (ocr_text or "").strip()[:300],
+        )
 
     agent_id = int(agent["id"])
     raw_session_id = session_id

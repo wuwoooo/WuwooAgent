@@ -208,6 +208,48 @@ class WechatAccessibilityService : AccessibilityService() {
         return completed[0]
     }
 
+    /**
+     * 长按手势：与 [tap] 类似，但按压持续 700ms 以触发微信长按菜单。
+     */
+    private fun longPress(x: Float, y: Float): Boolean {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            val path = Path().apply { moveTo(x, y) }
+            val gesture = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 700))
+                .build()
+            return dispatchGesture(gesture, null, null)
+        }
+        val latch = CountDownLatch(1)
+        val completed = booleanArrayOf(false)
+        Handler(Looper.getMainLooper()).post {
+            val path = Path().apply { moveTo(x, y) }
+            val gesture = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 700))
+                .build()
+            val dispatched = dispatchGesture(
+                gesture,
+                object : GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) {
+                        completed[0] = true
+                        latch.countDown()
+                    }
+
+                    override fun onCancelled(gestureDescription: GestureDescription?) {
+                        Log.w(TAG, "长按手势取消 ($x,$y)，可检查坐标/无障碍")
+                        latch.countDown()
+                    }
+                },
+                null,
+            )
+            if (!dispatched) {
+                Log.w(TAG, "dispatchGesture(longPress)=false ($x,$y)")
+                latch.countDown()
+            }
+        }
+        latch.await(5, TimeUnit.SECONDS)
+        return completed[0]
+    }
+
     companion object {
         private const val TAG = "WechatAccessibility"
         private const val WECHAT_PACKAGE = "com.tencent.mm"
@@ -431,6 +473,16 @@ class WechatAccessibilityService : AccessibilityService() {
             val svc = instance ?: return false
             Log.i(TAG, "tapConversationAt 坐标 ($x, $y)")
             return svc.tap(x, y)
+        }
+
+        /**
+         * 在指定坐标执行长按手势，用于触发微信长按弹窗菜单（如语音消息的"转文字"等选项）。
+         * 与 [tapConversationAt] 类似，但按压持续时间延长到 700ms 以触发长按事件。
+         */
+        fun longPressAt(x: Float, y: Float): Boolean {
+            val svc = instance ?: return false
+            Log.i(TAG, "longPressAt 坐标 ($x, $y)")
+            return svc.longPress(x, y)
         }
 
         fun clickSend(): Boolean {

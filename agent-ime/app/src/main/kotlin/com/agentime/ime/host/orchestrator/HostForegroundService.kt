@@ -636,7 +636,7 @@ class HostForegroundService : Service() {
                     val agentClient = HttpAgentClient(this@HostForegroundService)
                     val sessionId = SessionIdentity.buildSessionId(this@HostForegroundService, contactName)
                     try {
-                        agentClient.chat(postClickCap.imagePath, "", sessionId, contactName, isHumanReply = true)
+                        agentClient.chat(postClickCap.imagePath, currentOutboundText, sessionId, contactName, isHumanReply = true)
                         lastReportedOutboundText = currentOutboundText
                         logger.log(TAG, "检测到真人介入并发送消息: [${currentOutboundText.take(20)}]，已同步至后台接管流程 (VLM)")
                     } catch (e: Exception) {
@@ -940,8 +940,8 @@ class HostForegroundService : Service() {
 
             // 优先使用语音转文字后的全屏截图（此时截图上已展开语音文字内容）
             val imageForVlm = voiceTranscribeImagePath ?: cap.imagePath
-            logger.log(TAG, "触发后端 API 调用，使用图片进行 VLM OCR 提取: $imageForVlm (语音转文字截图=${voiceTranscribeImagePath != null})")
-            val reply = agentClient.chat(imageForVlm, "", sessionId, contactName)
+            logger.log(TAG, "触发后端 API 调用，使用图片进行 VLM OCR 提取: $imageForVlm (语音转文字截图=${voiceTranscribeImagePath != null}, 本地候选=${latestInbound.take(80)})")
+            val reply = agentClient.chat(imageForVlm, latestInbound, sessionId, contactName)
             moveState(HostState.REPLY_READY, "reply_text 长度=${reply.replyText.length}")
 
             if (reply.isGroupChat) {
@@ -1385,6 +1385,10 @@ class HostForegroundService : Service() {
         val size = readImageSize(initialCap.imagePath)
         val width = size?.first ?: 1080
         val height = size?.second ?: 2400
+
+        // ──────────────────────────────────────────────
+        // 阶段 1：尝试点击语音气泡旁的快捷"转文字"按钮
+        // ──────────────────────────────────────────────
         val clickX = (redX + width * 0.11f).coerceIn(0f, (width - 1).toFloat())
         val clickY = redY.coerceIn(0f, (height - 1).toFloat())
 
@@ -1397,7 +1401,8 @@ class HostForegroundService : Service() {
         if (!tapOk) return null
 
         Thread.sleep(1200)
-        for (attempt in 1..10) {
+        // 快捷按钮只等 3 轮；如果快捷按钮不存在，后续通过长按兜底
+        for (attempt in 1..VOICE_SHORTCUT_MAX_WAIT_ROUNDS) {
             val cap = capture.captureScreen("${sessionId}_voice_transcribe_$attempt")
             val candidate = extractVoiceTranscriptionFromAnchor(
                 ocr = ocr,
@@ -1408,7 +1413,7 @@ class HostForegroundService : Service() {
                 label = "语音转文字等待#$attempt",
             )
             if (candidate.text.isNotBlank()) {
-                logger.log(TAG, "语音转文字已提取有效文本: ${candidate.text.take(120)}")
+                logger.log(TAG, "语音快捷转文字已提取有效文本: ${candidate.text.take(120)}")
                 // 返回时携带转文字后的全屏截图路径，供后续 VLM 使用
                 return candidate.copy(fullScreenshotPath = cap.imagePath)
             }
@@ -1418,8 +1423,179 @@ class HostForegroundService : Service() {
             )
             Thread.sleep(700)
         }
-        logger.log(TAG, "语音转文字等待超时，保持跳过普通文字回复")
+
+        // ──────────────────────────────────────────────
+        // 阶段 2：快捷按钮未生效，回退为长按语音气泡触发弹窗菜单
+        // ──────────────────────────────────────────────
+        logger.log(TAG, "快捷转文字未生效，回退到长按语音气泡触发弹窗菜单")
+        val longPressResult = tryTranscribeViaLongPressMenu(
+            ocr = ocr,
+            capture = capture,
+            redX = redX,
+            redY = redY,
+            width = width,
+            height = height,
+            contactName = contactName,
+            lastReplyText = lastReplyText,
+            sessionId = sessionId,
+        )
+        if (longPressResult != null) return longPressResult
+
+        logger.log(TAG, "语音转文字等待超时（快捷+长按均失败），保持跳过普通文字回复")
         return null
+    }
+
+    /**
+     * 通过长按语音气泡 → 弹窗菜单 → 点击"转文字"来转写语音消息。
+     *
+     * 微信弹窗菜单的布局参考（自截图观察）：
+     * - 弹窗出现在语音气泡上方，居中偏左
+     * - 菜单第二行左侧第一个选项通常就是"转文字"
+     * - "转文字"位于弹窗底部偏左区域
+     */
+    private fun tryTranscribeViaLongPressMenu(
+        ocr: FallbackOcrProvider,
+        capture: com.agentime.ime.host.capture.CaptureController,
+        redX: Float,
+        redY: Float,
+        width: Int,
+        height: Int,
+        contactName: String,
+        lastReplyText: String,
+        sessionId: String,
+    ): InboundCandidate? {
+        // 长按位置：语音气泡的中心区域（红点左侧约 5% 屏宽处，确保点在语音气泡内）
+        val longPressX = (redX - width * 0.05f).coerceIn(width * 0.10f, (width - 1).toFloat())
+        val longPressY = redY.coerceIn(0f, (height - 1).toFloat())
+
+        logger.log(TAG, "长按语音气泡: position=(${longPressX.toInt()},${longPressY.toInt()})")
+        val longPressOk = WechatAccessibilityService.longPressAt(longPressX, longPressY)
+        logger.log(TAG, "长按语音气泡结果=$longPressOk")
+        if (!longPressOk) return null
+
+        // 等待弹窗出现
+        Thread.sleep(800)
+
+        // 截图分析弹窗，用 OCR 定位"转文字"按钮
+        val menuCap = capture.captureScreen("${sessionId}_voice_longpress_menu")
+        val menuTranscribePos = findTranscribeButtonInPopupMenu(
+            ocr = ocr,
+            imagePath = menuCap.imagePath,
+            width = width,
+            height = height,
+            anchorY = longPressY,
+        )
+
+        if (menuTranscribePos != null) {
+            logger.log(
+                TAG,
+                "在弹窗中定位到\"转文字\"按钮: tap=(${menuTranscribePos.first.toInt()},${menuTranscribePos.second.toInt()})",
+            )
+            val menuTapOk = WechatAccessibilityService.tapConversationAt(menuTranscribePos.first, menuTranscribePos.second)
+            logger.log(TAG, "点击弹窗\"转文字\"结果=$menuTapOk")
+            if (!menuTapOk) return null
+        } else {
+            // OCR 未识别到"转文字"文本时，使用弹窗相对位置兜底点击
+            // 微信弹窗菜单中"转文字"通常在第二行左侧第一个位置
+            val fallbackX = (width * 0.14f).coerceIn(0f, (width - 1).toFloat())
+            // 弹窗出现在长按点上方，"转文字"在弹窗底部行
+            val fallbackY = (longPressY - height * 0.04f).coerceIn(0f, (height - 1).toFloat())
+            logger.log(
+                TAG,
+                "OCR 未识别弹窗\"转文字\"，使用弹窗相对位置兜底点击: tap=(${fallbackX.toInt()},${fallbackY.toInt()})",
+            )
+            val fallbackTapOk = WechatAccessibilityService.tapConversationAt(fallbackX, fallbackY)
+            logger.log(TAG, "兜底点击弹窗\"转文字\"结果=$fallbackTapOk")
+            if (!fallbackTapOk) return null
+        }
+
+        // 等待"转文字"展开
+        Thread.sleep(1500)
+
+        // 轮询等待转文字结果
+        for (attempt in 1..VOICE_LONGPRESS_MAX_WAIT_ROUNDS) {
+            val cap = capture.captureScreen("${sessionId}_voice_longpress_transcribe_$attempt")
+            val candidate = extractVoiceTranscriptionFromAnchor(
+                ocr = ocr,
+                cap = cap,
+                anchorY = redY,
+                contactName = contactName,
+                lastReplyText = lastReplyText,
+                label = "长按转文字等待#$attempt",
+            )
+            if (candidate.text.isNotBlank()) {
+                logger.log(TAG, "长按转文字已提取有效文本: ${candidate.text.take(120)}")
+                return candidate.copy(fullScreenshotPath = cap.imagePath)
+            }
+            logger.log(
+                TAG,
+                "长按转文字等待#$attempt 暂未得到有效文本 redDot=${cap.latestInboundVoiceRedDot} side=${cap.latestVisibleMessageSide}",
+            )
+            Thread.sleep(700)
+        }
+        return null
+    }
+
+    /**
+     * 在长按弹窗截图中用 OCR 定位"转文字"按钮。
+     * 返回 (x, y) 坐标，若未找到返回 null。
+     */
+    private fun findTranscribeButtonInPopupMenu(
+        ocr: FallbackOcrProvider,
+        imagePath: String,
+        width: Int,
+        height: Int,
+        anchorY: Float,
+    ): Pair<Float, Float>? {
+        return runCatching {
+            val bitmap = BitmapFactory.decodeFile(imagePath) ?: return null
+            try {
+                // 裁剪弹窗可能出现的区域：语音气泡上方附近
+                val cropTop = (anchorY - height * 0.20f).toInt().coerceAtLeast(0)
+                val cropBottom = (anchorY + height * 0.02f).toInt().coerceAtMost(bitmap.height)
+                val cropLeft = 0
+                val cropRight = (width * 0.70f).toInt().coerceAtMost(bitmap.width)
+                val cropWidth = (cropRight - cropLeft).coerceAtLeast(10)
+                val cropHeight = (cropBottom - cropTop).coerceAtLeast(10)
+
+                val menuCrop = Bitmap.createBitmap(bitmap, cropLeft, cropTop, cropWidth, cropHeight)
+                try {
+                    val outDir = File(filesDir, "captures").apply { mkdirs() }
+                    val tempFile = File(outDir, "cap_longpress_menu_${System.currentTimeMillis()}.png")
+                    FileOutputStream(tempFile).use { fos ->
+                        menuCrop.compress(Bitmap.CompressFormat.PNG, 100, fos)
+                    }
+                    val menuOcrText = ocr.recognize(tempFile.absolutePath).trim()
+                    logger.log(TAG, "弹窗 OCR 文本: ${menuOcrText.take(200)}")
+                    runCatching { tempFile.delete() }
+
+                    // 在 OCR 结果中搜索"转文字"关键词
+                    val transcribeKeywords = listOf("转文字", "轉文字", "转女字", "轉女字", "转文宇", "轉文宇")
+                    val lines = menuOcrText.lines()
+                    for ((lineIdx, line) in lines.withIndex()) {
+                        for (keyword in transcribeKeywords) {
+                            val charIdx = line.indexOf(keyword)
+                            if (charIdx >= 0) {
+                                // 估算"转文字"在裁剪图中的相对位置，映射回全屏坐标
+                                val relativeX = (charIdx.toFloat() + keyword.length / 2f) / line.length.coerceAtLeast(1)
+                                val relativeY = (lineIdx.toFloat() + 0.5f) / lines.size.coerceAtLeast(1)
+                                val tapX = (cropLeft + relativeX * cropWidth).coerceIn(0f, (width - 1).toFloat())
+                                val tapY = (cropTop + relativeY * cropHeight).coerceIn(0f, (height - 1).toFloat())
+                                return Pair(tapX, tapY)
+                            }
+                        }
+                    }
+                    null
+                } finally {
+                    menuCrop.recycle()
+                }
+            } finally {
+                bitmap.recycle()
+            }
+        }.getOrElse { e ->
+            logger.log(TAG, "弹窗 OCR 定位\"转文字\"失败: ${e.message}")
+            null
+        }
     }
 
     private fun extractVoiceTranscriptionFromAnchor(
@@ -1900,6 +2076,10 @@ class HostForegroundService : Service() {
         private const val POST_SEND_FOLLOWUP_RETRY2_DELAY_MS = 7_000L
         private const val URGENT_CHAT_FOLLOWUP_DELAY_MS = 1_400L
         private const val OUTBOUND_TASK_POLL_INTERVAL_MS = 4_000L
+        // 语音转文字：快捷"转文字"按钮最大等待轮数（每轮 ~700ms）
+        private const val VOICE_SHORTCUT_MAX_WAIT_ROUNDS = 3
+        // 语音转文字：长按弹窗菜单后最大等待轮数（每轮 ~700ms）
+        private const val VOICE_LONGPRESS_MAX_WAIT_ROUNDS = 8
 
         fun isBusyOrCoolingDown(): Boolean {
             val coolingDown = System.currentTimeMillis() - lastFinishedAt < 8_000L
