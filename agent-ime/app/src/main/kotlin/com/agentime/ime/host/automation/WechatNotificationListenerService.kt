@@ -45,6 +45,10 @@ class WechatNotificationListenerService : NotificationListenerService() {
         val autoEnabled = prefs.getBoolean(PREF_NOTIFY_AUTO_ENABLED, false)
         val runtimeEnabled = prefs.getBoolean(PREF_RUNTIME_ENABLED, false)
         if (executionMode != "auto" || !autoEnabled || !runtimeEnabled) return
+        if (HostForegroundService.isBusyOrCoolingDown()) {
+            logger.log(TAG, "当前正在执行任务或刚完成发送，忽略微信通知触发以避免把通知浮层当成客户消息")
+            return
+        }
 
         val extras = sbn.notification.extras ?: return
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
@@ -106,7 +110,7 @@ class WechatNotificationListenerService : NotificationListenerService() {
                 startService(intent)
             }
             logger.log(TAG, "已根据微信通知触发 runOnce: $sessionId/$title")
-        }, 1800L)
+        }, 3600L)
     }
 
     companion object {

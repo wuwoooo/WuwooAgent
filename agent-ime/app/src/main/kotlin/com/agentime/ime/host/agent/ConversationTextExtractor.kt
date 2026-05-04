@@ -33,6 +33,10 @@ object ConversationTextExtractor {
         "clickSend 返回",
         "type=dataSync",
         "会话列表截图分析跳过",
+        "微信通知",
+        "信通知：title=",
+        "信通知:title=",
+        "WechatNotifyListener",
     )
     private val transcriptionActionNoiseMarkers = listOf(
         "转文字",

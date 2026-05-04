@@ -180,6 +180,34 @@ class AgentOutboundTaskResultRequest(BaseModel):
     error: str = ""
 
 
+def _looks_like_notification_noise(text: str) -> bool:
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    compact = re.sub(r"\s+", "", raw)
+    lower = compact.lower()
+    if "title=" in lower and any(
+        marker in compact for marker in ("微信通知", "信通知", "捕获微信通知", "WechatNotifyListener")
+    ):
+        return True
+    return compact.startswith(("微信通知:", "微信通知：", "捕获微信通知:", "捕获微信通知："))
+
+
+def _contact_noise_key(text: str) -> str:
+    return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", (text or "").strip()).lower()
+
+
+def _looks_like_contact_name_noise(text: str, contact_name: str) -> bool:
+    contact_key = _contact_noise_key(contact_name)
+    text_key = _contact_noise_key(text)
+    if not contact_key or not text_key:
+        return False
+    stripped_text_key = re.sub(r"^[q0o搜索]+", "", text_key)
+    if stripped_text_key == contact_key:
+        return True
+    return len(contact_key) >= 6 and stripped_text_key.endswith(contact_key) and len(stripped_text_key) <= len(contact_key) + 2
+
+
 def get_current_time_str() -> str:
     now = datetime.datetime.now(LOCAL_TZ)
     weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
@@ -453,9 +481,6 @@ async def _generate_agent_continuation(session_id: str, limit: int | None = 30) 
         raise ValueError("Agent 未生成可用方案，请稍后重试")
     reply_text = _strip_repeated_customer_address(reply_text, contact_name, session_id)
 
-    agent_id = session.get("agent_id")
-    database.save_message(session_id, contact_name, "assistant", reply_text, agent_id=agent_id)
-    database.update_session_status(session_id, "auto", agent_id=agent_id)
     return reply_text, session
 
 
@@ -620,12 +645,13 @@ def _run_vision_ocr(image_bytes: bytes) -> dict[str, Any]:
     
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
     prompt = (
-        "你是一个微信界面提取专家。请提取图片中顶部标题栏的「联系人名称」以及所有的「聊天记录」。\n"
+        "你是一个微信界面提取专家。请先判断图片是否为一对一微信聊天页，再提取顶部标题栏的「联系人名称」以及所有的「聊天记录」。\n"
         "请注意：\n"
         "1. 绿色气泡表示'我方(agent)'发送的，白色/其他非绿色气泡表示'客户(client)'发送的。\n"
         "2. 请判断该聊天是否为群聊（例如标题栏有群成员数量如“旅游群(5)”，或者聊天界面有多人发言）。\n"
+        "3. 如果图片是微信搜索页、联系人搜索结果页、会话列表页、通讯录页、系统通知浮层，或者没有明确的聊天气泡和输入栏，请把 is_chat_page 设为 false，messages 返回空数组，绝对不要把搜索框里的联系人名称当成客户消息。\n"
         "严格返回一个 JSON 对象，不要包裹在任何 Markdown 标记中，格式如下：\n"
-        '{"contact_name": "张三", "is_group_chat": false, "messages": [{"sender": "client", "text": "你好"}, {"sender": "agent", "text": "您好，需要什么旅游定制服务？"}]}'
+        '{"page_type": "chat", "is_chat_page": true, "contact_name": "张三", "is_group_chat": false, "messages": [{"sender": "client", "text": "你好"}, {"sender": "agent", "text": "您好，需要什么旅游定制服务？"}]}'
     )
     
     payload = {
@@ -663,9 +689,10 @@ def _run_vision_ocr(image_bytes: bytes) -> dict[str, Any]:
             return json.loads(content)
         else:
             logger.error(f"VLM OCR 请求失败: {response.status_code} {response.text}")
+            return {"vlm_error": True, "error": f"VLM OCR 请求失败: {response.status_code}", "contact_name": "", "messages": []}
     except Exception as e:
         logger.error(f"VLM OCR 异常: {e}")
-    return {"contact_name": "", "messages": []}
+        return {"vlm_error": True, "error": str(e), "contact_name": "", "messages": []}
 
 @app.post("/api/wechat/chat")
 @app.post("/wechat/chat")
@@ -681,7 +708,7 @@ async def wechat_chat(
 
     - 仅传 ocr_text：Agent IME 等客户端本地 OCR，不上传图片（推荐）。
     - 仅传 image：兼容旧版；服务端保存图片，智能体使用占位描述（不做 OCR）。
-    - 若两者同时提供：按接口说明优先使用 ocr_text。
+    - 若两者同时提供：以截图的 VLM 页面判断和消息提取为准，本地 OCR 只作为触发线索。
     - is_human_reply：标识此条消息是否为真人客服手动发出的回复。
     """
     ocr_text = (ocr_text or "").strip()
@@ -721,6 +748,17 @@ async def wechat_chat(
             len(client_ocr_text),
         )
         extracted_data = await asyncio.to_thread(_run_vision_ocr, image_bytes)
+
+        if extracted_data.get("vlm_error"):
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "ok": False,
+                    "error": "VLM 识别失败，为避免误回复已停止本轮自动发送",
+                    "messages": [],
+                    "reply_text": "",
+                },
+            )
         
         if extracted_data.get("is_group_chat"):
             logger.info("VLM 识别出这是群聊，返回主屏信号并停止处理")
@@ -751,6 +789,24 @@ async def wechat_chat(
             len(extracted_msgs),
             json.dumps(extracted_data, ensure_ascii=False)[:2000],
         )
+
+        page_type = str(extracted_data.get("page_type") or "").strip().lower()
+        if extracted_data.get("is_chat_page") is False or page_type in {"search", "search_page", "contact_search", "conversation_list", "contacts", "notification", "non_chat"}:
+            logger.warning(
+                "VLM 判定截图不是一对一聊天页，忽略本轮，避免搜索页/列表页被当成客户消息: file=%s session=%s contact=%s page_type=%s data=%s",
+                safe_name,
+                session_id,
+                contact_name,
+                page_type,
+                json.dumps(extracted_data, ensure_ascii=False)[:1000],
+            )
+            return {
+                "ok": True,
+                "ignored": True,
+                "reason": "non_chat_page",
+                "messages": [{"role": "assistant", "text": ""}],
+                "reply_text": "",
+            }
         
         last_agent_idx = -1
         for i, msg in enumerate(extracted_msgs):
@@ -787,29 +843,22 @@ async def wechat_chat(
                 ocr_source = "vlm_client_after_agent"
                 logger.info(f"VLM OCR 成功提取 {len(new_client_texts)} 条客户新消息: {ocr_text}")
             else:
-                ocr_text = client_ocr_text
-                ocr_ok = bool(ocr_text.strip())
-                if ocr_ok:
-                    ocr_source = "client_ocr_fallback"
-                    logger.warning(
-                        "VLM OCR 未提取到客户新消息，回退客户端 OCR: file=%s session=%s contact=%s last_agent_idx=%d msg_count=%d fallback_text=%s",
-                        safe_name,
-                        session_id,
-                        contact_name,
-                        last_agent_idx,
-                        len(extracted_msgs),
-                        ocr_text[:200],
-                    )
-                else:
-                    ocr_source = "empty"
-                    logger.warning(
-                        "VLM OCR 未提取到客户新消息且客户端 OCR 为空，将触发占位兜底: file=%s session=%s contact=%s last_agent_idx=%d msg_count=%d",
-                        safe_name,
-                        session_id,
-                        contact_name,
-                        last_agent_idx,
-                        len(extracted_msgs),
-                    )
+                logger.warning(
+                    "VLM 未提取到客户新消息，停止本轮；不再回退客户端 OCR: file=%s session=%s contact=%s last_agent_idx=%d msg_count=%d client_ocr=%s",
+                    safe_name,
+                    session_id,
+                    contact_name,
+                    last_agent_idx,
+                    len(extracted_msgs),
+                    client_ocr_text[:200],
+                )
+                return {
+                    "ok": True,
+                    "ignored": True,
+                    "reason": "vlm_no_new_client_message",
+                    "messages": [{"role": "assistant", "text": ""}],
+                    "reply_text": "",
+                }
 
         logger.info(
             "聊天输入文本确认: session=%s contact=%s source=%s text_len=%d text=%s",
@@ -902,7 +951,41 @@ async def wechat_chat(
             contact_name = contact["preferred_name"]
     except Exception as e:
         logger.warning("联系人长期记忆解析失败，跳过上下文注入: session_id=%s contact=%s error=%s", session_id, contact_name, e)
-        
+
+    if _looks_like_notification_noise(ocr_text or ""):
+        logger.warning(
+            "忽略疑似微信通知/OCR 噪声，避免当成客户最新消息: agent_id=%s session_id=%s contact=%s text=%s",
+            agent_id,
+            session_id,
+            contact_name,
+            (ocr_text or "").strip()[:200],
+        )
+        return {
+            "ok": True,
+            "ignored": True,
+            "reason": "notification_noise",
+            "current_status": current_status,
+            "messages": [{"role": "assistant", "text": ""}],
+            "reply_text": "",
+        }
+
+    if _looks_like_contact_name_noise(ocr_text or "", contact_name):
+        logger.warning(
+            "忽略疑似搜索框/联系人名 OCR 噪声，避免当成客户最新消息: agent_id=%s session_id=%s contact=%s text=%s",
+            agent_id,
+            session_id,
+            contact_name,
+            (ocr_text or "").strip()[:200],
+        )
+        return {
+            "ok": True,
+            "ignored": True,
+            "reason": "contact_name_noise",
+            "current_status": current_status,
+            "messages": [{"role": "assistant", "text": ""}],
+            "reply_text": "",
+        }
+         
     if is_human_reply:
         # 真人客服发出了回复
         pure_user_text = (ocr_text or "").strip()
@@ -1371,7 +1454,7 @@ async def api_generate_agent_continuation(
 
         if reply_text:
             # 自动切换到“Agent 接管”模式
-            database.update_session_status(session_id, "auto")
+            database.update_session_status(session_id, "auto", agent_id=agent_id)
 
             # 将生成的方案写入对话历史
             database.save_message(session_id, contact_name, "assistant", reply_text, agent_id=agent_id)

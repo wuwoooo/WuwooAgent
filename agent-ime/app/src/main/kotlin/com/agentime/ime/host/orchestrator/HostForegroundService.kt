@@ -34,6 +34,7 @@ import com.agentime.ime.host.storage.HostLogger
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.util.concurrent.CancellationException
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -187,7 +188,22 @@ class HostForegroundService : Service() {
         }
     }
 
+    private fun isRuntimeEnabled(): Boolean =
+        getSharedPreferences("host_config", Context.MODE_PRIVATE)
+            .getBoolean("runtime_enabled", false)
+
+    private fun ensureRuntimeEnabled(stage: String) {
+        if (!isRuntimeEnabled()) {
+            logger.log(TAG, "运行已停止，取消当前任务: $stage")
+            throw CancellationException("运行已停止")
+        }
+    }
+
     private fun runNextOutboundTaskOnce() {
+        if (!isRuntimeEnabled()) {
+            logger.log(TAG, "运行已停止，忽略主动外发触发")
+            return
+        }
         if (running.get()) {
             logger.log(TAG, "已有任务在执行中，忽略本次主动外发触发")
             return
@@ -212,6 +228,11 @@ class HostForegroundService : Service() {
     }
 
     private fun runOutboundTask(task: OutboundTask, agentClient: HttpAgentClient, alreadyReserved: Boolean = false) {
+        if (!isRuntimeEnabled()) {
+            logger.log(TAG, "运行已停止，忽略主动外发任务: ${task.id}")
+            runCatching { agentClient.completeOutboundTask(task.id, false, "手机端已停止运行") }
+            return
+        }
         if (!alreadyReserved && !running.compareAndSet(false, true)) {
             logger.log(TAG, "已有任务在执行中，主动外发任务暂不处理: ${task.id}")
             runCatching { agentClient.completeOutboundTask(task.id, false, "手机端正忙，请稍后重试") }
@@ -222,6 +243,7 @@ class HostForegroundService : Service() {
         val capture = CaptureProviderFactory.create(this)
         val ocr = FallbackOcrProvider(LocalOcrProvider(this), RemoteOcrProvider(this))
         try {
+            ensureRuntimeEnabled("主动外发开始")
             moveState(HostState.IDLE, "开始主动外发任务: ${task.contactName}")
             if (task.contactName.isBlank() || task.searchKeyword.isBlank() || task.message.isBlank()) {
                 error("任务缺少联系人、搜索词或消息内容")
@@ -232,23 +254,32 @@ class HostForegroundService : Service() {
             if (!automation.isWechatForeground()) {
                 if (!automation.launchWechat()) error("无法启动微信，请检查微信是否已安装")
                 WechatAccessibilityService.waitWechatForeground(6000)
+                ensureRuntimeEnabled("主动外发等待微信前台后")
                 Thread.sleep(1200)
+                ensureRuntimeEnabled("主动外发等待微信稳定后")
             }
 
             var chatVerification = verifyOutboundChatByOcr(capture, ocr, task.contactName, "outbound_initial_${task.id}")
+            ensureRuntimeEnabled("主动外发 OCR 校验后")
             if (!chatVerification.matched) {
                 if (chatVerification.looksLikeChatPage) {
                     logger.log(TAG, "当前不是目标聊天页，先返回微信列表页")
+                    ensureRuntimeEnabled("主动外发返回前")
                     automation.clickBack()
                     Thread.sleep(900)
+                    ensureRuntimeEnabled("主动外发返回后")
                 }
                 moveState(HostState.WECHAT_READY, "准备通过微信搜索定位联系人")
+                ensureRuntimeEnabled("主动外发打开搜索前")
                 if (!automation.openWechatSearch()) error("点击微信搜索失败")
                 Thread.sleep(500)
+                ensureRuntimeEnabled("主动外发聚焦搜索前")
                 if (!automation.focusWechatSearchInput()) error("聚焦微信搜索框失败")
                 Thread.sleep(250)
+                ensureRuntimeEnabled("主动外发注入搜索词前")
                 if (!ime.injectText(task.searchKeyword)) error("注入搜索关键词失败")
                 Thread.sleep(1200)
+                ensureRuntimeEnabled("主动外发点击搜索结果前")
                 if (!automation.tapWechatSearchResult(task.contactName, task.searchKeyword)) {
                     error("点击搜索结果失败")
                 }
@@ -263,16 +294,20 @@ class HostForegroundService : Service() {
                 logger.log(TAG, "OCR 确认手机已在目标联系人聊天页，直接准备输入: ${chatVerification.debugSummary}")
             }
 
+            ensureRuntimeEnabled("主动外发聚焦输入框前")
             if (!automation.focusInputArea()) error("聚焦微信输入框失败")
             Thread.sleep(700)
+            ensureRuntimeEnabled("主动外发注入文本前")
             if (!ime.injectText(task.message)) error("注入主动外发文本失败")
             moveState(HostState.TEXT_INJECTED, "主动外发文本已注入")
 
             if (task.autoSend) {
                 Thread.sleep(650)
+                ensureRuntimeEnabled("主动外发点击发送前")
                 if (!automation.clickSend()) error("点击发送失败")
                 moveState(HostState.SENT, "主动外发已发送")
                 Thread.sleep(800)
+                ensureRuntimeEnabled("主动外发返回列表前")
                 val backOk = automation.clickBack()
                 logger.log(TAG, "主动外发发送完成后返回列表页，执行结果=$backOk")
                 if (backOk) {
@@ -374,6 +409,19 @@ class HostForegroundService : Service() {
             .trim()
     }
 
+    private fun isPostSendFollowup(scanSource: String): Boolean =
+        scanSource.contains("post_send_back", ignoreCase = true)
+
+    private fun looksLikeSearchContactEcho(text: String, contactName: String): Boolean {
+        val contactKey = normalizeOutboundName(contactName).filter { it.isLetterOrDigit() || it in '一'..'龥' }
+        if (contactKey.isBlank()) return false
+        val textKey = normalizeOutboundName(text)
+            .filter { it.isLetterOrDigit() || it in '一'..'龥' }
+            .trimStart('q', 'o', '0')
+        if (textKey.isBlank()) return false
+        return textKey == contactKey || (contactKey.length >= 6 && textKey.endsWith(contactKey) && textKey.length <= contactKey.length + 2)
+    }
+
     private fun scanConversationListAndRun(scanSource: String) {
         val bypassCoolingDown =
             scanSource.contains("urgent_chat_followup") ||
@@ -396,12 +444,14 @@ class HostForegroundService : Service() {
         val capture = CaptureProviderFactory.create(this)
         val ocr = FallbackOcrProvider(LocalOcrProvider(this), RemoteOcrProvider(this))
         try {
+            ensureRuntimeEnabled("会话列表扫描开始")
             logger.log(TAG, "开始通过截图分析当前微信页（source=$scanSource）")
             // 注意：此处不以 MEDIA_PROJECTION 类型调用 startForeground，
             // Android 14 下重复声明该类型会触发系统停止旧的 MediaProjection（onStop 回调）。
             // prepareProjection() 已在首次初始化时声明了该类型，后续无需重复。
             startForegroundCompat("正在识别当前微信页面", includeProjectionType = true)
             val cap = capture.captureScreen("wx_list_scan")
+            ensureRuntimeEnabled("会话列表截图完成后")
             val headerOcrText = recognizeHeaderWithFallbacks(ocr, cap)
             val ocrText = recognizePageWithFallbacks(ocr, cap)
             val pageAnalysis = ConversationListUnreadDetector.analyzeConversationListPage(cap.imagePath, ocrText, headerOcrText)
@@ -429,6 +479,11 @@ class HostForegroundService : Service() {
                     if (contactName.isBlank() || contactName == "当前联系人") {
                         logger.log(TAG, "截图分析结果：当前是聊天页，但联系人识别无效，跳过本轮")
                         returnToConversationList("聊天页联系人识别无效")
+                        return
+                    }
+                    if (isPostSendFollowup(scanSource) && !cap.hasInboundAfterLatestOutbound) {
+                        logger.log(TAG, "发送后补扫未检测到我方最后消息之后的新入站，跳过本轮，避免把搜索页/搜索结果页当成聊天页")
+                        returnToConversationList("发送后补扫无新入站")
                         return
                     }
                     val lastReplyText = prefsReply.getString("last_reply_text", "").orEmpty()
@@ -495,6 +550,11 @@ class HostForegroundService : Service() {
                         returnToConversationList("聊天页未提取到有效客户新消息")
                         return
                     }
+                    if (looksLikeSearchContactEcho(latestInbound, contactName)) {
+                        logger.log(TAG, "截图分析结果：最新候选仅像搜索框/联系人名回显($latestInbound)，跳过本轮")
+                        returnToConversationList("聊天页候选疑似搜索框联系人名")
+                        return
+                    }
                     if (ConversationTextExtractor.looksLikeAgentReplyCandidate(latestInbound, lastReplyText)) {
                         logger.log(TAG, "截图分析结果：当前提取文本疑似我方上一条回复或客服话术，跳过本轮")
                         returnToConversationList("聊天页提取文本疑似我方回复")
@@ -507,6 +567,7 @@ class HostForegroundService : Service() {
                         return
                     }
                     logger.log(TAG, "截图分析结果：当前是聊天页，source=$scanSource，检测到客户新消息，直接复用本轮截图进入回复流程，联系人=$contactName")
+                    ensureRuntimeEnabled("聊天页复用截图进入回复前")
                     runOnce(
                         sessionId = SessionIdentity.buildSessionId(this@HostForegroundService, contactName),
                         contactName = contactName,
@@ -526,6 +587,7 @@ class HostForegroundService : Service() {
             //logger.log(TAG, "红点扫描诊断: $badgeDebugLog")
             if (hit == null) {
                 logger.log(TAG, "截图分析结果：已识别为会话列表页，但未识别到可点击的未读红点，返回系统主屏")
+                ensureRuntimeEnabled("列表页无未读返回主屏前")
                 com.agentime.ime.host.automation.WechatAccessibilityService.goHome()
                 if (scanSource.startsWith("post_send_back_followup")) {
                     schedulePostSendAdaptiveRetry(scanSource)
@@ -537,12 +599,15 @@ class HostForegroundService : Service() {
                 logger.log(TAG, "列表页点击目标联系人提示: $listRowContactHint")
             }
             logger.log(TAG, "截图分析识别到未读会话，准备点击 tap=(${hit.tapX.toInt()},${hit.tapY.toInt()}) score=${hit.redScore}")
+            ensureRuntimeEnabled("点击未读会话前")
             if (!com.agentime.ime.host.automation.WechatAccessibilityService.tapConversationAt(hit.tapX, hit.tapY)) {
                 logger.log(TAG, "截图分析点击未读会话失败")
                 return
             }
             Thread.sleep(1400)
+            ensureRuntimeEnabled("点击未读会话等待后")
             val postClickCap = capture.captureScreen("wx_chat_after_list_click")
+            ensureRuntimeEnabled("点击后截图完成后")
             val postClickHeaderOcr = recognizeHeaderWithFallbacks(ocr, postClickCap)
             val postClickOcr = recognizePageWithFallbacks(ocr, postClickCap)
             val postClickListAnalysis = ConversationListUnreadDetector.analyzeConversationListPage(
@@ -678,6 +743,7 @@ class HostForegroundService : Service() {
                 returnToConversationList("点击进入后客户最新消息未变化")
                 return
             }
+            ensureRuntimeEnabled("点击入会话进入回复前")
             runOnce(
                 sessionId = SessionIdentity.buildSessionId(this@HostForegroundService, contactName),
                 contactName = contactName,
@@ -688,6 +754,9 @@ class HostForegroundService : Service() {
                 isExplicitTrigger = true,
                 preVoiceTranscribeImagePath = voiceTranscribeImagePathForRunOnce,
             )
+        } catch (e: CancellationException) {
+            moveState(HostState.FAILED, e.message ?: "运行已停止")
+            logger.log(TAG, "会话列表截图分析已取消：运行已停止")
         } catch (e: Exception) {
             val msg = e.message.orEmpty()
             // 授权类失败：需要用户手动重新授权，不应自动重试
@@ -744,6 +813,10 @@ class HostForegroundService : Service() {
         // 语音转文字成功后的全屏截图路径（从 scanConversationListAndRun 传入）
         preVoiceTranscribeImagePath: String? = null,
     ) {
+        if (!isRuntimeEnabled()) {
+            logger.log(TAG, "运行已停止，忽略 runOnce: $sessionId/$contactName")
+            return
+        }
         if (!running.compareAndSet(false, true)) {
             logger.log(TAG, "已有任务在执行中，忽略新的 runOnce: $sessionId/$contactName")
             return
@@ -758,6 +831,7 @@ class HostForegroundService : Service() {
         val agentClient = HttpAgentClient(this)
 
         try {
+            ensureRuntimeEnabled("runOnce 开始")
             moveState(HostState.IDLE, "开始任务: $sessionId/$contactName")
             if (ConversationListUnreadDetector.isBlockedWechatSystemPageTitle(contactName)) {
                 logger.log(TAG, "runOnce 拒绝处理微信系统页标题($contactName)，停止本轮自动回复")
@@ -776,6 +850,7 @@ class HostForegroundService : Service() {
                 if (automation.isWechatForeground()) {
                     logger.log(TAG, "检测到微信已在前台，复用当前聊天页，不重新拉起微信")
                 } else {
+                    ensureRuntimeEnabled("启动微信前")
                     if (!automation.launchWechat()) {
                         logger.log(TAG, "启动微信失败，前台信息=${com.agentime.ime.host.automation.WechatAccessibilityService.getForegroundDebugInfo()}")
                         error("无法启动微信，请检查微信是否已安装")
@@ -786,9 +861,11 @@ class HostForegroundService : Service() {
                         logger.log(TAG, "微信前台判定成功")
                     }
                 }
+                ensureRuntimeEnabled("微信前台就绪后")
                 moveState(HostState.WECHAT_READY, "微信前台就绪")
                 logger.log(TAG, "保持聊天页静止，等待界面稳定后截图")
                 Thread.sleep(1800)
+                ensureRuntimeEnabled("界面稳定等待后")
             }
             if (!ime.isImeActive()) logger.log(TAG, "警告：当前默认输入法不是 Agent IME")
             val runtimeStartedAt = prefs.getLong("runtime_started_at", 0L)
@@ -797,6 +874,7 @@ class HostForegroundService : Service() {
                 val waitMs = 2500L - sinceRuntimeStart
                 logger.log(TAG, "运行刚启动，等待截图管线稳定 ${waitMs}ms")
                 Thread.sleep(waitMs)
+                ensureRuntimeEnabled("截图管线稳定等待后")
             }
             val cap: com.agentime.ime.host.capture.CaptureResult
             val ocrText: String
@@ -818,6 +896,7 @@ class HostForegroundService : Service() {
                 startForegroundCompat("正在分析微信聊天", includeProjectionType = true)
                 logger.log(TAG, "开始截图，executionMode=$executionMode provider=$captureProvider")
                 cap = capture.captureScreen(sessionId)
+                ensureRuntimeEnabled("截图完成后")
                 logger.log(
                     TAG,
                     "截图尝试#1 acceptable=${cap.acceptableForOcr} total=${"%.1f".format(cap.totalScore)} sharp=${"%.1f".format(cap.sharpnessScore)}",
@@ -924,6 +1003,11 @@ class HostForegroundService : Service() {
                     error("未能从 OCR 中提取出最新客户消息")
                 }
             }
+            if (looksLikeSearchContactEcho(latestInbound, contactName)) {
+                logger.log(TAG, "提炼结果疑似搜索框/联系人名回显，取消本轮自动回复: ${latestInbound.take(80)}")
+                returnToConversationList("最新候选疑似搜索框联系人名")
+                return
+            }
             if (ConversationTextExtractor.looksLikeVoiceTranscriptionUiOnly(latestInbound)) {
                 logger.log(TAG, "提炼结果疑似语音消息 UI（如扬声器残影+秒数），取消本轮普通文字回复: ${latestInbound.take(80)}")
                 returnToConversationList("最新消息疑似语音，等待转文字处理")
@@ -942,6 +1026,7 @@ class HostForegroundService : Service() {
             val imageForVlm = voiceTranscribeImagePath ?: cap.imagePath
             logger.log(TAG, "触发后端 API 调用，使用图片进行 VLM OCR 提取: $imageForVlm (语音转文字截图=${voiceTranscribeImagePath != null}, 本地候选=${latestInbound.take(80)})")
             val reply = agentClient.chat(imageForVlm, latestInbound, sessionId, contactName)
+            ensureRuntimeEnabled("后端回复返回后")
             moveState(HostState.REPLY_READY, "reply_text 长度=${reply.replyText.length}")
 
             if (reply.isGroupChat) {
@@ -964,12 +1049,15 @@ class HostForegroundService : Service() {
             if (executionMode == "manual") {
                 moveState(HostState.INPUT_FOCUSED, "手动模式：请先聚焦输入框，再继续注入")
             } else {
+                ensureRuntimeEnabled("聚焦输入框前")
                 if (!automation.focusInputArea()) error("聚焦输入框失败")
                 moveState(HostState.INPUT_FOCUSED, "输入框聚焦完成")
                 logger.log(TAG, "输入框已聚焦，等待输入法稳定后注入")
                 Thread.sleep(450)
+                ensureRuntimeEnabled("输入法稳定等待后")
             }
 
+            ensureRuntimeEnabled("注入文本前")
             if (!ime.injectText(reply.replyText)) error("注入文本失败")
             moveState(HostState.TEXT_INJECTED, "文本注入完成")
 
@@ -978,6 +1066,7 @@ class HostForegroundService : Service() {
             } else {
                 // 微信需时间刷新发送按钮位置；立即点容易点到旧区域
                 Thread.sleep(600)
+                ensureRuntimeEnabled("点击发送前")
                 val sendOk = automation.clickSend()
                 logger.log(TAG, "clickSend 返回=$sendOk（若未发出，请在 host_config 调整 send_x/send_y）")
                 if (!sendOk) error("点击发送失败（坐标可能不匹配当前机型，请调整 send_x/send_y）")
@@ -1004,6 +1093,7 @@ class HostForegroundService : Service() {
                 } else {
                     // 发送完消息后，稍作停留(等待动画)即返回会话列表页
                     Thread.sleep(800)
+                    ensureRuntimeEnabled("发送后返回列表前")
                     val backOk = automation.clickBack()
                     logger.log(TAG, "已触发自动返回动作，执行结果=$backOk")
                     if (backOk) {
@@ -1011,6 +1101,8 @@ class HostForegroundService : Service() {
                     }
                 }
             }
+        } catch (e: CancellationException) {
+            moveState(HostState.FAILED, e.message ?: "运行已停止")
         } catch (e: Exception) {
             val msg = e.message.orEmpty()
             // 授权类失败：需要用户手动重新授权
@@ -1387,41 +1479,54 @@ class HostForegroundService : Service() {
         val height = size?.second ?: 2400
 
         // ──────────────────────────────────────────────
-        // 阶段 1：尝试点击语音气泡旁的快捷"转文字"按钮
+        // 阶段 1：只有图像上真的存在快捷"转文字"按钮时才点击。
         // ──────────────────────────────────────────────
-        val clickX = (redX + width * 0.11f).coerceIn(0f, (width - 1).toFloat())
-        val clickY = redY.coerceIn(0f, (height - 1).toFloat())
-
-        logger.log(
-            TAG,
-            "检测到语音红点，尝试点击快捷转文字: red=(${redX.toInt()},${redY.toInt()}) tap=(${clickX.toInt()},${clickY.toInt()}) score=${initialCap.latestInboundVoiceRedDotScore}",
-        )
-        val tapOk = WechatAccessibilityService.tapConversationAt(clickX, clickY)
-        logger.log(TAG, "点击快捷转文字结果=$tapOk")
-        if (!tapOk) return null
-
-        Thread.sleep(1200)
-        // 快捷按钮只等 3 轮；如果快捷按钮不存在，后续通过长按兜底
-        for (attempt in 1..VOICE_SHORTCUT_MAX_WAIT_ROUNDS) {
-            val cap = capture.captureScreen("${sessionId}_voice_transcribe_$attempt")
-            val candidate = extractVoiceTranscriptionFromAnchor(
-                ocr = ocr,
-                cap = cap,
-                anchorY = redY,
-                contactName = contactName,
-                lastReplyText = lastReplyText,
-                label = "语音转文字等待#$attempt",
-            )
-            if (candidate.text.isNotBlank()) {
-                logger.log(TAG, "语音快捷转文字已提取有效文本: ${candidate.text.take(120)}")
-                // 返回时携带转文字后的全屏截图路径，供后续 VLM 使用
-                return candidate.copy(fullScreenshotPath = cap.imagePath)
-            }
+        val shortcutButton = findShortcutTranscribeButtonCenter(initialCap.imagePath, redX, redY, width, height)
+        if (shortcutButton != null) {
+            val clickX = shortcutButton.first
+            val clickY = shortcutButton.second
             logger.log(
                 TAG,
-                "语音转文字等待#$attempt 暂未得到有效文本 redDot=${cap.latestInboundVoiceRedDot} side=${cap.latestVisibleMessageSide}",
+                "检测到语音红点与快捷转文字按钮，点击快捷转文字: red=(${redX.toInt()},${redY.toInt()}) tap=(${clickX.toInt()},${clickY.toInt()}) score=${initialCap.latestInboundVoiceRedDotScore}",
             )
-            Thread.sleep(700)
+            val tapOk = WechatAccessibilityService.tapConversationAt(clickX, clickY)
+            logger.log(TAG, "点击快捷转文字结果=$tapOk")
+
+            if (tapOk) {
+                Thread.sleep(1200)
+                // 快捷按钮只等 3 轮；如果按钮点击未生效，后续通过长按兜底。
+                for (attempt in 1..VOICE_SHORTCUT_MAX_WAIT_ROUNDS) {
+                    val cap = capture.captureScreen("${sessionId}_voice_transcribe_$attempt")
+                    val candidate = extractVoiceTranscriptionFromAnchor(
+                        ocr = ocr,
+                        cap = cap,
+                        anchorY = redY,
+                        contactName = contactName,
+                        lastReplyText = lastReplyText,
+                        label = "语音转文字等待#$attempt",
+                    )
+                    if (isUsableVoiceTranscriptionText(candidate.text)) {
+                        logger.log(TAG, "语音快捷转文字已提取有效文本: ${candidate.text.take(120)}")
+                        // 返回时携带转文字后的全屏截图路径，供后续 VLM 使用
+                        return candidate.copy(fullScreenshotPath = cap.imagePath)
+                    }
+                    if (candidate.text.isNotBlank()) {
+                        logger.log(TAG, "语音转文字等待#$attempt 候选疑似 OCR 噪声，继续等待/准备长按兜底: ${candidate.text.take(80)}")
+                    }
+                    logger.log(
+                        TAG,
+                        "语音转文字等待#$attempt 暂未得到有效文本 redDot=${cap.latestInboundVoiceRedDot} side=${cap.latestVisibleMessageSide}",
+                    )
+                    Thread.sleep(700)
+                }
+            } else {
+                logger.log(TAG, "快捷转文字按钮点击手势未完成，直接回退长按语音气泡")
+            }
+        } else {
+            logger.log(
+                TAG,
+                "红点右侧未检测到快捷转文字按钮，跳过快捷点击，直接长按语音气泡: red=(${redX.toInt()},${redY.toInt()}) score=${initialCap.latestInboundVoiceRedDotScore}",
+            )
         }
 
         // ──────────────────────────────────────────────
@@ -1445,6 +1550,112 @@ class HostForegroundService : Service() {
         return null
     }
 
+    private fun findShortcutTranscribeButtonCenter(
+        imagePath: String,
+        redX: Float,
+        redY: Float,
+        fullWidth: Int,
+        fullHeight: Int,
+    ): Pair<Float, Float>? {
+        return runCatching {
+            val bitmap = BitmapFactory.decodeFile(imagePath) ?: return null
+            try {
+                val width = bitmap.width
+                val height = bitmap.height
+                if (width < 200 || height < 400) return null
+
+                val roiLeft = (redX + fullWidth * 0.025f).toInt().coerceIn(0, width - 1)
+                val roiRight = (redX + fullWidth * 0.28f).toInt().coerceIn(roiLeft + 1, width)
+                val roiTop = (redY - fullHeight * 0.045f).toInt().coerceIn(0, height - 1)
+                val roiBottom = (redY + fullHeight * 0.045f).toInt().coerceIn(roiTop + 1, height)
+                val step = 2
+
+                fun rgb(pixel: Int): Triple<Int, Int, Int> {
+                    val r = (pixel shr 16) and 0xFF
+                    val g = (pixel shr 8) and 0xFF
+                    val b = pixel and 0xFF
+                    return Triple(r, g, b)
+                }
+
+                fun isShortcutFill(pixel: Int): Boolean {
+                    val (r, g, b) = rgb(pixel)
+                    val max = maxOf(r, g, b)
+                    val min = minOf(r, g, b)
+                    val brightness = (r + g + b) / 3
+                    return max - min <= 12 && brightness in 205..234
+                }
+
+                fun isShortcutText(pixel: Int): Boolean {
+                    val (r, g, b) = rgb(pixel)
+                    val max = maxOf(r, g, b)
+                    val min = minOf(r, g, b)
+                    val brightness = (r + g + b) / 3
+                    return max - min <= 35 && brightness in 75..185
+                }
+
+                var left = width
+                var right = -1
+                var top = height
+                var bottom = -1
+                var fillCount = 0
+                var textCount = 0
+
+                var y = roiTop
+                while (y < roiBottom) {
+                    var x = roiLeft
+                    while (x < roiRight) {
+                        val pixel = bitmap.getPixel(x, y)
+                        val fill = isShortcutFill(pixel)
+                        val text = isShortcutText(pixel)
+                        if (fill || text) {
+                            left = minOf(left, x)
+                            right = maxOf(right, x)
+                            top = minOf(top, y)
+                            bottom = maxOf(bottom, y)
+                            if (fill) fillCount++
+                            if (text) textCount++
+                        }
+                        x += step
+                    }
+                    y += step
+                }
+
+                if (right < left || bottom < top) {
+                    logger.log(TAG, "快捷转文字按钮检测: roi=($roiLeft,$roiTop,$roiRight,$roiBottom) fill=$fillCount text=$textCount result=none")
+                    return null
+                }
+
+                val candidateWidth = right - left + 1
+                val candidateHeight = bottom - top + 1
+                val enoughPixels = fillCount >= 80 || textCount >= 10
+                val plausibleSize =
+                    candidateWidth in (fullWidth * 0.045f).toInt()..(fullWidth * 0.24f).toInt() &&
+                        candidateHeight in (fullHeight * 0.006f).toInt()..(fullHeight * 0.075f).toInt()
+
+                if (!enoughPixels || !plausibleSize) {
+                    logger.log(
+                        TAG,
+                        "快捷转文字按钮检测: roi=($roiLeft,$roiTop,$roiRight,$roiBottom) bbox=($left,$top,$right,$bottom) fill=$fillCount text=$textCount size=${candidateWidth}x$candidateHeight result=none",
+                    )
+                    return null
+                }
+
+                val centerX = ((left + right) / 2f).coerceIn(0f, (width - 1).toFloat())
+                val centerY = ((top + bottom) / 2f).coerceIn(0f, (height - 1).toFloat())
+                logger.log(
+                    TAG,
+                    "快捷转文字按钮检测: bbox=($left,$top,$right,$bottom) fill=$fillCount text=$textCount tap=(${centerX.toInt()},${centerY.toInt()})",
+                )
+                Pair(centerX, centerY)
+            } finally {
+                bitmap.recycle()
+            }
+        }.getOrElse { e ->
+            logger.log(TAG, "快捷转文字按钮检测失败: ${e.message}")
+            null
+        }
+    }
+
     /**
      * 通过长按语音气泡 → 弹窗菜单 → 点击"转文字"来转写语音消息。
      *
@@ -1464,8 +1675,8 @@ class HostForegroundService : Service() {
         lastReplyText: String,
         sessionId: String,
     ): InboundCandidate? {
-        // 长按位置：语音气泡的中心区域（红点左侧约 5% 屏宽处，确保点在语音气泡内）
-        val longPressX = (redX - width * 0.05f).coerceIn(width * 0.10f, (width - 1).toFloat())
+        // 长按位置：语音气泡的中心区域。红点通常位于气泡右侧外缘，向左退约 13% 屏宽更稳。
+        val longPressX = (redX - width * 0.13f).coerceIn(width * 0.10f, (width - 1).toFloat())
         val longPressY = redY.coerceIn(0f, (height - 1).toFloat())
 
         logger.log(TAG, "长按语音气泡: position=(${longPressX.toInt()},${longPressY.toInt()})")
@@ -1495,11 +1706,9 @@ class HostForegroundService : Service() {
             logger.log(TAG, "点击弹窗\"转文字\"结果=$menuTapOk")
             if (!menuTapOk) return null
         } else {
-            // OCR 未识别到"转文字"文本时，使用弹窗相对位置兜底点击
-            // 微信弹窗菜单中"转文字"通常在第二行左侧第一个位置
-            val fallbackX = (width * 0.14f).coerceIn(0f, (width - 1).toFloat())
-            // 弹窗出现在长按点上方，"转文字"在弹窗底部行
-            val fallbackY = (longPressY - height * 0.04f).coerceIn(0f, (height - 1).toFloat())
+            // OCR/图像定位都失败时，按微信长按菜单的常见布局兜底：第二行第一项。
+            val fallbackX = (width * 0.11f).coerceIn(0f, (width - 1).toFloat())
+            val fallbackY = (longPressY - height * 0.085f).coerceIn(0f, (height - 1).toFloat())
             logger.log(
                 TAG,
                 "OCR 未识别弹窗\"转文字\"，使用弹窗相对位置兜底点击: tap=(${fallbackX.toInt()},${fallbackY.toInt()})",
@@ -1523,9 +1732,12 @@ class HostForegroundService : Service() {
                 lastReplyText = lastReplyText,
                 label = "长按转文字等待#$attempt",
             )
-            if (candidate.text.isNotBlank()) {
+            if (isUsableVoiceTranscriptionText(candidate.text)) {
                 logger.log(TAG, "长按转文字已提取有效文本: ${candidate.text.take(120)}")
                 return candidate.copy(fullScreenshotPath = cap.imagePath)
+            }
+            if (candidate.text.isNotBlank()) {
+                logger.log(TAG, "长按转文字等待#$attempt 候选疑似 OCR 噪声，继续等待: ${candidate.text.take(80)}")
             }
             logger.log(
                 TAG,
@@ -1560,6 +1772,16 @@ class HostForegroundService : Service() {
 
                 val menuCrop = Bitmap.createBitmap(bitmap, cropLeft, cropTop, cropWidth, cropHeight)
                 try {
+                    findDarkWechatPopupRect(menuCrop, cropLeft, cropTop, width, height)?.let { rect ->
+                        val tapX = (rect.left + rect.width * 0.11f).coerceIn(0f, (width - 1).toFloat())
+                        val tapY = (rect.top + rect.height * 0.78f).coerceIn(0f, (height - 1).toFloat())
+                        logger.log(
+                            TAG,
+                            "通过深色弹窗矩形定位\"转文字\": rect=(${rect.left.toInt()},${rect.top.toInt()},${rect.right.toInt()},${rect.bottom.toInt()}) tap=(${tapX.toInt()},${tapY.toInt()})",
+                        )
+                        return Pair(tapX, tapY)
+                    }
+
                     val outDir = File(filesDir, "captures").apply { mkdirs() }
                     val tempFile = File(outDir, "cap_longpress_menu_${System.currentTimeMillis()}.png")
                     FileOutputStream(tempFile).use { fos ->
@@ -1598,6 +1820,98 @@ class HostForegroundService : Service() {
         }
     }
 
+    private data class PopupRect(
+        val left: Float,
+        val top: Float,
+        val right: Float,
+        val bottom: Float,
+    ) {
+        val width: Float get() = right - left
+        val height: Float get() = bottom - top
+    }
+
+    private fun findDarkWechatPopupRect(
+        crop: Bitmap,
+        offsetX: Int,
+        offsetY: Int,
+        fullWidth: Int,
+        fullHeight: Int,
+    ): PopupRect? {
+        val w = crop.width
+        val h = crop.height
+        if (w < 80 || h < 80) return null
+
+        fun isMenuDark(pixel: Int): Boolean {
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            return r in 35..95 && g in 35..95 && b in 35..95 && kotlin.math.abs(r - g) <= 20 && kotlin.math.abs(g - b) <= 20
+        }
+
+        val rowHits = IntArray(h)
+        val colHits = IntArray(w)
+        val step = 3
+        var y = 0
+        while (y < h) {
+            var x = 0
+            while (x < w) {
+                if (isMenuDark(crop.getPixel(x, y))) {
+                    rowHits[y]++
+                    colHits[x]++
+                }
+                x += step
+            }
+            y += step
+        }
+
+        val minRowHits = (w / step * 0.18f).toInt().coerceAtLeast(8)
+        var top = -1
+        var bottom = -1
+        var inBand = false
+        var gap = 0
+        for (row in 0 until h step step) {
+            if (rowHits[row] >= minRowHits) {
+                if (!inBand) {
+                    top = row
+                    inBand = true
+                }
+                bottom = row
+                gap = 0
+            } else if (inBand) {
+                gap += step
+                if (gap > 15) break
+            }
+        }
+        if (top < 0 || bottom - top < fullHeight * 0.08f) return null
+
+        val minColHits = ((bottom - top) / step * 0.22f).toInt().coerceAtLeast(8)
+        var left = -1
+        var right = -1
+        inBand = false
+        gap = 0
+        for (col in 0 until w step step) {
+            if (colHits[col] >= minColHits) {
+                if (!inBand) {
+                    left = col
+                    inBand = true
+                }
+                right = col
+                gap = 0
+            } else if (inBand) {
+                gap += step
+                if (gap > 18) break
+            }
+        }
+        if (left < 0 || right - left < fullWidth * 0.30f) return null
+
+        return PopupRect(
+            left = (offsetX + left).toFloat(),
+            top = (offsetY + top).toFloat(),
+            right = (offsetX + right).toFloat(),
+            bottom = (offsetY + bottom).toFloat(),
+        )
+    }
+
     private fun extractVoiceTranscriptionFromAnchor(
         ocr: FallbackOcrProvider,
         cap: com.agentime.ime.host.capture.CaptureResult,
@@ -1618,7 +1932,7 @@ class HostForegroundService : Service() {
                     lastReplyText = lastReplyText,
                 )
                 logger.log(TAG, "$label: anchorRawLen=${raw.length} extracted=${res.text.take(80)}")
-                if (res.text.isNotBlank() && !ConversationTextExtractor.looksLikeVoiceTranscriptionUiOnly(res.text)) {
+                if (isUsableVoiceTranscriptionText(res.text)) {
                     return InboundCandidate(
                         text = res.text,
                         signature = res.signature,
@@ -1626,6 +1940,8 @@ class HostForegroundService : Service() {
                         path = anchorCropPath,
                         score = scoreInboundCandidate(res.text),
                     )
+                } else if (res.text.isNotBlank()) {
+                    logger.log(TAG, "$label: 锚点候选疑似语音 UI/OCR 噪声，忽略: ${res.text.take(80)}")
                 }
             }
         }
@@ -1769,7 +2085,10 @@ class HostForegroundService : Service() {
             lastReplyText = lastReplyText,
         )
         logger.log(TAG, "$label: rawLen=${raw.length} extracted=${res.text.take(80)}")
-        if (res.text.isBlank() || ConversationTextExtractor.looksLikeVoiceTranscriptionUiOnly(res.text)) {
+        if (!isUsableVoiceTranscriptionText(res.text)) {
+            if (res.text.isNotBlank()) {
+                logger.log(TAG, "$label: 最新左侧语音转写候选疑似 UI/OCR 噪声，忽略: ${res.text.take(80)}")
+            }
             return InboundCandidate(sourceLabel = label, path = path)
         }
         return InboundCandidate(
@@ -1779,6 +2098,28 @@ class HostForegroundService : Service() {
             path = path,
             score = scoreInboundCandidate(res.text),
         )
+    }
+
+    private fun isUsableVoiceTranscriptionText(text: String): Boolean {
+        val normalized = ConversationTextExtractor.signatureOf(text)
+        if (normalized.isBlank()) return false
+        if (ConversationTextExtractor.looksLikeVoiceTranscriptionUiOnly(normalized)) return false
+
+        val compact = normalized.replace(Regex("""\s+"""), "")
+        if (compact.isBlank()) return false
+        val hasHan = compact.any { it in '\u4e00'..'\u9fff' }
+        val hasAsciiLetter = compact.any { it in 'A'..'Z' || it in 'a'..'z' }
+        val hasDigit = compact.any { it.isDigit() }
+        val hasDurationQuote = compact.any { it == '"' || it == '\'' || it == '”' || it == '″' || it == '’' }
+        val hasKana = compact.any { it in '\u3040'..'\u30ff' }
+
+        if (hasDurationQuote && hasDigit && compact.length <= 6) return false
+        if (hasKana && !hasHan) return false
+        if (!hasHan && !hasAsciiLetter) return false
+        if (!hasHan && hasDigit && compact.length <= 8) return false
+        if (!hasHan && compact.length <= 1) return false
+
+        return true
     }
 
     private fun readImageSize(path: String): Pair<Int, Int>? {

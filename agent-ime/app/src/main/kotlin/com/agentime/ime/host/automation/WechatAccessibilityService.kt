@@ -170,6 +170,10 @@ class WechatAccessibilityService : AccessibilityService() {
      * 主线程调用时不能阻塞等待回调（会与 Gesture 回调死锁），仅返回是否成功入队。
      */
     private fun tap(x: Float, y: Float): Boolean {
+        if (!isRuntimeEnabled(this)) {
+            Log.i(TAG, "运行已停止，忽略 tap($x,$y)")
+            return false
+        }
         if (Looper.myLooper() == Looper.getMainLooper()) {
             val path = Path().apply { moveTo(x, y) }
             val gesture = GestureDescription.Builder()
@@ -212,6 +216,10 @@ class WechatAccessibilityService : AccessibilityService() {
      * 长按手势：与 [tap] 类似，但按压持续 700ms 以触发微信长按菜单。
      */
     private fun longPress(x: Float, y: Float): Boolean {
+        if (!isRuntimeEnabled(this)) {
+            Log.i(TAG, "运行已停止，忽略 longPress($x,$y)")
+            return false
+        }
         if (Looper.myLooper() == Looper.getMainLooper()) {
             val path = Path().apply { moveTo(x, y) }
             val gesture = GestureDescription.Builder()
@@ -447,8 +455,16 @@ class WechatAccessibilityService : AccessibilityService() {
             }
         }
 
+        private fun isRuntimeEnabled(context: Context): Boolean =
+            context.getSharedPreferences("host_config", Context.MODE_PRIVATE)
+                .getBoolean("runtime_enabled", false)
+
         fun focusInputArea(): Boolean {
             val svc = instance ?: return false
+            if (!isRuntimeEnabled(svc)) {
+                Log.i(TAG, "运行已停止，忽略 focusInputArea")
+                return false
+            }
             val prefs = svc.getSharedPreferences("host_config", Context.MODE_PRIVATE)
             val (x, y) = resolveTapPair(
                 prefs,
@@ -471,6 +487,10 @@ class WechatAccessibilityService : AccessibilityService() {
 
         fun tapConversationAt(x: Float, y: Float): Boolean {
             val svc = instance ?: return false
+            if (!isRuntimeEnabled(svc)) {
+                Log.i(TAG, "运行已停止，忽略 tapConversationAt")
+                return false
+            }
             Log.i(TAG, "tapConversationAt 坐标 ($x, $y)")
             return svc.tap(x, y)
         }
@@ -481,12 +501,20 @@ class WechatAccessibilityService : AccessibilityService() {
          */
         fun longPressAt(x: Float, y: Float): Boolean {
             val svc = instance ?: return false
+            if (!isRuntimeEnabled(svc)) {
+                Log.i(TAG, "运行已停止，忽略 longPressAt")
+                return false
+            }
             Log.i(TAG, "longPressAt 坐标 ($x, $y)")
             return svc.longPress(x, y)
         }
 
         fun clickSend(): Boolean {
             val svc = instance ?: return false
+            if (!isRuntimeEnabled(svc)) {
+                Log.i(TAG, "运行已停止，忽略 clickSend")
+                return false
+            }
             val prefs = svc.getSharedPreferences("host_config", Context.MODE_PRIVATE)
             // 键盘弹出时固定像素易点到键盘区；未手动写入 send_* 时用屏宽比例估算「输入栏右侧发送」
             val (x, y) = resolveTapPair(
@@ -506,6 +534,10 @@ class WechatAccessibilityService : AccessibilityService() {
                 Log.w(TAG, "clickBack 失败：无障碍服务实例为空")
                 return false
             }
+            if (!isRuntimeEnabled(svc)) {
+                Log.i(TAG, "运行已停止，忽略 clickBack")
+                return false
+            }
             Log.i(TAG, "准备执行系统级返回动作 (GLOBAL_ACTION_BACK)")
             // 连续执行两次返回：第一次可能是收起键盘，第二次才是退出聊天页
             val ok1 = svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
@@ -519,6 +551,10 @@ class WechatAccessibilityService : AccessibilityService() {
         fun goHome(): Boolean {
             val svc = instance ?: run {
                 Log.w(TAG, "goHome 失败：无障碍服务实例为空")
+                return false
+            }
+            if (!isRuntimeEnabled(svc)) {
+                Log.i(TAG, "运行已停止，忽略 goHome")
                 return false
             }
             Log.i(TAG, "准备执行系统级回到主屏动作 (GLOBAL_ACTION_HOME)")
@@ -561,7 +597,10 @@ class WechatAccessibilityService : AccessibilityService() {
         }
 
         fun warmupInputAfterLaunch() {
-            Handler(Looper.getMainLooper()).postDelayed({ focusInputArea() }, 400)
+            Handler(Looper.getMainLooper()).postDelayed({
+                val svc = instance ?: return@postDelayed
+                if (isRuntimeEnabled(svc)) focusInputArea()
+            }, 400)
         }
 
         private fun maybeTriggerForegroundAuto(event: AccessibilityEvent?) {

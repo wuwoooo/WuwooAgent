@@ -955,6 +955,19 @@ def _save_message_with_cursor(
     )
 
 
+def _message_exists_with_cursor(cursor: sqlite3.Cursor, session_id: str, role: str, content: str) -> bool:
+    cursor.execute(
+        """
+        SELECT 1 FROM messages
+        WHERE session_id = ? AND role = ? AND content = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (session_id, role, content),
+    )
+    return cursor.fetchone() is not None
+
+
 def save_message(session_id: str, contact_name: str, role: str, content: str, agent_id: int | None = None):
     conn = get_connection()
     cursor = conn.cursor()
@@ -1631,7 +1644,8 @@ def complete_outbound_task(task_id: int, agent_id: int, success: bool, error: st
         contact_name = str(task.get("contact_name") or "")
         message = str(task.get("message") or "").strip()
         if session_id and message:
-            _save_message_with_cursor(cursor, session_id, contact_name, "assistant", message, agent_id=agent_id, created_at=now_bj)
+            if not _message_exists_with_cursor(cursor, session_id, "assistant", message):
+                _save_message_with_cursor(cursor, session_id, contact_name, "assistant", message, agent_id=agent_id, created_at=now_bj)
             cursor.execute(
                 "UPDATE outbound_tasks SET recorded_message_at = ?, updated_at = ? WHERE id = ?",
                 (now_bj, now_bj, task_id),

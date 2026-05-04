@@ -217,6 +217,7 @@ class MainActivity : ComponentActivity() {
                 action = HostForegroundService.ACTION_RUN_ONCE
                 putExtra(HostForegroundService.EXTRA_SESSION_ID, sessionId)
                 putExtra(HostForegroundService.EXTRA_CONTACT_NAME, contactName)
+                putExtra("is_explicit_trigger", true)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 startForegroundService(intent)
