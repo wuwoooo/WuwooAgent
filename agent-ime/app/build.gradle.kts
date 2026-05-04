@@ -13,11 +13,18 @@ android {
         targetSdk = 34
         versionCode = 12
         versionName = "1.2.0"
+
+        // 只打包 arm64-v8a（现代真机），移除 x86/x86_64（模拟器）和 armeabi-v7a（旧 32 位）
+        // 此配置直接节省约 27MB（ML Kit native .so 占大头）
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
