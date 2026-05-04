@@ -237,8 +237,155 @@ HANDOFF_CONTEXT_RE = re.compile(
 )
 
 
-def _should_request_handoff(latest_text: str, session_id: str) -> bool:
-    """用确定性规则兜底识别客户已经同意推进方案/报价。"""
+EMPTY_INFO_VALUES = {"", "无", "未知", "未明确", "待定", "待确认", "没有", "暂无", "不清楚"}
+HANDOFF_REQUIRED_FIELDS = [
+    ("people_count", "出行人数"),
+    ("travel_time", "出行时间"),
+    ("departure_city", "出发地"),
+    ("elder_child_status", "是否有老人/孩子同行"),
+    ("health_mobility_status", "是否有病患或腿脚不便者"),
+]
+PEOPLE_COUNT_RE = re.compile(
+    r"(\d+\s*(?:大\s*\d+\s*小|个?人|位|个大人|成人|小孩|孩子)|"
+    r"[一二两三四五六七八九十两]+(?:个)?人|一家[三四五六七八九十两]口|"
+    r"[一二两三四五六七八九十]+大[一二两三四五六七八九十]+小|夫妻|两口子|情侣)"
+)
+TRAVEL_TIME_RE = re.compile(
+    r"(\d{4}\s*[年/\-.]\s*\d{1,2}\s*[月/\-.]\s*\d{0,2}|"
+    r"\d{1,2}\s*月\s*\d{1,2}\s*[日号]?|"
+    r"\d+\s*天\s*\d*\s*晚?|"
+    r"明天|后天|大后天|下周|下个月|下月|月底|月初|周末|春节|寒假|暑假|五一|端午|中秋|国庆|元旦)"
+)
+DEPARTURE_CITY_RE = re.compile(
+    r"(?:从|由)([\u4e00-\u9fa5]{2,10})(?:出发|起飞|飞|走|到|去)|"
+    r"([\u4e00-\u9fa5]{2,10})(?:出发|起飞|动身)|"
+    r"([\u4e00-\u9fa5]{2,10})\s*[—\-至到]\s*[\u4e00-\u9fa5]{2,10}"
+)
+ELDER_CHILD_RE = re.compile(r"(老人|老年|爸妈|父母|长辈|孩子|小孩|小朋友|宝宝|带娃|亲子|学生|没有老人|没老人|没有孩子|没孩子|无老人|无小孩)")
+HEALTH_MOBILITY_RE = re.compile(
+    r"(病患|病人|生病|腿脚|行动不便|轮椅|拐杖|孕妇|怀孕|高血压|糖尿病|心脏病|晕车|不能久走|"
+    r"身体都好|都健康|没有病|没病|无病|没有腿脚不便|没腿脚不便|无行动不便)"
+)
+
+
+def _compact_info_value(value: Any) -> str:
+    if isinstance(value, dict):
+        value = value.get("value")
+    if isinstance(value, (list, tuple, set)):
+        return "、".join(str(item).strip() for item in value if str(item).strip())
+    return str(value or "").strip()
+
+
+def _is_known_info_value(value: Any) -> bool:
+    text = _compact_info_value(value)
+    return bool(text and text not in EMPTY_INFO_VALUES)
+
+
+def _flatten_for_readiness(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        return "\n".join(
+            part for part in (_flatten_for_readiness(v) for v in value.values()) if part
+        )
+    if isinstance(value, (list, tuple, set)):
+        return "\n".join(
+            part for part in (_flatten_for_readiness(v) for v in value) if part
+        )
+    return str(value)
+
+
+def _build_handoff_readiness_corpus(
+    *,
+    latest_text: str,
+    session_id: str,
+    session_profile: dict[str, Any] | None = None,
+    contact: dict[str, Any] | None = None,
+) -> str:
+    chunks = [(latest_text or "").strip()]
+    try:
+        recent_messages = database.get_session_messages(session_id)[-24:]
+        chunks.extend(str(msg.get("content") or "") for msg in recent_messages)
+    except Exception:
+        pass
+    if session_profile:
+        chunks.append(_flatten_for_readiness(session_profile))
+    if contact:
+        chunks.append(_flatten_for_readiness(contact.get("manual_notes") or contact.get("contact_manual_notes")))
+        chunks.append(_flatten_for_readiness(contact.get("memory") or contact.get("contact_memory")))
+    return "\n".join(chunk for chunk in chunks if chunk)
+
+
+def _handoff_readiness(
+    *,
+    latest_text: str,
+    session_id: str,
+    session_profile: dict[str, Any] | None = None,
+    contact: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    profile = session_profile or {}
+    corpus = _build_handoff_readiness_corpus(
+        latest_text=latest_text,
+        session_id=session_id,
+        session_profile=profile,
+        contact=contact,
+    )
+    checks = {
+        "people_count": _is_known_info_value(profile.get("people_count")) or bool(PEOPLE_COUNT_RE.search(corpus)),
+        "travel_time": _is_known_info_value(profile.get("travel_time")) or bool(TRAVEL_TIME_RE.search(corpus)),
+        "departure_city": _is_known_info_value(profile.get("departure_city")) or bool(DEPARTURE_CITY_RE.search(corpus)),
+        "elder_child_status": (
+            _is_known_info_value(profile.get("elder_child_status"))
+            or _is_known_info_value(profile.get("has_elder_or_child"))
+            or bool(ELDER_CHILD_RE.search(corpus))
+        ),
+        "health_mobility_status": (
+            _is_known_info_value(profile.get("health_mobility_status"))
+            or _is_known_info_value(profile.get("health_mobility"))
+            or bool(HEALTH_MOBILITY_RE.search(corpus))
+        ),
+    }
+    missing = [label for key, label in HANDOFF_REQUIRED_FIELDS if not checks.get(key)]
+    known = [label for key, label in HANDOFF_REQUIRED_FIELDS if checks.get(key)]
+    return {"ready": not missing, "missing": missing, "known": known}
+
+
+def _handoff_missing_info_reply(missing: list[str]) -> str:
+    if not missing:
+        return ""
+    joined = "、".join(missing)
+    return f"可以的，我先把方向帮您梳理好。为了方案和报价更准确，麻烦您再补充下：{joined}？"
+
+
+def _format_handoff_readiness_for_prompt(readiness: dict[str, Any]) -> str:
+    known = "、".join(readiness.get("known") or []) or "暂无"
+    missing = "、".join(readiness.get("missing") or []) or "无"
+    return (
+        f"【接管成熟度】当前已掌握：{known}；仍缺失：{missing}。"
+        "只有客户明确推进最终方案/最终报价/下单，且缺失为“无”时，才可以追加 [HANDOFF]。"
+        "如果客户想要报价、定方案或出方案但仍有缺失，不要追加 [HANDOFF]，请先用一句自然话术补问缺失信息；"
+        "其中“是否有老人/孩子同行”和“是否有病患或腿脚不便者”需要客户明确说有或没有，不能默认没有。"
+    )
+
+
+def _should_request_handoff(
+    latest_text: str,
+    session_id: str,
+    session_profile: dict[str, Any] | None = None,
+    contact: dict[str, Any] | None = None,
+) -> bool:
+    """用确定性规则兜底识别客户已经同意推进方案/报价，且基础信息已成熟。"""
+    readiness = _handoff_readiness(
+        latest_text=latest_text,
+        session_id=session_id,
+        session_profile=session_profile,
+        contact=contact,
+    )
+    return readiness["ready"] and _has_handoff_intent(latest_text, session_id)
+
+
+def _has_handoff_intent(latest_text: str, session_id: str) -> bool:
+    """仅判断客户是否有推进最终方案/报价/下单意图，不判断信息是否齐全。"""
     text = re.sub(r"\s+", "", (latest_text or "").strip())
     if not text:
         return False
@@ -268,8 +415,13 @@ def _format_profile_for_prompt(profile: dict[str, Any] | None) -> str:
     parts = []
     labels = {
         "destination": "目的地",
+        "departure_city": "出发地",
         "people_count": "人数",
         "travel_time": "出行时间",
+        "elder_child_status": "老人/孩子同行情况",
+        "has_elder_or_child": "老人/孩子同行情况",
+        "health_mobility_status": "健康/行动限制",
+        "health_mobility": "健康/行动限制",
         "budget": "预算",
         "preferences": "偏好",
         "sales_stage": "销售阶段",
@@ -558,7 +710,14 @@ echo $! > {pid_file}
 echo "$(date '+%Y-%m-%d %H:%M:%S %z') INFO [admin.restart] restarted; new_pid=$(cat {pid_file})" >> {log_file}
 """
 
-def _build_user_prompt(contact_name: str, ocr_text: str = "", current_status: str = "auto") -> Tuple[str, str, str]:
+def _build_user_prompt(
+    contact_name: str,
+    ocr_text: str = "",
+    current_status: str = "auto",
+    session_id: str = "",
+    session_profile: dict[str, Any] | None = None,
+    contact: dict[str, Any] | None = None,
+) -> Tuple[str, str, str]:
     """构建发给智能体的 user prompt。
 
     返回:
@@ -580,6 +739,16 @@ def _build_user_prompt(contact_name: str, ocr_text: str = "", current_status: st
     receptionist_rule = ""
     if current_status == "handoff_requested":
         receptionist_rule = "【当前状态：正在为客户制作方案】你之前已告知客户要去整理行程方案和报价了。对于客户的新消息，请注意：如果客户询问普通旅行问题，可正常解答；如果客户催促方案进度，必须以第一人称安抚（例如：'我正在快马加鞭为您核算报价和行程呢，请您稍等片刻哦～'），绝对不要自己编造具体方案或报价数字。\n"
+    readiness_rule = ""
+    if session_id:
+        readiness_rule = _format_handoff_readiness_for_prompt(
+            _handoff_readiness(
+                latest_text=text,
+                session_id=session_id,
+                session_profile=session_profile,
+                contact=contact,
+            )
+        ) + "\n"
 
     # 有文本时补充相对时间推算提示
     time_extra = '如果在聊天中客户提到诸如"下月"、"明天"等相对时间，也请以此为基准推算。' if has_text else '请以此作为判断今天、明天、下周等相对时间的基准。'
@@ -596,7 +765,8 @@ def _build_user_prompt(contact_name: str, ocr_text: str = "", current_status: st
     system_additions = (
         f'（系统提示：当前实际时间是 {current_time}。注意：仅在第一轮对话或主动打招呼时才进行时间问候，在后续连续的对话中直接回答用户的问题，绝对不要重复问候！你在问候客户时必须以此为准判断今天是星期几，绝对不要参考下方文本中可能出现的旧时间标签（如"周一16:40"等是微信界面上旧消息的时间戳，不代表当前时间）。{time_extra}\n'
         f'【称呼规则】如果确实需要称呼客户，只能使用系统提供的联系人名「{name}」；但【绝对不要】在每条消息开头加"你好"、"晚上好"等问候语，更不要重复称呼客户姓名。这是连续对话，请开门见山直接回答客户问题。不要使用聊天记录或 OCR 文本中出现的名字。因为 OCR 识别存在同音字误差（如索被识别为素），聊天记录中的名字不可靠，以系统提供的联系人名为唯一准确来源。\n'
-        "【HANDOFF 规则】在以下两种情况下，才可在回复末尾加上 [HANDOFF] 标记：1) 客户在本轮消息中明确表达了要进行【最终方案确定】、【要求核算最终报价】或【准备下单打款】的意图（例如'算一下报价吧'、'方案确定了'、'怎么付款'）；2) 虽然客户没有直接说'报价'或'下单'，但从对话上下文判断客户对当前的行程方案已经完全满意并确认，表现出最终的决策倾向（例如'就按这个定'、'确定了，算下多少钱'）。如果客户只是在初步讨论方案、要一个大概的行程、询问价格估算、或者你自己还在完善方案细节，**绝对不要**加 [HANDOFF]。触发 [HANDOFF] 时，你的回复**必须是一句确认性的第一人称过渡话术**（例如'好的，我这就为您核算最终的报价并整理确认方案～'），**绝对不能是提问句**，也绝对不能说'转交给人工'或'转交给定制师'，因为你本身就是这位专属的定制师小鹿。）\n\n"
+        f"{readiness_rule}"
+        "【HANDOFF 规则】在以下两种情况下，且接管成熟度缺失项为“无”时，才可在回复末尾加上 [HANDOFF] 标记：1) 客户在本轮消息中明确表达了要进行【最终方案确定】、【要求核算最终报价】或【准备下单打款】的意图（例如'算一下报价吧'、'方案确定了'、'怎么付款'）；2) 虽然客户没有直接说'报价'或'下单'，但从对话上下文判断客户对当前的行程方案已经完全满意并确认，表现出最终的决策倾向（例如'就按这个定'、'确定了，算下多少钱'）。如果客户只是在初步讨论方案、要一个大概的行程、询问价格估算、或者你自己还在完善方案细节，**绝对不要**加 [HANDOFF]。如果客户推进最终报价/方案但接管成熟度仍有缺失，必须先补问缺失项，不要接管。触发 [HANDOFF] 时，你的回复**必须是一句确认性的第一人称过渡话术**（例如'好的，我这就为您核算最终的报价并整理确认方案～'），**绝对不能是提问句**，也绝对不能说'转交给人工'或'转交给定制师'，因为你本身就是这位专属的定制师小鹿。）\n\n"
         f"{receptionist_rule}"
     )
     return pure_text, system_additions, message_section
@@ -1095,7 +1265,14 @@ async def wechat_chat(
             }
 
         # 统一构建 prompt：ocr_text 为空时自动降级为兜底描述；需在会话锁内基于最新状态构建。
-        pure_user_text, system_prompt_addition, final_user_text = _build_user_prompt(contact_name, ocr_text or "", current_status)
+        pure_user_text, system_prompt_addition, final_user_text = _build_user_prompt(
+            contact_name,
+            ocr_text or "",
+            current_status,
+            session_id=session_id,
+            session_profile=session_profile,
+            contact=contact,
+        )
 
         duplicate_reply = await asyncio.to_thread(
             database.get_recent_duplicate_assistant_reply,
@@ -1124,7 +1301,49 @@ async def wechat_chat(
                 "reply_text": duplicate_reply,
             }
 
-        if _should_request_handoff(pure_user_text, session_id):
+        readiness = _handoff_readiness(
+            latest_text=pure_user_text,
+            session_id=session_id,
+            session_profile=session_profile,
+            contact=contact,
+        )
+
+        if _has_handoff_intent(pure_user_text, session_id) and not readiness["ready"]:
+            reply_text = _handoff_missing_info_reply(readiness["missing"])
+            try:
+                database.save_message_pair(
+                    session_id,
+                    contact_name,
+                    pure_user_text,
+                    reply_text,
+                    agent_id=agent_id,
+                    session_status=None,
+                )
+                asyncio.create_task(check_and_trigger_profile_update(session_id, contact_id=contact_id))
+            except Exception as e:
+                logger.warning(
+                    "接管前信息不足，补问缺失项后保存失败: agent_id=%s session_id=%s contact=%s error=%s",
+                    agent_id,
+                    session_id,
+                    contact_name,
+                    e,
+                )
+            return {
+                "ok": True,
+                "agent_id": agent_id,
+                "agent_display_name": agent.get("display_name") or agent.get("username"),
+                "session_id": session_id,
+                "current_status": current_status,
+                "handoff_requested": False,
+                "handoff_missing_fields": readiness["missing"],
+                "messages": [
+                    {"role": "user", "text": pure_user_text},
+                    {"role": "assistant", "text": reply_text},
+                ],
+                "reply_text": reply_text,
+            }
+
+        if _should_request_handoff(pure_user_text, session_id, session_profile=session_profile, contact=contact):
             reply_text = _handoff_reply_text()
             try:
                 database.save_message_pair(
@@ -1213,6 +1432,15 @@ async def wechat_chat(
         handoff_requested = "[HANDOFF]" in reply_text
         if handoff_requested:
             reply_text = reply_text.replace("[HANDOFF]", "").strip()
+            readiness = _handoff_readiness(
+                latest_text=pure_user_text,
+                session_id=session_id,
+                session_profile=session_profile,
+                contact=contact,
+            )
+            if not readiness["ready"]:
+                handoff_requested = False
+                reply_text = _handoff_missing_info_reply(readiness["missing"])
 
         reply_text = _strip_repeated_customer_address(reply_text, contact_name, session_id)
         for msg in messages:
