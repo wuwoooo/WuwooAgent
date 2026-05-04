@@ -34,6 +34,7 @@ import com.agentime.ime.host.storage.HostLogger
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.util.ArrayDeque
 import java.util.concurrent.CancellationException
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -42,7 +43,12 @@ class HostForegroundService : Service() {
     private val io = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var logger: HostLogger
-    private var lastReportedOutboundText: String = ""
+    private val lastReportedOutboundBySession = mutableMapOf<String, String>()
+    private data class PendingRunOnce(
+        val sessionId: String,
+        val contactName: String,
+        val isExplicitTrigger: Boolean,
+    )
     private data class ContactBindingResult(
         val contactName: String,
         val titleSource: String,
@@ -115,7 +121,7 @@ class HostForegroundService : Service() {
                         logger.log(TAG, "忽略超时的 runOnce 请求: $sessionId/$contactName (延迟=${System.currentTimeMillis() - triggerTime}ms)")
                         return@execute
                     }
-                    runOnce(sessionId, contactName, isExplicitTrigger = isExplicit)
+                    runOnceOrQueue(sessionId, contactName, isExplicitTrigger = isExplicit, reason = "service_intent")
                 }
             }
             ACTION_RUN_OUTBOUND_TASK -> io.execute {
@@ -325,6 +331,7 @@ class HostForegroundService : Service() {
         } finally {
             lastFinishedAt = System.currentTimeMillis()
             running.set(false)
+            schedulePendingWorkDrain()
         }
     }
 
@@ -422,13 +429,141 @@ class HostForegroundService : Service() {
         return textKey == contactKey || (contactKey.length >= 6 && textKey.endsWith(contactKey) && textKey.length <= contactKey.length + 2)
     }
 
+    private fun scopedPrefKey(name: String, sessionId: String): String = "$name:$sessionId"
+
+    private fun getLastReplyText(prefs: android.content.SharedPreferences, sessionId: String): String =
+        prefs.getString(scopedPrefKey("last_reply_text", sessionId), null)
+            ?: prefs.getString("last_reply_text", "").orEmpty()
+
+    private fun getLastInboundSignature(prefs: android.content.SharedPreferences, sessionId: String): String =
+        prefs.getString(scopedPrefKey("last_inbound_signature", sessionId), null)
+            ?: prefs.getString("last_inbound_signature", "").orEmpty()
+
+    private fun saveConversationDedupState(
+        prefs: android.content.SharedPreferences,
+        sessionId: String,
+        inboundSignature: String,
+        replyText: String,
+    ) {
+        prefs.edit()
+            .putString(scopedPrefKey("last_inbound_signature", sessionId), inboundSignature)
+            .putString(scopedPrefKey("last_reply_text", sessionId), replyText)
+            // 保留旧全局字段作为兼容兜底；读取时会优先按会话取值。
+            .putString("last_inbound_signature", inboundSignature)
+            .putString("last_reply_text", replyText)
+            .apply()
+    }
+
+    private fun getLastReportedOutbound(sessionId: String): String =
+        synchronized(lastReportedOutboundBySession) { lastReportedOutboundBySession[sessionId].orEmpty() }
+
+    private fun setLastReportedOutbound(sessionId: String, text: String) {
+        synchronized(lastReportedOutboundBySession) {
+            lastReportedOutboundBySession[sessionId] = text
+            if (lastReportedOutboundBySession.size > 80) {
+                val firstKey = lastReportedOutboundBySession.keys.firstOrNull()
+                if (firstKey != null) lastReportedOutboundBySession.remove(firstKey)
+            }
+        }
+    }
+
+    private fun runOnceOrQueue(
+        sessionId: String,
+        contactName: String,
+        isExplicitTrigger: Boolean = false,
+        reason: String,
+    ) {
+        if (isBusyOrCoolingDown()) {
+            if (isExplicitTrigger) {
+                enqueuePendingScan("explicit_runonce_busy", "$reason:$sessionId/$contactName")
+                return
+            }
+            enqueuePendingRunOnce(sessionId, contactName, isExplicitTrigger, reason)
+            return
+        }
+        runOnce(sessionId, contactName, isExplicitTrigger = isExplicitTrigger)
+    }
+
+    private fun enqueuePendingRunOnce(
+        sessionId: String,
+        contactName: String,
+        isExplicitTrigger: Boolean,
+        reason: String,
+    ) {
+        val key = "$sessionId|$contactName"
+        val queued = synchronized(pendingLock) {
+            if (pendingRunOnceKeys.contains(key)) {
+                false
+            } else {
+                if (pendingRunOnceQueue.size >= MAX_PENDING_RUN_ONCE) {
+                    val dropped = pendingRunOnceQueue.removeFirst()
+                    pendingRunOnceKeys.remove("${dropped.sessionId}|${dropped.contactName}")
+                }
+                pendingRunOnceQueue.addLast(PendingRunOnce(sessionId, contactName, isExplicitTrigger))
+                pendingRunOnceKeys.add(key)
+                true
+            }
+        }
+        logger.log(TAG, if (queued) "当前正忙，已排队 runOnce: $sessionId/$contactName reason=$reason" else "runOnce 已在队列中，跳过重复排队: $sessionId/$contactName")
+        schedulePendingWorkDrain()
+    }
+
+    private fun enqueuePendingScan(scanSource: String, reason: String) {
+        synchronized(pendingLock) {
+            pendingScanSource = scanSource.ifBlank { "queued_scan" }
+        }
+        logger.log(TAG, "当前正忙，已排队会话列表扫描: source=$scanSource reason=$reason")
+        schedulePendingWorkDrain()
+    }
+
+    private fun schedulePendingWorkDrain(delayMs: Long = PENDING_DRAIN_DELAY_MS) {
+        mainHandler.postDelayed({
+            io.execute { drainPendingWorkIfIdle() }
+        }, delayMs)
+    }
+
+    private fun drainPendingWorkIfIdle() {
+        if (!isRuntimeEnabled()) return
+        if (running.get()) {
+            schedulePendingWorkDrain(1_500L)
+            return
+        }
+        val nextScan = synchronized(pendingLock) {
+            val source = pendingScanSource
+            pendingScanSource = null
+            source
+        }
+        if (!nextScan.isNullOrBlank()) {
+            logger.log(TAG, "开始处理排队会话列表扫描: source=$nextScan")
+            scanConversationListAndRun(scanSource = "queued_$nextScan")
+            return
+        }
+        if (isBusyOrCoolingDown()) {
+            schedulePendingWorkDrain(1_500L)
+            return
+        }
+        val nextRun = synchronized(pendingLock) {
+            val item = pendingRunOnceQueue.pollFirst()
+            if (item != null) pendingRunOnceKeys.remove("${item.sessionId}|${item.contactName}")
+            item
+        }
+        if (nextRun != null) {
+            logger.log(TAG, "开始处理排队 runOnce: ${nextRun.sessionId}/${nextRun.contactName}")
+            runOnce(nextRun.sessionId, nextRun.contactName, isExplicitTrigger = nextRun.isExplicitTrigger)
+            return
+        }
+    }
+
     private fun scanConversationListAndRun(scanSource: String) {
         val bypassCoolingDown =
             scanSource.contains("urgent_chat_followup") ||
                 scanSource.contains("post_send_back_followup") ||
-                scanSource.contains("vlm_retry_followup")
+                scanSource.contains("vlm_retry_followup") ||
+                scanSource.startsWith("queued_") ||
+                scanSource.contains("notification_busy")
         if (running.get() || (!bypassCoolingDown && isBusyOrCoolingDown())) {
             logger.log(TAG, "会话列表截图分析跳过：当前正忙或冷却中")
+            enqueuePendingScan(scanSource, "busy_or_cooling_down")
             return
         }
         val prefs = getSharedPreferences("host_config", Context.MODE_PRIVATE)
@@ -437,7 +572,10 @@ class HostForegroundService : Service() {
 
         val lastNotifyTs = prefs.getLong("last_notify_timestamp", 0L)
         val timeSinceNotify = System.currentTimeMillis() - lastNotifyTs
-        if (timeSinceNotify < 6000L) {
+        val shouldAvoidNotificationTransition = !scanSource.startsWith("queued_") &&
+            !scanSource.contains("notification_busy") &&
+            !scanSource.contains("explicit_runonce_busy")
+        if (shouldAvoidNotificationTransition && timeSinceNotify < 6000L) {
             logger.log(TAG, "会话列表截图分析跳过：近期 (${timeSinceNotify}ms前) 有通知触发，避让通知栏自动打开会话的过程")
             return
         }
@@ -487,7 +625,8 @@ class HostForegroundService : Service() {
                         returnToConversationList("发送后补扫无新入站")
                         return
                     }
-                    val lastReplyText = prefsReply.getString("last_reply_text", "").orEmpty()
+                    val sessionIdForContact = SessionIdentity.buildSessionId(this@HostForegroundService, contactName)
+                    val lastReplyText = getLastReplyText(prefsReply, sessionIdForContact)
                     var inboundCandidate = extractInboundCandidate(
                         ocr = ocr,
                         cap = cap,
@@ -502,7 +641,7 @@ class HostForegroundService : Service() {
                         initialCap = cap,
                         contactName = contactName,
                         lastReplyText = lastReplyText,
-                        sessionId = SessionIdentity.buildSessionId(this@HostForegroundService, contactName),
+                        sessionId = sessionIdForContact,
                     )?.let {
                         inboundCandidate = it
                         voiceTranscribeImagePathForRunOnce = it.fullScreenshotPath
@@ -515,22 +654,21 @@ class HostForegroundService : Service() {
                     )
                     if (shouldSkipBecauseLatestVisibleIsOutbound(cap, inboundCandidate)) {
                         val currentOutboundText = cap.latestOutboundCropPath?.let { ocr.recognize(it).trim() } ?: ""
-                        val lastReplyForCompare = prefsReply.getString("last_reply_text", "").orEmpty()
+                        val lastReplyForCompare = getLastReplyText(prefsReply, sessionIdForContact)
                         // 判断 outbound 文本是否为 AI 自动发出的回复（与上次 AI 回复高度相似时跳过上报）
                         val looksLikeAiReply = lastReplyForCompare.isNotBlank() &&
                             ConversationTextExtractor.looksLikeAgentReplyCandidate(currentOutboundText, lastReplyForCompare)
-                        if (currentOutboundText.isNotEmpty() && currentOutboundText != lastReportedOutboundText && !looksLikeAiReply) {
+                        if (currentOutboundText.isNotEmpty() && currentOutboundText != getLastReportedOutbound(sessionIdForContact) && !looksLikeAiReply) {
                             val agentClient = HttpAgentClient(this@HostForegroundService)
-                            val sessionId = SessionIdentity.buildSessionId(this@HostForegroundService, contactName)
                             try {
-                                agentClient.chat(cap.imagePath, currentOutboundText, sessionId, contactName, isHumanReply = true)
-                                lastReportedOutboundText = currentOutboundText
+                                agentClient.chat(cap.imagePath, currentOutboundText, sessionIdForContact, contactName, isHumanReply = true)
+                                setLastReportedOutbound(sessionIdForContact, currentOutboundText)
                                 logger.log(TAG, "检测到真人介入并发送消息: [${currentOutboundText.take(20)}]，已同步至后台接管流程")
                             } catch (e: Exception) {
                                 logger.log(TAG, "同步真人介入状态失败: ${e.message}")
                             }
                         } else if (looksLikeAiReply) {
-                            lastReportedOutboundText = currentOutboundText
+                            setLastReportedOutbound(sessionIdForContact, currentOutboundText)
                             logger.log(TAG, "检测到 outbound 文本与 AI 上次回复高度相似，跳过真人介入上报")
                         }
                         cleanupIntermediateOcrCrops(cap, inboundCandidate.path)
@@ -539,7 +677,7 @@ class HostForegroundService : Service() {
                         return
                     }
                     inboundCandidate.path?.let {
-                        exportFinalInboundOcrSnapshot(it, SessionIdentity.buildSessionId(this@HostForegroundService, contactName))
+                        exportFinalInboundOcrSnapshot(it, sessionIdForContact)
                         val pngFileName = File(it).name
                         val pngBytes = File(it).readBytes()
                         com.agentime.ime.host.capture.CaptureImageProcessor.exportPublicCopy(this@HostForegroundService, pngFileName, pngBytes)
@@ -561,7 +699,7 @@ class HostForegroundService : Service() {
                         returnToConversationList("聊天页提取文本疑似我方回复")
                         return
                     }
-                    val lastInboundSignature = prefsReply.getString("last_inbound_signature", "").orEmpty()
+                    val lastInboundSignature = getLastInboundSignature(prefsReply, sessionIdForContact)
                     if (inboundSignature.isNotBlank() && inboundSignature == lastInboundSignature) {
                         logger.log(TAG, "截图分析结果：当前是聊天页，但客户最新消息未变化，跳过本轮")
                         returnToConversationList("聊天页客户最新消息未变化")
@@ -570,7 +708,7 @@ class HostForegroundService : Service() {
                     logger.log(TAG, "截图分析结果：当前是聊天页，source=$scanSource，检测到客户新消息，直接复用本轮截图进入回复流程，联系人=$contactName")
                     ensureRuntimeEnabled("聊天页复用截图进入回复前")
                     runOnce(
-                        sessionId = SessionIdentity.buildSessionId(this@HostForegroundService, contactName),
+                        sessionId = sessionIdForContact,
                         contactName = contactName,
                         preCaptured = cap,
                         preOcrText = ocrText,
@@ -667,7 +805,8 @@ class HostForegroundService : Service() {
             }
             logger.log(TAG, "截图分析进入会话成功，联系人=$contactName")
             val prefsReply = getSharedPreferences("host_config", Context.MODE_PRIVATE)
-            val lastReplyText = prefsReply.getString("last_reply_text", "").orEmpty()
+            val sessionIdForContact = SessionIdentity.buildSessionId(this@HostForegroundService, contactName)
+            val lastReplyText = getLastReplyText(prefsReply, sessionIdForContact)
             var inboundCandidate = extractInboundCandidate(
                 ocr = ocr,
                 cap = postClickCap,
@@ -682,7 +821,7 @@ class HostForegroundService : Service() {
                 initialCap = postClickCap,
                 contactName = contactName,
                 lastReplyText = lastReplyText,
-                sessionId = SessionIdentity.buildSessionId(this@HostForegroundService, contactName),
+                sessionId = sessionIdForContact,
             )?.let {
                 inboundCandidate = it
                 voiceTranscribeImagePathForRunOnce = it.fullScreenshotPath
@@ -698,18 +837,17 @@ class HostForegroundService : Service() {
                 // 判断 outbound 文本是否为 AI 自动发出的回复（与上次 AI 回复高度相似时跳过上报）
                 val looksLikeAiReply = lastReplyText.isNotBlank() &&
                     ConversationTextExtractor.looksLikeAgentReplyCandidate(currentOutboundText, lastReplyText)
-                if (currentOutboundText.isNotEmpty() && currentOutboundText != lastReportedOutboundText && !looksLikeAiReply) {
+                if (currentOutboundText.isNotEmpty() && currentOutboundText != getLastReportedOutbound(sessionIdForContact) && !looksLikeAiReply) {
                     val agentClient = HttpAgentClient(this@HostForegroundService)
-                    val sessionId = SessionIdentity.buildSessionId(this@HostForegroundService, contactName)
                     try {
-                        agentClient.chat(postClickCap.imagePath, currentOutboundText, sessionId, contactName, isHumanReply = true)
-                        lastReportedOutboundText = currentOutboundText
+                        agentClient.chat(postClickCap.imagePath, currentOutboundText, sessionIdForContact, contactName, isHumanReply = true)
+                        setLastReportedOutbound(sessionIdForContact, currentOutboundText)
                         logger.log(TAG, "检测到真人介入并发送消息: [${currentOutboundText.take(20)}]，已同步至后台接管流程 (VLM)")
                     } catch (e: Exception) {
                         logger.log(TAG, "同步真人介入状态失败: ${e.message}")
                     }
                 } else if (looksLikeAiReply) {
-                    lastReportedOutboundText = currentOutboundText
+                    setLastReportedOutbound(sessionIdForContact, currentOutboundText)
                     logger.log(TAG, "检测到 outbound 文本与 AI 上次回复高度相似，跳过真人介入上报")
                 }
                 cleanupIntermediateOcrCrops(postClickCap, inboundCandidate.path)
@@ -718,7 +856,7 @@ class HostForegroundService : Service() {
                 return
             }
             inboundCandidate.path?.let {
-                exportFinalInboundOcrSnapshot(it, SessionIdentity.buildSessionId(this@HostForegroundService, contactName))
+                exportFinalInboundOcrSnapshot(it, sessionIdForContact)
                 val pngFileName = File(it).name
                 val pngBytes = File(it).readBytes()
                 com.agentime.ime.host.capture.CaptureImageProcessor.exportPublicCopy(this@HostForegroundService, pngFileName, pngBytes)
@@ -738,7 +876,7 @@ class HostForegroundService : Service() {
                 returnToConversationList("点击进入后提取文本疑似我方回复")
                 return
             }
-            val lastInboundSignature = prefsReply.getString("last_inbound_signature", "").orEmpty()
+            val lastInboundSignature = getLastInboundSignature(prefsReply, sessionIdForContact)
             if (inboundSignature.isNotBlank() && inboundSignature == lastInboundSignature) {
                 logger.log(TAG, "点击进入聊天后，客户最新消息未变化，取消本轮")
                 returnToConversationList("点击进入后客户最新消息未变化")
@@ -746,7 +884,7 @@ class HostForegroundService : Service() {
             }
             ensureRuntimeEnabled("点击入会话进入回复前")
             runOnce(
-                sessionId = SessionIdentity.buildSessionId(this@HostForegroundService, contactName),
+                sessionId = sessionIdForContact,
                 contactName = contactName,
                 preCaptured = postClickCap,
                 preOcrText = postClickOcr,
@@ -951,7 +1089,7 @@ class HostForegroundService : Service() {
                     ocr = ocr,
                     cap = cap,
                     contactName = resolvedContactName.ifBlank { contactName },
-                    lastReplyText = prefs.getString("last_reply_text", "").orEmpty(),
+                    lastReplyText = getLastReplyText(prefs, sessionId),
                     pageOcrText = ocrText,
                 )
                 tryTranscribeLatestVoiceIfNeeded(
@@ -959,7 +1097,7 @@ class HostForegroundService : Service() {
                     capture = capture,
                     initialCap = cap,
                     contactName = resolvedContactName.ifBlank { contactName },
-                    lastReplyText = prefs.getString("last_reply_text", "").orEmpty(),
+                    lastReplyText = getLastReplyText(prefs, sessionId),
                     sessionId = sessionId,
                 )?.let {
                     inboundCandidate = it
@@ -1015,7 +1153,7 @@ class HostForegroundService : Service() {
                 return
             }
 
-            val lastInboundSignature = prefs.getString("last_inbound_signature", "").orEmpty()
+            val lastInboundSignature = getLastInboundSignature(prefs, sessionId)
             if (inboundSignature.isNotBlank() && inboundSignature == lastInboundSignature) {
                 logger.log(TAG, "检测到最近客户消息未变化，跳过本轮回复")
                 moveState(HostState.SENT, "最近客户消息未变化，已跳过")
@@ -1075,13 +1213,10 @@ class HostForegroundService : Service() {
                 val sendOk = automation.clickSend()
                 logger.log(TAG, "clickSend 返回=$sendOk（若未发出，请在 host_config 调整 send_x/send_y）")
                 if (!sendOk) error("点击发送失败（坐标可能不匹配当前机型，请调整 send_x/send_y）")
-                prefs.edit()
-                    .putString("last_inbound_signature", inboundSignature)
-                    .putString("last_reply_text", reply.replyText)
-                    .apply()
-                // 将 AI 自动发出的回复记录到 lastReportedOutboundText，
+                saveConversationDedupState(prefs, sessionId, inboundSignature, reply.replyText)
+                // 将 AI 自动发出的回复按会话记录，
                 // 防止后续截屏检测时将 AI 回复误判为真人手动介入。
-                lastReportedOutboundText = reply.replyText
+                setLastReportedOutbound(sessionId, reply.replyText)
                 moveState(HostState.SENT, "发送完成")
                 // 发送后先在当前会话内快速探测一次：若对方又发了新消息，先不返回列表页，
                 // 直接触发一次会话内补扫，避免“返回后无红点导致漏处理”。
@@ -2325,9 +2460,8 @@ class HostForegroundService : Service() {
             val scopedOcrText = ocr.recognize(sinceLastOutboundPath).trim()
             cleanupIntermediateOcrCrops(probeCap, sinceLastOutboundPath)
             if (scopedOcrText.isBlank()) return@runCatching false
-            val lastReplySig = ConversationTextExtractor.signatureOf(
-                prefs.getString("last_reply_text", "").orEmpty(),
-            )
+            val lastReplyText = getLastReplyText(prefs, sessionId)
+            val lastReplySig = ConversationTextExtractor.signatureOf(lastReplyText)
             val scopedSig = ConversationTextExtractor.signatureOf(scopedOcrText)
             // 发送后探测必须足够保守：若仍大量含有我方刚发内容，则判为未出现新的客户入站。
             if (lastReplySig.isNotBlank() && scopedSig.contains(lastReplySig.take(8))) {
@@ -2336,14 +2470,14 @@ class HostForegroundService : Service() {
             val extraction = ConversationTextExtractor.extractLatestInboundMessage(
                 ocrText = scopedOcrText,
                 contactName = contactName,
-                lastReplyText = prefs.getString("last_reply_text", "").orEmpty(),
+                lastReplyText = lastReplyText,
             )
             val text = extraction.text
             val sig = extraction.signature
-            val lastSig = prefs.getString("last_inbound_signature", "").orEmpty()
+            val lastSig = getLastInboundSignature(prefs, sessionId)
             if (text.isBlank() || sig.isBlank()) return@runCatching false
             if (sig == lastSig) return@runCatching false
-            if (ConversationTextExtractor.looksLikeAgentReplyCandidate(text, prefs.getString("last_reply_text", "").orEmpty())) {
+            if (ConversationTextExtractor.looksLikeAgentReplyCandidate(text, lastReplyText)) {
                 return@runCatching false
             }
             logger.log(TAG, "发送后会话探测到新增客户消息候选: ${text.take(80)}")
@@ -2453,6 +2587,12 @@ class HostForegroundService : Service() {
         private const val VOICE_SHORTCUT_MAX_WAIT_ROUNDS = 3
         // 语音转文字：长按弹窗菜单后最大等待轮数（每轮 ~700ms）
         private const val VOICE_LONGPRESS_MAX_WAIT_ROUNDS = 8
+        private const val MAX_PENDING_RUN_ONCE = 20
+        private const val PENDING_DRAIN_DELAY_MS = 800L
+        private val pendingLock = Any()
+        private val pendingRunOnceQueue = ArrayDeque<PendingRunOnce>()
+        private val pendingRunOnceKeys = mutableSetOf<String>()
+        @Volatile private var pendingScanSource: String? = null
 
         fun isBusyOrCoolingDown(): Boolean {
             val coolingDown = System.currentTimeMillis() - lastFinishedAt < 8_000L

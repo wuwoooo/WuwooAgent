@@ -975,6 +975,101 @@ def save_message(session_id: str, contact_name: str, role: str, content: str, ag
     conn.commit()
     conn.close()
 
+
+def save_message_pair(
+    session_id: str,
+    contact_name: str,
+    user_content: str,
+    assistant_content: str,
+    agent_id: int | None = None,
+    session_status: str | None = None,
+) -> None:
+    """用一个事务保存一轮客户消息和我方回复，避免并发下只写入半轮对话。"""
+    now_bj = get_beijing_time()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("BEGIN IMMEDIATE")
+        _save_message_with_cursor(
+            cursor,
+            session_id,
+            contact_name,
+            "user",
+            user_content,
+            agent_id=agent_id,
+            created_at=now_bj,
+        )
+        _save_message_with_cursor(
+            cursor,
+            session_id,
+            contact_name,
+            "assistant",
+            assistant_content,
+            agent_id=agent_id,
+            created_at=now_bj,
+        )
+        if session_status:
+            if agent_id is None:
+                cursor.execute(
+                    "UPDATE sessions SET status = ?, updated_at = ? WHERE session_id = ?",
+                    (normalize_session_status(session_status), now_bj, session_id),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE sessions SET status = ?, updated_at = ? WHERE session_id = ? AND agent_id = ?",
+                    (normalize_session_status(session_status), now_bj, session_id, agent_id),
+                )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_recent_duplicate_assistant_reply(
+    session_id: str,
+    user_content: str,
+    within_seconds: int = 180,
+) -> str:
+    """若最近一轮已处理过完全相同的客户消息，返回当时的回复用于幂等重试。"""
+    normalized_user = (user_content or "").strip()
+    if not session_id or not normalized_user:
+        return ""
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id, role, content, created_at
+        FROM messages
+        WHERE session_id = ?
+        ORDER BY id DESC
+        LIMIT 8
+        """,
+        (session_id,),
+    )
+    rows = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+
+    if len(rows) < 2:
+        return ""
+    latest = rows[0]
+    previous = rows[1]
+    if latest.get("role") != "assistant" or previous.get("role") != "user":
+        return ""
+    if str(previous.get("content") or "").strip() != normalized_user:
+        return ""
+
+    try:
+        tz = timezone(timedelta(hours=8))
+        created_at = datetime.strptime(str(latest.get("created_at") or ""), "%Y-%m-%d %H:%M:%S").replace(tzinfo=tz)
+        if (datetime.now(tz) - created_at).total_seconds() > max(1, within_seconds):
+            return ""
+    except Exception:
+        return ""
+    return str(latest.get("content") or "").strip()
+
 def get_all_sessions(agent_id: int | None = None, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
     conn = get_connection()
     cursor = conn.cursor()
@@ -1039,7 +1134,7 @@ def get_session_messages(session_id: str) -> List[Dict[str, Any]]:
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT id, role, content, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC",
+        "SELECT id, role, content, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC, id ASC",
         (session_id,)
     )
     rows = cursor.fetchall()

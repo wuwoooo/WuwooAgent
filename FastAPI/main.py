@@ -70,6 +70,17 @@ def _configure_logging_timestamps() -> None:
 
 _configure_logging_timestamps()
 logger = logging.getLogger("fastapi-admin")
+_session_locks: dict[str, asyncio.Lock] = {}
+_session_locks_guard = asyncio.Lock()
+
+
+async def _get_session_lock(session_id: str) -> asyncio.Lock:
+    async with _session_locks_guard:
+        lock = _session_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _session_locks[session_id] = lock
+        return lock
 
 app = FastAPI(title="微信聊天分析", version="0.3.0")
 
@@ -1047,121 +1058,189 @@ async def wechat_chat(
             "reply_text": "",
         }
 
-    # 统一构建 prompt：ocr_text 为空时自动降级为兜底描述
-    pure_user_text, system_prompt_addition, final_user_text = _build_user_prompt(contact_name, ocr_text or "", current_status)
-
-
-    if _should_request_handoff(pure_user_text, session_id):
-        reply_text = _handoff_reply_text()
+    session_lock = await _get_session_lock(session_id)
+    async with session_lock:
         try:
-            database.save_message(session_id, contact_name, "user", pure_user_text, agent_id=agent_id)
-            database.save_message(session_id, contact_name, "assistant", reply_text, agent_id=agent_id)
-            database.update_session_status(session_id, "handoff_requested", agent_id=agent_id)
-            asyncio.create_task(check_and_trigger_profile_update(session_id, contact_id=contact_id))
-        except Exception as e:
-            logger.warning(
-                "确定性接管触发后保存状态失败: agent_id=%s session_id=%s contact=%s error=%s",
+            current_status = database.get_session_status(session_id)
+        except Exception:
+            current_status = "auto"
+
+        if current_status in {"human_takeover", "muted"}:
+            pure_user_text = (ocr_text or "").strip()
+            if pure_user_text:
+                try:
+                    database.save_message(session_id, contact_name, "user", pure_user_text, agent_id=agent_id)
+                except Exception as e:
+                    logger.warning(
+                        "锁内静音期间保存客户消息失败: session_id=%s contact=%s status=%s error=%s",
+                        session_id,
+                        contact_name,
+                        current_status,
+                        e,
+                    )
+            logger.info(
+                "锁内重读发现会话已静音，跳过 AI 回复: session_id=%s contact=%s status=%s text=%s",
+                session_id,
+                contact_name,
+                current_status,
+                pure_user_text[:80],
+            )
+            return {
+                "ok": True,
+                "silenced": True,
+                "reason": current_status,
+                "current_status": current_status,
+                "messages": [{"role": "assistant", "text": ""}],
+                "reply_text": "",
+            }
+
+        # 统一构建 prompt：ocr_text 为空时自动降级为兜底描述；需在会话锁内基于最新状态构建。
+        pure_user_text, system_prompt_addition, final_user_text = _build_user_prompt(contact_name, ocr_text or "", current_status)
+
+        duplicate_reply = await asyncio.to_thread(
+            database.get_recent_duplicate_assistant_reply,
+            session_id,
+            pure_user_text,
+        )
+        if duplicate_reply:
+            logger.info(
+                "命中同会话近期幂等回复: agent_id=%s session_id=%s contact=%s text=%s",
                 agent_id,
                 session_id,
                 contact_name,
-                e,
+                pure_user_text[:80],
             )
+            return {
+                "ok": True,
+                "deduplicated": True,
+                "agent_id": agent_id,
+                "agent_display_name": agent.get("display_name") or agent.get("username"),
+                "session_id": session_id,
+                "current_status": current_status,
+                "messages": [
+                    {"role": "user", "text": pure_user_text},
+                    {"role": "assistant", "text": duplicate_reply},
+                ],
+                "reply_text": duplicate_reply,
+            }
+
+        if _should_request_handoff(pure_user_text, session_id):
+            reply_text = _handoff_reply_text()
+            try:
+                database.save_message_pair(
+                    session_id,
+                    contact_name,
+                    pure_user_text,
+                    reply_text,
+                    agent_id=agent_id,
+                    session_status="handoff_requested",
+                )
+                asyncio.create_task(check_and_trigger_profile_update(session_id, contact_id=contact_id))
+            except Exception as e:
+                logger.warning(
+                    "确定性接管触发后保存状态失败: agent_id=%s session_id=%s contact=%s error=%s",
+                    agent_id,
+                    session_id,
+                    contact_name,
+                    e,
+                )
+            return {
+                "ok": True,
+                "agent_id": agent_id,
+                "agent_display_name": agent.get("display_name") or agent.get("username"),
+                "session_id": session_id,
+                "current_status": "handoff_requested",
+                "handoff_requested": True,
+                "messages": [
+                    {"role": "user", "text": pure_user_text},
+                    {"role": "assistant", "text": reply_text},
+                ],
+                "reply_text": reply_text,
+            }
+
+        provider = _provider_from_env()
+        try:
+            if provider == "adp":
+                sid, skey, region, app_key = load_adp_config_from_env()
+                reply_text = await run_adp_chat(
+                    secret_id=sid,
+                    secret_key=skey,
+                    region=region,
+                    bot_app_key=app_key,
+                    session_id=session_id,
+                    user_text=f"{system_prompt_addition}\n{final_user_text}",
+                )
+                messages = [
+                    {"role": "user", "text": pure_user_text},
+                    {"role": "assistant", "text": reply_text},
+                ]
+            else:
+                reply_text, debug_payload = await asyncio.to_thread(
+                    run_volc_knowledge_chat,
+                    pure_user_text=pure_user_text,
+                    user_message=final_user_text,
+                    system_prompt_addition=system_prompt_addition,
+                    contact_name=contact_name,
+                    session_id=session_id,
+                    contact_context=contact_context,
+                )
+                messages = [
+                    {"role": "user", "text": pure_user_text},
+                    {"role": "assistant", "text": reply_text},
+                ]
+                if debug_payload.get("provider"):
+                    messages.append({"role": "system", "text": f"provider={debug_payload['provider']}"})
+                logger.info(
+                    "火山知识库对话调试: session=%s contact=%s provider=%s search_query=%s skipped=%s context_bridge=%s",
+                    session_id,
+                    contact_name,
+                    debug_payload.get("provider", ""),
+                    str(debug_payload.get("search_query") or "")[:300],
+                    debug_payload.get("search_skipped_reason", ""),
+                    json.dumps(debug_payload.get("context_bridge") or {}, ensure_ascii=False)[:500],
+                )
+        except Exception as e:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "ok": False,
+                    "error": str(e),
+                    "messages": [],
+                    "reply_text": "",
+                },
+            )
+
+        handoff_requested = "[HANDOFF]" in reply_text
+        if handoff_requested:
+            reply_text = reply_text.replace("[HANDOFF]", "").strip()
+
+        reply_text = _strip_repeated_customer_address(reply_text, contact_name, session_id)
+        for msg in messages:
+            if msg.get("role") == "assistant":
+                msg["text"] = reply_text
+                break
+
+        try:
+            database.save_message_pair(
+                session_id,
+                contact_name,
+                pure_user_text,
+                reply_text,
+                agent_id=agent_id,
+                session_status="handoff_requested" if handoff_requested else None,
+            )
+            asyncio.create_task(check_and_trigger_profile_update(session_id, contact_id=contact_id))
+        except Exception:
+            pass
+
         return {
             "ok": True,
             "agent_id": agent_id,
             "agent_display_name": agent.get("display_name") or agent.get("username"),
             "session_id": session_id,
-            "current_status": "handoff_requested",
-            "handoff_requested": True,
-            "messages": [
-                {"role": "user", "text": pure_user_text},
-                {"role": "assistant", "text": reply_text},
-            ],
+            "messages": messages,
             "reply_text": reply_text,
         }
-
-    provider = _provider_from_env()
-    try:
-        if provider == "adp":
-            sid, skey, region, app_key = load_adp_config_from_env()
-            reply_text = await run_adp_chat(
-                secret_id=sid,
-                secret_key=skey,
-                region=region,
-                bot_app_key=app_key,
-                session_id=session_id,
-                user_text=f"{system_prompt_addition}\n{final_user_text}",
-            )
-            messages = [
-                {"role": "user", "text": pure_user_text},
-                {"role": "assistant", "text": reply_text},
-            ]
-        else:
-            reply_text, debug_payload = await asyncio.to_thread(
-                run_volc_knowledge_chat,
-                pure_user_text=pure_user_text,
-                user_message=final_user_text,
-                system_prompt_addition=system_prompt_addition,
-                contact_name=contact_name,
-                session_id=session_id,
-                contact_context=contact_context,
-            )
-            messages = [
-                {"role": "user", "text": pure_user_text},
-                {"role": "assistant", "text": reply_text},
-            ]
-            if debug_payload.get("provider"):
-                messages.append({"role": "system", "text": f"provider={debug_payload['provider']}"})
-            logger.info(
-                "火山知识库对话调试: session=%s contact=%s provider=%s search_query=%s skipped=%s context_bridge=%s",
-                session_id,
-                contact_name,
-                debug_payload.get("provider", ""),
-                str(debug_payload.get("search_query") or "")[:300],
-                debug_payload.get("search_skipped_reason", ""),
-                json.dumps(debug_payload.get("context_bridge") or {}, ensure_ascii=False)[:500],
-            )
-    except Exception as e:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "ok": False,
-                "error": str(e),
-                "messages": [],
-                "reply_text": "",
-            },
-        )
-        
-    # Check for handoff
-    if "[HANDOFF]" in reply_text:
-        reply_text = reply_text.replace("[HANDOFF]", "").strip()
-        try:
-            database.update_session_status(session_id, "handoff_requested", agent_id=agent_id)
-        except Exception:
-            pass
-
-    reply_text = _strip_repeated_customer_address(reply_text, contact_name, session_id)
-    for msg in messages:
-        if msg.get("role") == "assistant":
-            msg["text"] = reply_text
-            break
-
-    # Save messages to database and trigger async profile check
-    try:
-        database.save_message(session_id, contact_name, "user", pure_user_text, agent_id=agent_id)
-        database.save_message(session_id, contact_name, "assistant", reply_text, agent_id=agent_id)
-        asyncio.create_task(check_and_trigger_profile_update(session_id, contact_id=contact_id))
-    except Exception as e:
-        pass # Ignore db errors to not fail the main chat
-
-    return {
-        "ok": True,
-        "agent_id": agent_id,
-        "agent_display_name": agent.get("display_name") or agent.get("username"),
-        "session_id": session_id,
-        "messages": messages,
-        "reply_text": reply_text,
-    }
 
 
 @app.get("/health")

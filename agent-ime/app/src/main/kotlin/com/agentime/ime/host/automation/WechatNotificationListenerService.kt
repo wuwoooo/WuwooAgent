@@ -46,7 +46,16 @@ class WechatNotificationListenerService : NotificationListenerService() {
         val runtimeEnabled = prefs.getBoolean(PREF_RUNTIME_ENABLED, false)
         if (executionMode != "auto" || !autoEnabled || !runtimeEnabled) return
         if (HostForegroundService.isBusyOrCoolingDown()) {
-            logger.log(TAG, "当前正在执行任务或刚完成发送，忽略微信通知触发以避免把通知浮层当成客户消息")
+            logger.log(TAG, "当前正在执行任务或刚完成发送，已转为排队扫描，避免把通知浮层当成客户消息")
+            val intent = Intent(this, HostForegroundService::class.java).apply {
+                action = HostForegroundService.ACTION_SCAN_CONVERSATION_LIST
+                putExtra(HostForegroundService.EXTRA_SCAN_SOURCE, "notification_busy")
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
             return
         }
 
