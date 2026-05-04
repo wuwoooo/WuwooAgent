@@ -921,6 +921,13 @@ class HostForegroundService : Service() {
             val reply = agentClient.chat(cap.imagePath, "", sessionId, contactName)
             moveState(HostState.REPLY_READY, "reply_text 长度=${reply.replyText.length}")
 
+            if (reply.isGroupChat) {
+                logger.log(TAG, "检测到当前为群聊，Agent 不处理并自动返回主屏(列表页)")
+                moveState(HostState.SENT, "识别为群聊，已跳过")
+                returnToConversationList("检测为群聊")
+                return
+            }
+
             if (reply.replyText.isBlank()) {
                 if (reply.silenced) {
                     logger.log(TAG, "后端会话处于静音状态，跳过本轮注入: status=${reply.currentStatus} reason=${reply.reason}")

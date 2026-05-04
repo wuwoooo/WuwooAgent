@@ -6,6 +6,7 @@ data class AgentReply(
     val silenced: Boolean = false,
     val reason: String = "",
     val currentStatus: String = "",
+    val isGroupChat: Boolean = false,
 )
 
 interface AgentClient {

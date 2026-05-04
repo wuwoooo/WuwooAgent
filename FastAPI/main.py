@@ -618,9 +618,11 @@ def _run_vision_ocr(image_bytes: bytes) -> dict[str, Any]:
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
     prompt = (
         "你是一个微信界面提取专家。请提取图片中顶部标题栏的「联系人名称」以及所有的「聊天记录」。\n"
-        "请注意：绿色气泡表示'我方(agent)'发送的，白色/其他非绿色气泡表示'客户(client)'发送的。\n"
+        "请注意：\n"
+        "1. 绿色气泡表示'我方(agent)'发送的，白色/其他非绿色气泡表示'客户(client)'发送的。\n"
+        "2. 请判断该聊天是否为群聊（例如标题栏有群成员数量如“旅游群(5)”，或者聊天界面有多人发言）。\n"
         "严格返回一个 JSON 对象，不要包裹在任何 Markdown 标记中，格式如下：\n"
-        '{"contact_name": "张三", "messages": [{"sender": "client", "text": "你好"}, {"sender": "agent", "text": "您好，需要什么旅游定制服务？"}]}'
+        '{"contact_name": "张三", "is_group_chat": false, "messages": [{"sender": "client", "text": "你好"}, {"sender": "agent", "text": "您好，需要什么旅游定制服务？"}]}'
     )
     
     payload = {
@@ -707,6 +709,16 @@ async def wechat_chat(
         if not ocr_ok:
             logger.info(f"客户端未提供 ocr_text，触发 VLM 视觉大模型提取: {safe_name}")
             extracted_data = await asyncio.to_thread(_run_vision_ocr, image_bytes)
+            
+            if extracted_data.get("is_group_chat"):
+                logger.info("VLM 识别出这是群聊，返回主屏信号并停止处理")
+                return {
+                    "ok": True,
+                    "is_group_chat": True,
+                    "messages": [],
+                    "reply_text": "",
+                }
+
             extracted_msgs = extracted_data.get("messages", [])
             vlm_contact_name = extracted_data.get("contact_name")
             

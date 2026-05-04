@@ -139,12 +139,14 @@ class HttpAgentClient(private val context: Context) : AgentClient {
         val silenced = json?.optBoolean("silenced", false) ?: false
         val reason = json?.optString("reason", "")?.trim().orEmpty()
         val currentStatus = json?.optString("current_status", "")?.trim().orEmpty()
+        val isGroupChat = json?.optBoolean("is_group_chat", false) ?: false
         return AgentReply(
             replyText = replyText,
             raw = text,
             silenced = silenced,
             reason = reason,
             currentStatus = currentStatus,
+            isGroupChat = isGroupChat,
         )
     }
 
