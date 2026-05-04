@@ -439,6 +439,7 @@ class HostForegroundService : Service() {
                         lastReplyText = lastReplyText,
                         pageOcrText = ocrText,
                     )
+                    var voiceTranscribeImagePathForRunOnce: String? = null
                     tryTranscribeLatestVoiceIfNeeded(
                         ocr = ocr,
                         capture = capture,
@@ -446,7 +447,10 @@ class HostForegroundService : Service() {
                         contactName = contactName,
                         lastReplyText = lastReplyText,
                         sessionId = SessionIdentity.buildSessionId(this@HostForegroundService, contactName),
-                    )?.let { inboundCandidate = it }
+                    )?.let {
+                        inboundCandidate = it
+                        voiceTranscribeImagePathForRunOnce = it.fullScreenshotPath
+                    }
                     val latestInbound = inboundCandidate.text
                     val inboundSignature = inboundCandidate.signature
                     logger.log(
@@ -510,6 +514,7 @@ class HostForegroundService : Service() {
                         preOcrText = ocrText,
                         preLatestInbound = latestInbound,
                         preInboundSignature = inboundSignature,
+                        preVoiceTranscribeImagePath = voiceTranscribeImagePathForRunOnce,
                     )
                     return
                 }
@@ -604,6 +609,7 @@ class HostForegroundService : Service() {
                 lastReplyText = lastReplyText,
                 pageOcrText = postClickOcr,
             )
+            var voiceTranscribeImagePathForRunOnce: String? = null
             tryTranscribeLatestVoiceIfNeeded(
                 ocr = ocr,
                 capture = capture,
@@ -611,7 +617,10 @@ class HostForegroundService : Service() {
                 contactName = contactName,
                 lastReplyText = lastReplyText,
                 sessionId = SessionIdentity.buildSessionId(this@HostForegroundService, contactName),
-            )?.let { inboundCandidate = it }
+            )?.let {
+                inboundCandidate = it
+                voiceTranscribeImagePathForRunOnce = it.fullScreenshotPath
+            }
             val latestInbound = inboundCandidate.text
             val inboundSignature = inboundCandidate.signature
             logger.log(
@@ -677,6 +686,7 @@ class HostForegroundService : Service() {
                 preLatestInbound = latestInbound,
                 preInboundSignature = inboundSignature,
                 isExplicitTrigger = true,
+                preVoiceTranscribeImagePath = voiceTranscribeImagePathForRunOnce,
             )
         } catch (e: Exception) {
             val msg = e.message.orEmpty()
@@ -731,6 +741,8 @@ class HostForegroundService : Service() {
         preLatestInbound: String? = null,
         preInboundSignature: String? = null,
         isExplicitTrigger: Boolean = false,
+        // 语音转文字成功后的全屏截图路径（从 scanConversationListAndRun 传入）
+        preVoiceTranscribeImagePath: String? = null,
     ) {
         if (!running.compareAndSet(false, true)) {
             logger.log(TAG, "已有任务在执行中，忽略新的 runOnce: $sessionId/$contactName")
@@ -790,13 +802,17 @@ class HostForegroundService : Service() {
             val ocrText: String
             val latestInbound: String
             val inboundSignature: String
+            // 语音转文字成功后的全屏截图路径（用于替代初始截图发给 VLM）
+            var voiceTranscribeImagePath: String? = null
             if (preCaptured != null && !preOcrText.isNullOrBlank() && !preLatestInbound.isNullOrBlank()) {
                 cap = preCaptured
                 ocrText = preOcrText
                 latestInbound = preLatestInbound
                 inboundSignature = preInboundSignature.orEmpty()
+                // 复用上层传入的语音转文字截图路径
+                voiceTranscribeImagePath = preVoiceTranscribeImagePath
                 startForegroundCompat("正在分析微信聊天", includeProjectionType = true)
-                logger.log(TAG, "复用页面分析阶段已成功获取的截图与 OCR，跳过二次截图")
+                logger.log(TAG, "复用页面分析阶段已成功获取的截图与 OCR，跳过二次截图 voiceTranscribeImage=${preVoiceTranscribeImagePath != null}")
                 moveState(HostState.SCREEN_CAPTURED, "复用截图: ${cap.imagePath}")
             } else {
                 startForegroundCompat("正在分析微信聊天", includeProjectionType = true)
@@ -865,7 +881,12 @@ class HostForegroundService : Service() {
                     contactName = resolvedContactName.ifBlank { contactName },
                     lastReplyText = prefs.getString("last_reply_text", "").orEmpty(),
                     sessionId = sessionId,
-                )?.let { inboundCandidate = it }
+                )?.let {
+                    inboundCandidate = it
+                    // 记录语音转文字后的全屏截图路径，后续发给 VLM 时使用
+                    voiceTranscribeImagePath = it.fullScreenshotPath
+                    logger.log(TAG, "语音转文字成功，将使用转文字后截图发送给 VLM: ${it.fullScreenshotPath}")
+                }
                 latestInbound = inboundCandidate.text
                 inboundSignature = inboundCandidate.signature
                 inboundCandidate.path?.let {
@@ -917,8 +938,10 @@ class HostForegroundService : Service() {
                 return
             }
 
-            logger.log(TAG, "触发后端 API 调用，强制使用图片进行 VLM OCR 提取")
-            val reply = agentClient.chat(cap.imagePath, "", sessionId, contactName)
+            // 优先使用语音转文字后的全屏截图（此时截图上已展开语音文字内容）
+            val imageForVlm = voiceTranscribeImagePath ?: cap.imagePath
+            logger.log(TAG, "触发后端 API 调用，使用图片进行 VLM OCR 提取: $imageForVlm (语音转文字截图=${voiceTranscribeImagePath != null})")
+            val reply = agentClient.chat(imageForVlm, "", sessionId, contactName)
             moveState(HostState.REPLY_READY, "reply_text 长度=${reply.replyText.length}")
 
             if (reply.isGroupChat) {
@@ -1386,7 +1409,8 @@ class HostForegroundService : Service() {
             )
             if (candidate.text.isNotBlank()) {
                 logger.log(TAG, "语音转文字已提取有效文本: ${candidate.text.take(120)}")
-                return candidate
+                // 返回时携带转文字后的全屏截图路径，供后续 VLM 使用
+                return candidate.copy(fullScreenshotPath = cap.imagePath)
             }
             logger.log(
                 TAG,
@@ -1604,6 +1628,8 @@ class HostForegroundService : Service() {
         val sourceLabel: String? = null,
         val path: String? = null,
         val score: Int = Int.MIN_VALUE,
+        // 语音转文字成功后的全屏截图路径（转文字展开后重新截取，用于发给 VLM）
+        val fullScreenshotPath: String? = null,
     )
 
     private fun shouldSkipBecauseLatestVisibleIsOutbound(

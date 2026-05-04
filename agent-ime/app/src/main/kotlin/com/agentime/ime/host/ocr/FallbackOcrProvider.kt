@@ -3,29 +3,23 @@ package com.agentime.ime.host.ocr
 import android.util.Log
 
 /**
- * 先本地 ML Kit；失败或 **空串** 时再试远程（首帧黑屏时本地常返回空，不会抛异常）。
+ * 本地 ML Kit OCR 提供者封装。
+ *
+ * 历史版本曾包含 Remote OCR 兜底，但自 VLM 引入后
+ * 远程 OCR 已被 VLM 视觉大模型完全替代，此处仅保留本地 OCR。
+ * 类名保持不变以减少调用方改动（调用方类型签名大量引用 FallbackOcrProvider）。
  */
 class FallbackOcrProvider(
     private val local: OcrProvider,
-    private val remote: OcrProvider,
 ) : OcrProvider {
+    // 兼容旧的双参数构造调用：忽略第二个参数（已废弃的 RemoteOcrProvider）
+    constructor(local: OcrProvider, @Suppress("UNUSED_PARAMETER") deprecated: OcrProvider) : this(local)
+
     override fun recognize(imagePath: String, imageUri: String?): String {
-        val fromLocal = try {
+        return try {
             local.recognize(imagePath, imageUri)
         } catch (e: Exception) {
-            Log.w(TAG, "本地 OCR 异常，改远程: ${e.message}")
-            return tryRemote(imagePath, imageUri)
-        }
-        if (fromLocal.isNotBlank()) return fromLocal
-        Log.w(TAG, "本地 OCR 结果为空，尝试远程兜底")
-        return tryRemote(imagePath, imageUri)
-    }
-
-    private fun tryRemote(imagePath: String, imageUri: String?): String {
-        return try {
-            remote.recognize(imagePath, imageUri)
-        } catch (e: Exception) {
-            Log.w(TAG, "远程 OCR 不可用或失败: ${e.message}")
+            Log.w(TAG, "本地 OCR 异常: ${e.message}")
             ""
         }
     }
