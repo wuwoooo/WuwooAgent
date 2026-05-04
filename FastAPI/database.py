@@ -27,6 +27,11 @@ VALID_SESSION_STATUSES = {"auto", "handoff_requested", "human_takeover", "muted"
 TRAILING_EMOJI_RE = re.compile(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\u200D\uFE0F\U000E0020-\U000E007F]+$")
 TRAILING_EMOJI_PLACEHOLDER_RE = re.compile(r"\s*[\[(](?:表情|动画表情|emoji)[\])]$", re.IGNORECASE)
 EMPTY_PROFILE_VALUES = {"", "无", "未知", "未明确", "待定", "待确认", "没有", "暂无"}
+ASSISTANT_PROMPT_REWRITTEN_AS_NEED_RE = re.compile(
+    r"(客户|用户).{0,12}(希望|想|需要|关注|关心).{0,12}"
+    r"(确认|了解|提供|补充|告知).{0,12}"
+    r"(年龄|出发地|出行人数|出行时间|老人|孩子|小朋友|病患|腿脚|行动)"
+)
 
 
 def canonicalize_contact_name(raw: str | None, default: str = "客户") -> str:
@@ -78,6 +83,11 @@ def _compact_profile_value(value: Any) -> str:
 def _is_meaningful_profile_value(value: Any) -> bool:
     text = _compact_profile_value(value)
     return bool(text and text not in EMPTY_PROFILE_VALUES)
+
+
+def _looks_like_assistant_prompt_rewritten_as_customer_need(value: Any) -> bool:
+    text = _compact_profile_value(value)
+    return bool(text and ASSISTANT_PROMPT_REWRITTEN_AS_NEED_RE.search(text))
 
 
 def _add_contact_alias(cursor: sqlite3.Cursor, session_id: str, contact_name: str | None) -> None:
@@ -832,6 +842,8 @@ def _merge_mapping(target: Dict[str, Any], incoming: Dict[str, Any], now_bj: str
             confidence = "medium"
         if not _is_meaningful_profile_value(stored_value):
             continue
+        if _looks_like_assistant_prompt_rewritten_as_customer_need(stored_value):
+            continue
         result[key] = {
             "value": stored_value,
             "source": "conversation",
@@ -892,6 +904,8 @@ def merge_contact_memory(
             confidence = "medium"
             category = "背景事实"
         if not _is_meaningful_profile_value(value):
+            continue
+        if _looks_like_assistant_prompt_rewritten_as_customer_need(value):
             continue
         item = {
             "category": category,

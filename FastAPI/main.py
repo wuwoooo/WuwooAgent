@@ -229,11 +229,27 @@ def get_current_time_str() -> str:
 HANDOFF_DIRECT_RE = re.compile(
     r"(报个价|核价|核算报价|最终报价|算一下价格|算一下报价|具体多少钱|"
     r"下单|预订|订一下|定一下|打款|付款|交钱|"
-    r"确定方案|方案定了|行程定了|确定行程|就这么定了|按这个定)"
+    r"确定方案|方案定了|行程定了|确定行程|就这么定了|按这个定|"
+    r"出方案|做方案|定制方案|完整方案|安排方案)"
 )
 HANDOFF_ACK_TEXTS = {"可以", "可以的", "好的", "好", "行", "没问题", "嗯", "嗯嗯", "ok", "OK"}
 HANDOFF_CONTEXT_RE = re.compile(
     r"(按这个定|就按这个定|确定方案|方案确认|最终报价|最终方案)"
+)
+HANDOFF_INFO_COLLECTION_RE = re.compile(
+    r"(出行人数|出行时间|出发地|老人/孩子|老人|孩子|小朋友的具体年龄|具体年龄|"
+    r"病患|腿脚不便|行动不便|为了方案和报价更准确|补充下)"
+)
+PLAN_DELIVERY_DEADLINE_RE = re.compile(
+    r"((?:今天|明天)?(?:上午|中午|下午|晚上)?\s*\d{1,2}\s*点(?:半|前|左右)?|"
+    r"\d{1,2}\s*[:：]\s*\d{2}(?:前|左右)?)"
+    r".{0,12}(?:发|给|发送|整理).{0,12}(?:方案|行程|报价)"
+    r"|(?:发|给|发送|整理).{0,12}(?:方案|行程|报价).{0,12}"
+    r"((?:今天|明天)?(?:上午|中午|下午|晚上)?\s*\d{1,2}\s*点(?:半|前|左右)?|"
+    r"\d{1,2}\s*[:：]\s*\d{2}(?:前|左右)?)"
+)
+PAST_TIME_ITINERARY_RE = re.compile(
+    r"(上午|早上|上午\s*\d{1,2}\s*点|早上\s*\d{1,2}\s*点|9\s*点|九\s*点|光线柔和|适合拍照)"
 )
 
 
@@ -404,8 +420,74 @@ def _has_handoff_intent(latest_text: str, session_id: str) -> bool:
     return bool(HANDOFF_CONTEXT_RE.search(recent_context))
 
 
+def _is_handoff_info_collection_active(session_id: str) -> bool:
+    """客户已进入最终方案/报价前的信息补齐流程，后续短答也要继续追问剩余缺口。"""
+    try:
+        recent_messages = database.get_session_messages(session_id)[-8:]
+    except Exception:
+        return False
+
+    recent_context = "\n".join(str(msg.get("content") or "") for msg in recent_messages)
+    if not recent_context:
+        return False
+    return bool(
+        HANDOFF_DIRECT_RE.search(recent_context)
+        or HANDOFF_CONTEXT_RE.search(recent_context)
+        or HANDOFF_INFO_COLLECTION_RE.search(recent_context)
+    )
+
+
 def _handoff_reply_text() -> str:
     return "好的，我这就为您核算最终的报价并整理确认方案～"
+
+
+def _time_awareness_rule() -> str:
+    return (
+        "【时间感知规则】当前实际时间只用于判断今天/明天/下周和避免过期建议，不能把当前日期默认当成客户的出行日期。"
+        "客户没有明确出行日期时，不要说“安排进今天/5月4日的行程”这类具体日期行程，应先问客户计划哪天去或用“到时候/当天”表达。"
+        "如果当前已经过了某个时段，绝对不要建议客户在今天已过去的时段出发、拍照或游玩；例如傍晚不能再排今天上午9点。"
+        "不要承诺具体出方案/报价交付时间，例如“下午3点前发您”“半小时后给您”；人工核算和定版耗时不确定时，只能说“我整理好后发您确认”“这边核算清楚后发您”。"
+    )
+
+
+def _has_known_travel_time(session_profile: dict[str, Any] | None = None) -> bool:
+    profile = session_profile or {}
+    return _is_known_info_value(profile.get("travel_time"))
+
+
+def _current_month_day_text() -> str:
+    now = datetime.datetime.now(LOCAL_TZ)
+    return f"{now.month}月{now.day}日"
+
+
+def _repair_time_blind_reply(
+    reply_text: str,
+    *,
+    pure_user_text: str = "",
+    session_profile: dict[str, Any] | None = None,
+) -> str:
+    """兜底修正模型信口生成的过期行程时间或具体方案交付承诺。"""
+    text = (reply_text or "").strip()
+    if not text:
+        return text
+
+    if PLAN_DELIVERY_DEADLINE_RE.search(text):
+        return "好的，我这边继续把方案细节整理好，核算清楚后发您确认。"
+
+    now = datetime.datetime.now(LOCAL_TZ)
+    current_day = _current_month_day_text()
+    mentions_today_date = current_day in text or "今天" in text
+    looks_like_itinerary = any(keyword in text for keyword in ("行程", "路线", "安排", "出发", "游玩"))
+    has_past_morning_slot = now.hour >= 12 and bool(PAST_TIME_ITINERARY_RE.search(text))
+    lacks_known_travel_time = not _has_known_travel_time(session_profile)
+
+    if mentions_today_date and looks_like_itinerary and (has_past_morning_slot or lacks_known_travel_time):
+        return (
+            "可以的，我先按亲子打卡路线帮您梳理。"
+            "不过具体行程日期我还没确认，您计划哪天去大理玩？我好按实际日期和适合拍照的时段来安排。"
+        )
+
+    return text
 
 
 def _format_profile_for_prompt(profile: dict[str, Any] | None) -> str:
@@ -562,6 +644,7 @@ def _build_agent_continuation_prompt(
         f"当前微信联系人：{contact_name or '客户'}\n"
         f"当前实际时间：{get_current_time_str()}\n\n"
         f"【称呼规则】如果确实需要称呼客户，只能使用「{contact_name or '客户'}」；但【绝对不要】在每条消息开头加“你好”、“晚上好”等问候语，更不要重复称呼客户姓名。这是连续对话，请开门见山直接回答客户问题。不要使用聊天记录中出现的其他名字（可能存在 OCR 同音字误差）。\n\n"
+        f"{_time_awareness_rule()}\n\n"
         "客户画像：\n"
         f"{_format_profile_for_prompt(profile)}\n\n"
         "联系人背景：\n"
@@ -588,17 +671,18 @@ def _run_volc_agent_continuation(prompt: str) -> str:
 1. 直接输出要发给客户的微信消息，不要解释你的思考过程。
 2. 可以给出初版行程框架、玩法/住宿/用车建议、下一步确认项。
 3. 如果价格、酒店房态、车价等信息没有可靠依据，不要编造具体数字，用“我这边继续核算后发您准确报价”表达。
-4. 如果关键信息不足，也要先给一个可执行的初步方向，并用 1 到 3 个问题补齐缺口。
+4. 如果关键信息不足，也要先给一个可执行的初步方向，并用 1 到 3 个问题补齐缺口；不要把当前日期默认当成出行日期。
 5. 必须保留清晰排版：开头一句话单独成段；方案按“初步安排：”“推荐重点：”“还需要确认：”等小段落组织；段落之间用空行分隔。
 6. 不要使用 Markdown 表格，不要堆成一整段；适合复制到微信后仍能分段阅读。
-7. 语气自然、专业、像真人定制师；不要输出 [HANDOFF]。"""
+7. 不要承诺“几点前发方案/报价”这类具体交付时间，完成时间以人工核算和确认进度为准。
+8. 语气自然、专业、像真人定制师；不要输出 [HANDOFF]。"""
 
     messages = [{"role": "system", "content": system_prompt}]
     if knowledge_context:
         messages.append({"role": "system", "content": knowledge_context})
     messages.append({"role": "user", "content": prompt})
 
-    return chat_completion(messages, cfg).replace("[HANDOFF]", "").strip()
+    return _repair_time_blind_reply(chat_completion(messages, cfg).replace("[HANDOFF]", "").strip())
 
 
 async def _generate_agent_continuation(session_id: str, limit: int | None = 30) -> tuple[str, dict[str, Any]]:
@@ -765,6 +849,7 @@ def _build_user_prompt(
     system_additions = (
         f'（系统提示：当前实际时间是 {current_time}。注意：仅在第一轮对话或主动打招呼时才进行时间问候，在后续连续的对话中直接回答用户的问题，绝对不要重复问候！你在问候客户时必须以此为准判断今天是星期几，绝对不要参考下方文本中可能出现的旧时间标签（如"周一16:40"等是微信界面上旧消息的时间戳，不代表当前时间）。{time_extra}\n'
         f'【称呼规则】如果确实需要称呼客户，只能使用系统提供的联系人名「{name}」；但【绝对不要】在每条消息开头加"你好"、"晚上好"等问候语，更不要重复称呼客户姓名。这是连续对话，请开门见山直接回答客户问题。不要使用聊天记录或 OCR 文本中出现的名字。因为 OCR 识别存在同音字误差（如索被识别为素），聊天记录中的名字不可靠，以系统提供的联系人名为唯一准确来源。\n'
+        f"{_time_awareness_rule()}\n"
         f"{readiness_rule}"
         "【HANDOFF 规则】在以下两种情况下，且接管成熟度缺失项为“无”时，才可在回复末尾加上 [HANDOFF] 标记：1) 客户在本轮消息中明确表达了要进行【最终方案确定】、【要求核算最终报价】或【准备下单打款】的意图（例如'算一下报价吧'、'方案确定了'、'怎么付款'）；2) 虽然客户没有直接说'报价'或'下单'，但从对话上下文判断客户对当前的行程方案已经完全满意并确认，表现出最终的决策倾向（例如'就按这个定'、'确定了，算下多少钱'）。如果客户只是在初步讨论方案、要一个大概的行程、询问价格估算、或者你自己还在完善方案细节，**绝对不要**加 [HANDOFF]。如果客户推进最终报价/方案但接管成熟度仍有缺失，必须先补问缺失项，不要接管。触发 [HANDOFF] 时，你的回复**必须是一句确认性的第一人称过渡话术**（例如'好的，我这就为您核算最终的报价并整理确认方案～'），**绝对不能是提问句**，也绝对不能说'转交给人工'或'转交给定制师'，因为你本身就是这位专属的定制师小鹿。）\n\n"
         f"{receptionist_rule}"
@@ -1307,8 +1392,10 @@ async def wechat_chat(
             session_profile=session_profile,
             contact=contact,
         )
+        handoff_intent = _has_handoff_intent(pure_user_text, session_id)
+        info_collection_active = _is_handoff_info_collection_active(session_id)
 
-        if _has_handoff_intent(pure_user_text, session_id) and not readiness["ready"]:
+        if (handoff_intent or info_collection_active) and not readiness["ready"]:
             reply_text = _handoff_missing_info_reply(readiness["missing"])
             try:
                 database.save_message_pair(
@@ -1343,7 +1430,10 @@ async def wechat_chat(
                 "reply_text": reply_text,
             }
 
-        if _should_request_handoff(pure_user_text, session_id, session_profile=session_profile, contact=contact):
+        if (
+            _should_request_handoff(pure_user_text, session_id, session_profile=session_profile, contact=contact)
+            or (info_collection_active and readiness["ready"])
+        ):
             reply_text = _handoff_reply_text()
             try:
                 database.save_message_pair(
@@ -1442,6 +1532,11 @@ async def wechat_chat(
                 handoff_requested = False
                 reply_text = _handoff_missing_info_reply(readiness["missing"])
 
+        reply_text = _repair_time_blind_reply(
+            reply_text,
+            pure_user_text=pure_user_text,
+            session_profile=session_profile,
+        )
         reply_text = _strip_repeated_customer_address(reply_text, contact_name, session_id)
         for msg in messages:
             if msg.get("role") == "assistant":
