@@ -14,7 +14,6 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.widget.Toast
-import com.agentime.ime.AgentImeService
 import com.agentime.ime.IssueHintActivity
 import com.agentime.ime.R
 import com.agentime.ime.host.agent.ConversationTextExtractor
@@ -988,8 +987,6 @@ class HostForegroundService : Service() {
         val ocr = FallbackOcrProvider(LocalOcrProvider(this), RemoteOcrProvider(this))
         val agentClient = HttpAgentClient(this)
 
-        // 标记是否在微信输入框注入了"正在思考中..."占位文本，异常时需清除
-        var thinkingPlaceholderInjected = false
         try {
             ensureRuntimeEnabled("runOnce 开始")
             moveState(HostState.IDLE, "开始任务: $sessionId/$contactName")
@@ -1307,10 +1304,8 @@ class HostForegroundService : Service() {
                 }, PIPELINE_RETRY_DELAY_MS)
             }
         } finally {
-            // 安全清除可能残留的思考中占位文本（覆盖所有异常退出路径）
-            if (thinkingPlaceholderInjected) {
-                runCatching { AgentImeService.clearInputBeforeInject() }
-            }
+            // 安全隐藏可能残留的思考中悬浮窗（覆盖所有异常退出路径）
+            WechatAccessibilityService.hideThinkingOverlay()
             lastFinishedAt = System.currentTimeMillis()
             running.set(false)
         }

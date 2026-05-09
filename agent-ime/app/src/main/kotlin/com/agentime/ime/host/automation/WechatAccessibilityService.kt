@@ -4,9 +4,12 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.PowerManager
 import android.util.Log
 import android.os.Handler
@@ -17,7 +20,10 @@ import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.animation.AlphaAnimation
+import android.view.animation.Animation
 import android.widget.Button
+import android.widget.TextView
 import com.agentime.ime.host.agent.SessionIdentity
 import com.agentime.ime.host.orchestrator.HostForegroundService
 import com.agentime.ime.host.storage.HostLogger
@@ -32,6 +38,7 @@ import java.util.concurrent.TimeUnit
  */
 class WechatAccessibilityService : AccessibilityService() {
     private var stopOverlayView: View? = null
+    private var thinkingOverlayView: View? = null
     private var screenWakeLock: PowerManager.WakeLock? = null
     private var wasOnChatPage = false
     private val pollHandler = Handler(Looper.getMainLooper())
@@ -77,6 +84,7 @@ class WechatAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         stopForegroundPolling()
+        hideThinkingOverlayInternal()
         hideStopOverlayInternal()
         releaseWakeLockInternal()
         if (instance === this) instance = null
@@ -163,6 +171,69 @@ class WechatAccessibilityService : AccessibilityService() {
         val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         runCatching { wm.removeView(view) }
         stopOverlayView = null
+    }
+
+    /**
+     * 显示"思考中"悬浮状态条。
+     * 使用 TYPE_ACCESSIBILITY_OVERLAY，不修改微信 UI，不会触发微信 WINDOW_CONTENT_CHANGED 事件。
+     * 只在当前已有的无障碍服务 Overlay 层上叠加一个半透明圆角浮条，显示分阶段进度文字和呼吸闪烁动画。
+     */
+    private fun showThinkingOverlayInternal(message: String) {
+        hideThinkingOverlayInternal()
+        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val tv = TextView(this).apply {
+            text = message
+            textSize = 15f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(48, 24, 48, 24)
+            gravity = Gravity.CENTER
+            // 半透明圆角深色背景
+            background = GradientDrawable().apply {
+                setColor(Color.argb(210, 30, 30, 30))
+                cornerRadius = 40f
+            }
+            // 呼吸闪烁动画，提示正在处理中
+            val blink = AlphaAnimation(1.0f, 0.3f).apply {
+                duration = 800
+                repeatCount = Animation.INFINITE
+                repeatMode = Animation.REVERSE
+            }
+            startAnimation(blink)
+        }
+        val lp = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            y = 220  // 顶部偏下一点，避免遮挡状态栏
+        }
+        wm.addView(tv, lp)
+        thinkingOverlayView = tv
+    }
+
+    /**
+     * 更新"思考中"悬浮状态条的文字（阶段切换时调用）。
+     */
+    private fun updateThinkingOverlayInternal(message: String) {
+        val tv = thinkingOverlayView as? TextView ?: return
+        tv.text = message
+    }
+
+    /**
+     * 隐藏"思考中"悬浮状态条。
+     */
+    private fun hideThinkingOverlayInternal() {
+        val view = thinkingOverlayView ?: return
+        view.clearAnimation()
+        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        runCatching { wm.removeView(view) }
+        thinkingOverlayView = null
     }
 
     /**
@@ -449,9 +520,41 @@ class WechatAccessibilityService : AccessibilityService() {
                     svc.ensureWakeLockInternal()
                     svc.showStopOverlayInternal()
                 } else {
+                    svc.hideThinkingOverlayInternal()
                     svc.hideStopOverlayInternal()
                     svc.releaseWakeLockInternal()
                 }
+            }
+        }
+
+        /**
+         * 在屏幕顶部显示"思考中"悬浮状态条（从任意线程调用安全）。
+         * 悬浮窗属于无障碍服务的 Overlay 层，不修改微信界面，不会触发无障碍事件导致二次截图。
+         */
+        fun showThinkingOverlay(message: String) {
+            val svc = instance ?: return
+            Handler(Looper.getMainLooper()).post {
+                svc.showThinkingOverlayInternal(message)
+            }
+        }
+
+        /**
+         * 更新悬浮状态条文字（阶段切换时调用）。
+         */
+        fun updateThinkingOverlay(message: String) {
+            val svc = instance ?: return
+            Handler(Looper.getMainLooper()).post {
+                svc.updateThinkingOverlayInternal(message)
+            }
+        }
+
+        /**
+         * 隐藏"思考中"悬浮状态条。
+         */
+        fun hideThinkingOverlay() {
+            val svc = instance ?: return
+            Handler(Looper.getMainLooper()).post {
+                svc.hideThinkingOverlayInternal()
             }
         }
 
