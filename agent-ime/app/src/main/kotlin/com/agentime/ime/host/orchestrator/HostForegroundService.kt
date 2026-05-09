@@ -1059,6 +1059,15 @@ class HostForegroundService : Service() {
                     "截图尝试#1 acceptable=${cap.acceptableForOcr} total=${"%.1f".format(cap.totalScore)} sharp=${"%.1f".format(cap.sharpnessScore)}",
                 )
                 moveState(HostState.SCREEN_CAPTURED, "截图完成: ${cap.imagePath}")
+                // 截图完成后立即导出到公共存储，方便排查截图质量
+                runCatching {
+                    val pngBytes = java.io.File(cap.imagePath).readBytes()
+                    val pubName = "debug_${java.io.File(cap.imagePath).name}"
+                    val exported = com.agentime.ime.host.capture.CaptureImageProcessor.exportPublicCopy(this@HostForegroundService, pubName, pngBytes)
+                    if (exported != null) logger.log(TAG, "截图已导出到公共下载目录: $exported")
+                }.onFailure {
+                    logger.log(TAG, "截图导出到公共存储失败: ${it.message}")
+                }
                 cap.rawImagePath?.let {
                     logger.log(TAG, "原始帧直存图: $it")
                 }
@@ -1134,23 +1143,12 @@ class HostForegroundService : Service() {
                 cleanupIntermediateOcrCrops(cap, inboundCandidate.path)
             }
             if (!cap.acceptableForOcr && ocrText.isBlank()) {
-                logger.log(TAG, "截图质量不足且 OCR 为空，停止自动发送；当前投影管线可能已进入糊图状态")
-                showIssueHint(
-                    title = "截图内容疑似被隐私保护模糊化",
-                    message =
-                        "当前截图质量不足，已停止自动发送。\n\n" +
-                            "可能原因：\n" +
-                            "1. 手机正处于屏幕共享/投屏/录屏保护模式\n" +
-                            "2. 系统为保护隐私，自动把微信聊天内容做了模糊处理\n\n" +
-                            "建议操作：\n" +
-                            "1. 关闭屏幕共享或隐私保护模式\n" +
-                            "2. 回到微信聊天页并等待界面稳定\n" +
-                            "3. 再执行一次 runOnce",
-                )
-                error("截图质量不足，已停止自动发送；请稍后重试，必要时手动重新授权截图")
+                // 截图质量不足且 OCR 为空：可能是隐私保护模糊化，也可能是 ML Kit 异常。
+                // 不再阻断流程——信任触发源，继续交给 VLM 做最终判定。
+                logger.log(TAG, "⚠️ 截图质量未达阈值且 OCR 为空（sharp=${cap.sharpnessScore}），但信任触发源继续，交由 VLM 判定")
             }
             if (!cap.acceptableForOcr) {
-                logger.log(TAG, "截图质量未达 OCR 阈值，但已识别出文本，继续后续流程")
+                logger.log(TAG, "截图质量未达 OCR 阈值，但继续后续流程")
             }
             logger.log(TAG, "提炼后的最新客户消息: ${latestInbound.take(200)}")
             if (latestInbound.isBlank()) {
