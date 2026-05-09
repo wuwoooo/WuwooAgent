@@ -221,11 +221,21 @@ object ConversationListUnreadDetector {
                 titleLooksLikeList || bottomTabHitCount >= 2
             val notChatInputBar =
                 inputBarHitCount <= 1
+            // 当 OCR 完全为空时（ML Kit 未就绪/远程 OCR 失败），如果视觉信号足够强，
+            // 则不再要求 textLooksLikeList 也为 true，避免 OCR 空白导致列表页始终无法识别。
+            // 使用更高的视觉阈值以降低误判风险。
+            val ocrEmpty = combinedText.isBlank()
+            val visualStrongEnough =
+                topHeaderLight >= 0.84 &&
+                    bottomBarLight >= 0.78 &&
+                    bottomBarNonWhite in 0.05..0.60 &&
+                    bottomCenterNonWhite <= 0.25 &&
+                    leftAvatarNonWhite >= 0.30
 
             val looksLikeListPage =
                 visualLooksLikeList &&
-                    textLooksLikeList &&
-                    notChatInputBar
+                    notChatInputBar &&
+                    (textLooksLikeList || (ocrEmpty && visualStrongEnough))
 
             val summary =
                 "titleLooksLikeList=$titleLooksLikeList " +
@@ -235,7 +245,8 @@ object ConversationListUnreadDetector {
                     "bottomBarLight=${"%.2f".format(bottomBarLight)} " +
                     "bottomBarNonWhite=${"%.2f".format(bottomBarNonWhite)} " +
                     "bottomCenterNonWhite=${"%.2f".format(bottomCenterNonWhite)} " +
-                    "leftAvatarNonWhite=${"%.2f".format(leftAvatarNonWhite)}"
+                    "leftAvatarNonWhite=${"%.2f".format(leftAvatarNonWhite)} " +
+                    "ocrEmpty=$ocrEmpty"
 
             return ListPageAnalysis(looksLikeListPage, summary)
         } finally {

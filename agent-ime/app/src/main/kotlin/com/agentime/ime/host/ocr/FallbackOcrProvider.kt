@@ -19,7 +19,7 @@ class FallbackOcrProvider(
         return try {
             local.recognize(imagePath, imageUri)
         } catch (e: Exception) {
-            Log.w(TAG, "本地 OCR 异常: ${e.message}")
+            Log.w(TAG, "本地 OCR 异常: [${e::class.java.simpleName}] ${e.message}", e)
             ""
         }
     }

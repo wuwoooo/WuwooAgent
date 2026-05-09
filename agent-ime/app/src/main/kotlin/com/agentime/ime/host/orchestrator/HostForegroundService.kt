@@ -593,6 +593,9 @@ class HostForegroundService : Service() {
             ensureRuntimeEnabled("会话列表截图完成后")
             val headerOcrText = recognizeHeaderWithFallbacks(ocr, cap)
             val ocrText = recognizePageWithFallbacks(ocr, cap)
+            if (headerOcrText.isBlank() && ocrText.isBlank()) {
+                logger.log(TAG, "⚠️ OCR 全空：header 和页面 OCR 均未返回文本，可能 ML Kit 模型未就绪或识别异常")
+            }
             val pageAnalysis = ConversationListUnreadDetector.analyzeConversationListPage(cap.imagePath, ocrText, headerOcrText)
             logger.log(TAG, "截图分析列表页判定: ${pageAnalysis.debugSummary}")
             if (!pageAnalysis.looksLikeListPage) {
