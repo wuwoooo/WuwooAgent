@@ -941,7 +941,7 @@ def _run_vision_ocr(image_bytes: bytes) -> dict[str, Any]:
     }
     
     try:
-        response = requests.post(base_url, headers=headers, json=payload, timeout=30)
+        response = requests.post(base_url, headers=headers, json=payload, timeout=(10, 45))
         if response.status_code == 200:
             result = response.json()
             content = result["choices"][0]["message"]["content"].strip()
@@ -1016,127 +1016,143 @@ async def wechat_chat(
         extracted_data = await asyncio.to_thread(_run_vision_ocr, image_bytes)
 
         if extracted_data.get("vlm_error"):
-            return {
-                "ok": True,
-                "ignored": True,
-                "silenced": True,
-                "retryable": True,
-                "retry_after_ms": 2500,
-                "reason": "vlm_error",
-                "messages": [{"role": "assistant", "text": ""}],
-                "reply_text": "",
-            }
-        
-        if extracted_data.get("is_group_chat"):
-            logger.info("VLM 识别出这是群聊，返回主屏信号并停止处理")
-            return {
-                "ok": True,
-                "is_group_chat": True,
-                "messages": [],
-                "reply_text": "",
-            }
-
-        extracted_msgs = extracted_data.get("messages", [])
-        vlm_contact_name = extracted_data.get("contact_name")
-        if not isinstance(extracted_msgs, list):
-            logger.warning(
-                "VLM OCR messages 字段类型异常，按空列表处理: file=%s session=%s contact=%s type=%s",
-                safe_name,
-                session_id,
-                contact_name,
-                type(extracted_msgs).__name__,
-            )
-            extracted_msgs = []
-        logger.info(
-            "VLM OCR 原始结构: file=%s session=%s contact=%s vlm_contact=%s msg_count=%d data=%s",
-            safe_name,
-            session_id,
-            contact_name,
-            vlm_contact_name,
-            len(extracted_msgs),
-            json.dumps(extracted_data, ensure_ascii=False)[:2000],
-        )
-
-        page_type = str(extracted_data.get("page_type") or "").strip().lower()
-        if extracted_data.get("is_chat_page") is False or page_type in {"search", "search_page", "contact_search", "conversation_list", "contacts", "notification", "non_chat"}:
-            logger.warning(
-                "VLM 判定截图不是一对一聊天页，忽略本轮，避免搜索页/列表页被当成客户消息: file=%s session=%s contact=%s page_type=%s data=%s",
-                safe_name,
-                session_id,
-                contact_name,
-                page_type,
-                json.dumps(extracted_data, ensure_ascii=False)[:1000],
-            )
-            return {
-                "ok": True,
-                "ignored": True,
-                "silenced": True,
-                "reason": "non_chat_page",
-                "messages": [{"role": "assistant", "text": ""}],
-                "reply_text": "",
-            }
-        
-        last_agent_idx = -1
-        for i, msg in enumerate(extracted_msgs):
-            if msg.get("sender") == "agent":
-                last_agent_idx = i
-                
-        if is_human_reply:
-            if last_agent_idx >= 0:
-                ocr_text = extracted_msgs[last_agent_idx].get("text", "")
-                ocr_ok = bool(ocr_text.strip())
-                ocr_source = "vlm_human_reply" if ocr_ok else "empty_vlm_human_reply"
-                logger.info(f"VLM OCR 成功提取真人回复: {ocr_text}")
-            else:
-                ocr_text = client_ocr_text
-                ocr_ok = bool(ocr_text.strip())
-                ocr_source = "client_ocr_fallback_human_reply" if ocr_ok else "empty"
+            # VLM 失败时，优先回退使用客户端本地 OCR 文本继续处理
+            if client_ocr_text.strip():
                 logger.warning(
-                    "VLM OCR 未能找到 agent 发送的真人回复，回退客户端 OCR: file=%s session=%s contact=%s fallback_len=%d fallback_text=%s",
+                    "VLM OCR 失败，回退使用客户端本地 OCR 继续处理: file=%s session=%s contact=%s error=%s client_ocr=%s",
                     safe_name,
                     session_id,
                     contact_name,
-                    len(ocr_text),
-                    ocr_text[:200],
-                )
-        else:
-            new_client_texts = []
-            for i in range(last_agent_idx + 1, len(extracted_msgs)):
-                if extracted_msgs[i].get("sender") == "client":
-                    new_client_texts.append(extracted_msgs[i].get("text", ""))
-            
-            if new_client_texts:
-                ocr_text = "\n".join(new_client_texts)
-                ocr_ok = True
-                ocr_source = "vlm_client_after_agent"
-                logger.info(f"VLM OCR 成功提取 {len(new_client_texts)} 条客户新消息: {ocr_text}")
-            else:
-                logger.warning(
-                    "VLM 未提取到客户新消息，停止本轮；不再回退客户端 OCR: file=%s session=%s contact=%s last_agent_idx=%d msg_count=%d client_ocr=%s",
-                    safe_name,
-                    session_id,
-                    contact_name,
-                    last_agent_idx,
-                    len(extracted_msgs),
+                    extracted_data.get("error", "unknown"),
                     client_ocr_text[:200],
+                )
+                ocr_text = client_ocr_text
+                ocr_ok = True
+                ocr_source = "client_ocr_vlm_fallback"
+            else:
+                # 没有可用的本地 OCR，才返回重试信号
+                return {
+                    "ok": True,
+                    "ignored": True,
+                    "silenced": True,
+                    "retryable": True,
+                    "retry_after_ms": 2500,
+                    "reason": "vlm_error",
+                    "messages": [{"role": "assistant", "text": ""}],
+                    "reply_text": "",
+                }
+        else:
+            # VLM 调用成功，使用 VLM 提取结果
+            if extracted_data.get("is_group_chat"):
+                logger.info("VLM 识别出这是群聊，返回主屏信号并停止处理")
+                return {
+                    "ok": True,
+                    "is_group_chat": True,
+                    "messages": [],
+                    "reply_text": "",
+                }
+
+            extracted_msgs = extracted_data.get("messages", [])
+            vlm_contact_name = extracted_data.get("contact_name")
+            if not isinstance(extracted_msgs, list):
+                logger.warning(
+                    "VLM OCR messages 字段类型异常，按空列表处理: file=%s session=%s contact=%s type=%s",
+                    safe_name,
+                    session_id,
+                    contact_name,
+                    type(extracted_msgs).__name__,
+                )
+                extracted_msgs = []
+            logger.info(
+                "VLM OCR 原始结构: file=%s session=%s contact=%s vlm_contact=%s msg_count=%d data=%s",
+                safe_name,
+                session_id,
+                contact_name,
+                vlm_contact_name,
+                len(extracted_msgs),
+                json.dumps(extracted_data, ensure_ascii=False)[:2000],
+            )
+
+            page_type = str(extracted_data.get("page_type") or "").strip().lower()
+            if extracted_data.get("is_chat_page") is False or page_type in {"search", "search_page", "contact_search", "conversation_list", "contacts", "notification", "non_chat"}:
+                logger.warning(
+                    "VLM 判定截图不是一对一聊天页，忽略本轮，避免搜索页/列表页被当成客户消息: file=%s session=%s contact=%s page_type=%s data=%s",
+                    safe_name,
+                    session_id,
+                    contact_name,
+                    page_type,
+                    json.dumps(extracted_data, ensure_ascii=False)[:1000],
                 )
                 return {
                     "ok": True,
                     "ignored": True,
                     "silenced": True,
-                    "reason": "vlm_no_new_client_message",
+                    "reason": "non_chat_page",
                     "messages": [{"role": "assistant", "text": ""}],
                     "reply_text": "",
                 }
+            
+            last_agent_idx = -1
+            for i, msg in enumerate(extracted_msgs):
+                if msg.get("sender") == "agent":
+                    last_agent_idx = i
+                    
+            if is_human_reply:
+                if last_agent_idx >= 0:
+                    ocr_text = extracted_msgs[last_agent_idx].get("text", "")
+                    ocr_ok = bool(ocr_text.strip())
+                    ocr_source = "vlm_human_reply" if ocr_ok else "empty_vlm_human_reply"
+                    logger.info(f"VLM OCR 成功提取真人回复: {ocr_text}")
+                else:
+                    ocr_text = client_ocr_text
+                    ocr_ok = bool(ocr_text.strip())
+                    ocr_source = "client_ocr_fallback_human_reply" if ocr_ok else "empty"
+                    logger.warning(
+                        "VLM OCR 未能找到 agent 发送的真人回复，回退客户端 OCR: file=%s session=%s contact=%s fallback_len=%d fallback_text=%s",
+                        safe_name,
+                        session_id,
+                        contact_name,
+                        len(ocr_text),
+                        ocr_text[:200],
+                    )
+            else:
+                new_client_texts = []
+                for i in range(last_agent_idx + 1, len(extracted_msgs)):
+                    if extracted_msgs[i].get("sender") == "client":
+                        new_client_texts.append(extracted_msgs[i].get("text", ""))
+                
+                if new_client_texts:
+                    ocr_text = "\n".join(new_client_texts)
+                    ocr_ok = True
+                    ocr_source = "vlm_client_after_agent"
+                    logger.info(f"VLM OCR 成功提取 {len(new_client_texts)} 条客户新消息: {ocr_text}")
+                else:
+                    logger.warning(
+                        "VLM 未提取到客户新消息，停止本轮；不再回退客户端 OCR: file=%s session=%s contact=%s last_agent_idx=%d msg_count=%d client_ocr=%s",
+                        safe_name,
+                        session_id,
+                        contact_name,
+                        last_agent_idx,
+                        len(extracted_msgs),
+                        client_ocr_text[:200],
+                    )
+                    return {
+                        "ok": True,
+                        "ignored": True,
+                        "silenced": True,
+                        "reason": "vlm_no_new_client_message",
+                        "messages": [{"role": "assistant", "text": ""}],
+                        "reply_text": "",
+                    }
 
-        logger.info(
-            "聊天输入文本确认: session=%s contact=%s source=%s text_len=%d text=%s",
-            session_id,
-            contact_name,
-            ocr_source,
-            len((ocr_text or "").strip()),
-            (ocr_text or "").strip()[:300],
-        )
+            logger.info(
+                "聊天输入文本确认: session=%s contact=%s source=%s text_len=%d text=%s",
+                session_id,
+                contact_name,
+                ocr_source,
+                len((ocr_text or "").strip()),
+                (ocr_text or "").strip()[:300],
+            )
 
     agent_id = int(agent["id"])
     raw_session_id = session_id
