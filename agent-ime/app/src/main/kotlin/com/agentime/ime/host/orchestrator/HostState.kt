@@ -5,6 +5,7 @@ enum class HostState {
     WECHAT_READY,
     INPUT_FOCUSED,
     SCREEN_CAPTURED,
+    THINKING,
     REPLY_READY,
     TEXT_INJECTED,
     SENT,

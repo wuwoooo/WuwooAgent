@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.widget.Toast
+import com.agentime.ime.AgentImeService
 import com.agentime.ime.IssueHintActivity
 import com.agentime.ime.R
 import com.agentime.ime.host.agent.ConversationTextExtractor
@@ -987,6 +988,8 @@ class HostForegroundService : Service() {
         val ocr = FallbackOcrProvider(LocalOcrProvider(this), RemoteOcrProvider(this))
         val agentClient = HttpAgentClient(this)
 
+        // 标记是否在微信输入框注入了"正在思考中..."占位文本，异常时需清除
+        var thinkingPlaceholderInjected = false
         try {
             ensureRuntimeEnabled("runOnce 开始")
             moveState(HostState.IDLE, "开始任务: $sessionId/$contactName")
@@ -1180,9 +1183,23 @@ class HostForegroundService : Service() {
             // 优先使用语音转文字后的全屏截图（此时截图上已展开语音文字内容）
             val imageForVlm = voiceTranscribeImagePath ?: cap.imagePath
             logger.log(TAG, "触发后端 API 调用，使用图片进行 VLM OCR 提取: $imageForVlm (语音转文字截图=${voiceTranscribeImagePath != null}, 本地候选=${latestInbound.take(80)})")
+
+            // ── 思考中进度反馈 ──
+            // 在 VLM + LLM 处理期间（通常 5-10s），通过悬浮窗 Overlay 显示醒目的思考状态提示。
+            // 悬浮窗属于无障碍服务 Overlay 层，不修改微信界面，不会触发无障碍事件二次截图。
+            moveState(HostState.THINKING, "🤔 正在分析截图并生成回复...")
+            WechatAccessibilityService.showThinkingOverlay("🤔 正在分析截图...")
+
+            val thinkingStartMs = System.currentTimeMillis()
             val reply = agentClient.chat(imageForVlm, latestInbound, sessionId, contactName)
+            val thinkingElapsedMs = System.currentTimeMillis() - thinkingStartMs
+            logger.log(TAG, "后端回复耗时: ${thinkingElapsedMs}ms")
+
+            // 隐藏思考中悬浮窗
+            WechatAccessibilityService.hideThinkingOverlay()
+
             ensureRuntimeEnabled("后端回复返回后")
-            moveState(HostState.REPLY_READY, "reply_text 长度=${reply.replyText.length}")
+            moveState(HostState.REPLY_READY, "reply_text 长度=${reply.replyText.length} (耗时=${thinkingElapsedMs}ms)")
 
             if (reply.isGroupChat) {
                 logger.log(TAG, "检测到当前为群聊，Agent 不处理并自动返回主屏(列表页)")
@@ -1290,6 +1307,10 @@ class HostForegroundService : Service() {
                 }, PIPELINE_RETRY_DELAY_MS)
             }
         } finally {
+            // 安全清除可能残留的思考中占位文本（覆盖所有异常退出路径）
+            if (thinkingPlaceholderInjected) {
+                runCatching { AgentImeService.clearInputBeforeInject() }
+            }
             lastFinishedAt = System.currentTimeMillis()
             running.set(false)
         }
