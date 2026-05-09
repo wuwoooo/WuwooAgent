@@ -765,9 +765,14 @@ class HostForegroundService : Service() {
             val postClickChatAnalysis = ConversationListUnreadDetector.analyzeChatPage(postClickOcr, postClickHeaderOcr, postClickCap.imagePath)
             logger.log(TAG, "点击后列表页判定: ${postClickListAnalysis.debugSummary}")
             logger.log(TAG, "点击后聊天页判定: ${postClickChatAnalysis.debugSummary}")
-            if (postClickListAnalysis.looksLikeListPage || !postClickChatAnalysis.looksLikeChatPage) {
-                logger.log(TAG, "点击未读会话后，页面仍未稳定进入聊天页，取消本轮")
+            if (postClickListAnalysis.looksLikeListPage) {
+                logger.log(TAG, "点击未读会话后仍在列表页（点击可能未生效），取消本轮")
                 return
+            }
+            if (!postClickChatAnalysis.looksLikeChatPage) {
+                // 非列表页但也未通过聊天页判定（可能 OCR 为空）：
+                // 信任红点点击操作，继续流程，交由 VLM 做最终判定。
+                logger.log(TAG, "点击后聊天页判定未通过但已离开列表页，信任点击操作继续: ${postClickChatAnalysis.debugSummary}")
             }
             val headerRawName = ConversationListUnreadDetector.extractChatContactNameFromOcr(postClickHeaderOcr)
             val headerScore = ConversationListUnreadDetector.scoreHeaderOcrCandidate(postClickHeaderOcr)
@@ -1078,10 +1083,10 @@ class HostForegroundService : Service() {
                     if (listAnalysis.looksLikeListPage) {
                         logger.log(TAG, "runOnce 识别到当前处于会话列表页，而非聊天页，中止执行 (可能是过期任务)")
                         error("当前已返回列表页，已取消过期的回复任务")
-                    } else {
-                        logger.log(TAG, "runOnce 识别到当前非聊天页，中止执行: ${chatAnalysis.debugSummary}")
-                        error("当前页面非聊天页，已取消回复任务")
                     }
+                    // 非列表页但也未通过聊天页判定（可能 OCR 为空）：
+                    // 信任触发源（通知/红点点击），继续流程，交由 VLM 做最终判定。
+                    logger.log(TAG, "runOnce 聊天页判定未通过但非列表页，信任触发源继续: ${chatAnalysis.debugSummary}")
                 }
 
                 val binding = resolveChatContactBinding(

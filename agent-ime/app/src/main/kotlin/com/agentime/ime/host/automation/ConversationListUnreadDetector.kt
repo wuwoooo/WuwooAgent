@@ -650,10 +650,13 @@ object ConversationListUnreadDetector {
                 if (centerWhiteRatio >= 0.30 && edgeDarkRatio >= 0.02) inputBarRows++
             }
 
-            // 判定：有明显的绿色气泡行（≥12 行表示至少一个气泡），且底部有输入栏特征
-            val hasGreenBubbles = greenBubbleRows >= 12
+            // 判定逻辑分级：
+            //   强信号：绿色气泡行 ≥30（至少两三个完整气泡），无需输入栏确认
+            //   弱信号：绿色气泡行 12~29，需要输入栏辅助确认
+            val hasStrongGreenSignal = greenBubbleRows >= 30
+            val hasWeakGreenSignal = greenBubbleRows >= 12
             val hasInputBar = inputBarRows >= 4
-            val looksLikeChat = hasGreenBubbles && hasInputBar
+            val looksLikeChat = hasStrongGreenSignal || (hasWeakGreenSignal && hasInputBar)
             val summary = "green=$greenBubbleRows inputBar=$inputBarRows"
             return VisualChatSignal(looksLikeChat, greenBubbleRows, inputBarRows, summary)
         } finally {
