@@ -372,7 +372,7 @@ class HostForegroundService : Service() {
             val cap = capture.captureScreen(captureName)
             val headerOcrText = recognizeHeaderWithFallbacks(ocr, cap)
             val pageOcrText = recognizePageWithFallbacks(ocr, cap)
-            val chatAnalysis = ConversationListUnreadDetector.analyzeChatPage(pageOcrText, headerOcrText)
+            val chatAnalysis = ConversationListUnreadDetector.analyzeChatPage(pageOcrText, headerOcrText, cap.imagePath)
             val titleOcrText = recognizeTitleOnly(ocr, cap)
             val titleRaw = ConversationListUnreadDetector.extractChatContactNameFromOcr(titleOcrText)
             val headerRaw = ConversationListUnreadDetector.extractChatContactNameFromOcr(headerOcrText)
@@ -599,7 +599,7 @@ class HostForegroundService : Service() {
             val pageAnalysis = ConversationListUnreadDetector.analyzeConversationListPage(cap.imagePath, ocrText, headerOcrText)
             logger.log(TAG, "截图分析列表页判定: ${pageAnalysis.debugSummary}")
             if (!pageAnalysis.looksLikeListPage) {
-                val chatAnalysis = ConversationListUnreadDetector.analyzeChatPage(ocrText, headerOcrText)
+                val chatAnalysis = ConversationListUnreadDetector.analyzeChatPage(ocrText, headerOcrText, cap.imagePath)
                 logger.log(TAG, "截图分析聊天页判定: ${chatAnalysis.debugSummary}")
                 if (chatAnalysis.looksLikeChatPage) {
                     val prefsReply = getSharedPreferences("host_config", Context.MODE_PRIVATE)
@@ -619,9 +619,14 @@ class HostForegroundService : Service() {
                         return
                     }
                     if (contactName.isBlank() || contactName == "当前联系人") {
-                        logger.log(TAG, "截图分析结果：当前是聊天页，但联系人识别无效，跳过本轮")
-                        returnToConversationList("聊天页联系人识别无效")
-                        return
+                        if (ocrText.isBlank() && headerOcrText.isBlank()) {
+                            // OCR 全空（可能 ML Kit 异常），允许使用占位符继续，VLM 会从截图识别联系人
+                            logger.log(TAG, "截图分析结果：OCR 全空，联系人以占位符'当前联系人'继续，交由 VLM 处理")
+                        } else {
+                            logger.log(TAG, "截图分析结果：当前是聊天页，但联系人识别无效，跳过本轮")
+                            returnToConversationList("聊天页联系人识别无效")
+                            return
+                        }
                     }
                     if (isPostSendFollowup(scanSource) && !cap.hasInboundAfterLatestOutbound) {
                         logger.log(TAG, "发送后补扫未检测到我方最后消息之后的新入站，跳过本轮，避免把搜索页/搜索结果页当成聊天页")
@@ -757,7 +762,7 @@ class HostForegroundService : Service() {
                 postClickOcr,
                 postClickHeaderOcr,
             )
-            val postClickChatAnalysis = ConversationListUnreadDetector.analyzeChatPage(postClickOcr, postClickHeaderOcr)
+            val postClickChatAnalysis = ConversationListUnreadDetector.analyzeChatPage(postClickOcr, postClickHeaderOcr, postClickCap.imagePath)
             logger.log(TAG, "点击后列表页判定: ${postClickListAnalysis.debugSummary}")
             logger.log(TAG, "点击后聊天页判定: ${postClickChatAnalysis.debugSummary}")
             if (postClickListAnalysis.looksLikeListPage || !postClickChatAnalysis.looksLikeChatPage) {
@@ -792,9 +797,14 @@ class HostForegroundService : Service() {
                 return
             }
             if (contactName.isBlank() || contactName == "当前联系人") {
-                logger.log(TAG, "点击未读会话后，联系人绑定置信度不足，取消本轮（避免串会话）")
-                returnToConversationList("点击后联系人绑定置信度不足")
-                return
+                if (postClickOcr.isBlank() && postClickHeaderOcr.isBlank()) {
+                    // OCR 全空（可能 ML Kit 异常），允许使用占位符继续，VLM 会从截图识别联系人
+                    logger.log(TAG, "点击入会话 OCR 全空，联系人以占位符'当前联系人'继续，交由 VLM 处理")
+                } else {
+                    logger.log(TAG, "点击未读会话后，联系人绑定置信度不足，取消本轮（避免串会话）")
+                    returnToConversationList("点击后联系人绑定置信度不足")
+                    return
+                }
             }
             if (listRowContactHint.isNotBlank() &&
                 listHintStrict.isNotBlank() &&
@@ -1062,7 +1072,7 @@ class HostForegroundService : Service() {
                 val headerOcrText = recognizeHeaderWithFallbacks(ocr, cap)
                 ocrText = recognizePageWithFallbacks(ocr, cap)
                 logger.log(TAG, "OCR 文本: ${ocrText.take(200)}")
-                val chatAnalysis = ConversationListUnreadDetector.analyzeChatPage(ocrText, headerOcrText)
+                val chatAnalysis = ConversationListUnreadDetector.analyzeChatPage(ocrText, headerOcrText, cap.imagePath)
                 if (!chatAnalysis.looksLikeChatPage) {
                     val listAnalysis = ConversationListUnreadDetector.analyzeConversationListPage(cap.imagePath, ocrText, headerOcrText)
                     if (listAnalysis.looksLikeListPage) {

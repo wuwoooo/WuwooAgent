@@ -50,7 +50,7 @@ object ConversationListUnreadDetector {
         return normalized in blockedWechatSystemPageTitles
     }
 
-    fun analyzeChatPage(ocrText: String, headerOcrText: String = ""): ChatPageAnalysis {
+    fun analyzeChatPage(ocrText: String, headerOcrText: String = "", imagePath: String? = null): ChatPageAnalysis {
         val lines = ocrText.lines().map { it.trim() }.filter { it.isNotBlank() }
         val headerLines = headerOcrText.lines().map { it.trim() }.filter { it.isNotBlank() }
         val normalizedPageText = ocrText.replace("（", "(").replace("）", ")")
@@ -75,12 +75,19 @@ object ConversationListUnreadDetector {
             } else {
                 bottomTabHitCount <= 1
             }
+        // 当 OCR 完全为空时，尝试用视觉特征（绿色气泡+输入栏图标）判断是否为聊天页。
+        val ocrEmpty = ocrText.isBlank() && headerOcrText.isBlank()
+        val visualChatSignal = if (ocrEmpty && imagePath != null) {
+            analyzeVisualChatSignals(imagePath)
+        } else {
+            null
+        }
         val looksLikeChatPage =
             tabSignalAcceptable &&
                 !blockedSystemPageTitle &&
                 !headerLooksLikeListTitle &&
                 !pageLooksLikeListTitle &&
-                (hasHeaderCandidate || hasConversationStructure)
+                (hasHeaderCandidate || hasConversationStructure || (ocrEmpty && visualChatSignal?.looksLikeChat == true))
 
         val summary =
             "looksLikeChatPage=$looksLikeChatPage " +
@@ -90,7 +97,8 @@ object ConversationListUnreadDetector {
                 "messageLikeLines=${messageLikeLines.size} " +
                 "hasTimeline=$hasTimeline " +
                 "tabSignalAcceptable=$tabSignalAcceptable " +
-                "bottomTabHitCount=$bottomTabHitCount"
+                "bottomTabHitCount=$bottomTabHitCount" +
+                if (visualChatSignal != null) " visualChat=${visualChatSignal.debugSummary}" else ""
         return ChatPageAnalysis(
             looksLikeChatPage = looksLikeChatPage,
             contactName = contactName,
@@ -536,5 +544,120 @@ object ConversationListUnreadDetector {
             y += 6
         }
         return if (total == 0) 0.0 else hit.toDouble() / total
+    }
+
+    /**
+     * 视觉聊天页信号分析结果。
+     */
+    private data class VisualChatSignal(
+        val looksLikeChat: Boolean,
+        val greenBubbleRows: Int,
+        val inputBarRows: Int,
+        val debugSummary: String,
+    )
+
+    /**
+     * 当 OCR 完全为空时，通过纯像素分析判断截图是否为微信聊天页：
+     * 1. 扫描内容区（10%~85% 高度）中的绿色气泡行数（微信发送消息颜色）
+     * 2. 扫描底部区域（86%~96% 高度）的输入栏特征（暗色图标+白色输入框）
+     */
+    private fun analyzeVisualChatSignals(imagePath: String): VisualChatSignal {
+        val bitmap = android.graphics.BitmapFactory.decodeFile(imagePath)
+            ?: return VisualChatSignal(false, 0, 0, "decode_failed")
+        try {
+            val width = bitmap.width
+            val height = bitmap.height
+            if (width < 200 || height < 400) {
+                return VisualChatSignal(false, 0, 0, "too_small=${width}x$height")
+            }
+
+            // ── 1. 绿色气泡检测 ──
+            // 微信发送消息的绿色：约 RGB(149,236,105) 到 RGB(87,189,72) 范围
+            fun isWechatGreen(pixel: Int): Boolean {
+                val r = (pixel shr 16) and 0xFF
+                val g = (pixel shr 8) and 0xFF
+                val b = pixel and 0xFF
+                return g >= 165 && r in 95..215 && b in 60..190 && (g - r) >= 15 && (g - b) >= 10
+            }
+
+            val contentTop = (height * 0.10f).toInt()
+            val contentBottom = (height * 0.85f).toInt()
+            val greenXStart = (width * 0.35f).toInt()
+            val greenXEnd = (width * 0.95f).toInt()
+            var greenBubbleRows = 0
+            for (y in contentTop until contentBottom step 4) {
+                var greenPixels = 0
+                var total = 0
+                var x = greenXStart
+                while (x < greenXEnd) {
+                    if (isWechatGreen(bitmap.getPixel(x, y))) greenPixels++
+                    total++
+                    x += 4
+                }
+                val ratio = if (total == 0) 0.0 else greenPixels.toDouble() / total
+                if (ratio >= 0.08) greenBubbleRows++
+            }
+
+            // ── 2. 底部输入栏检测 ──
+            // 聊天页底部有语音按钮（左）、白色文本输入框（中）、表情+加号按钮（右）
+            // 特征：中间大片白色 + 左右两端有深色图标
+            val barTop = (height * 0.86f).toInt()
+            val barBottom = (height * 0.96f).toInt()
+            var inputBarRows = 0
+            for (y in barTop until barBottom step 3) {
+                // 中间区域白色比率
+                var whiteHit = 0
+                var whiteTotal = 0
+                var x = (width * 0.14f).toInt()
+                while (x < (width * 0.74f).toInt()) {
+                    val c = bitmap.getPixel(x, y)
+                    val r = (c shr 16) and 0xFF
+                    val g = (c shr 8) and 0xFF
+                    val b = c and 0xFF
+                    if (r >= 240 && g >= 240 && b >= 240) whiteHit++
+                    whiteTotal++
+                    x += 4
+                }
+                val centerWhiteRatio = if (whiteTotal == 0) 0.0 else whiteHit.toDouble() / whiteTotal
+
+                // 两端深色图标比率
+                var darkHit = 0
+                var darkTotal = 0
+                // 左侧 2%~12%
+                x = (width * 0.02f).toInt()
+                while (x < (width * 0.12f).toInt()) {
+                    val c = bitmap.getPixel(x, y)
+                    val r = (c shr 16) and 0xFF
+                    val g = (c shr 8) and 0xFF
+                    val b = c and 0xFF
+                    if (r <= 100 && g <= 100 && b <= 100) darkHit++
+                    darkTotal++
+                    x += 4
+                }
+                // 右侧 78%~98%
+                x = (width * 0.78f).toInt()
+                while (x < (width * 0.98f).toInt()) {
+                    val c = bitmap.getPixel(x, y)
+                    val r = (c shr 16) and 0xFF
+                    val g = (c shr 8) and 0xFF
+                    val b = c and 0xFF
+                    if (r <= 100 && g <= 100 && b <= 100) darkHit++
+                    darkTotal++
+                    x += 4
+                }
+                val edgeDarkRatio = if (darkTotal == 0) 0.0 else darkHit.toDouble() / darkTotal
+
+                if (centerWhiteRatio >= 0.30 && edgeDarkRatio >= 0.02) inputBarRows++
+            }
+
+            // 判定：有明显的绿色气泡行（≥12 行表示至少一个气泡），且底部有输入栏特征
+            val hasGreenBubbles = greenBubbleRows >= 12
+            val hasInputBar = inputBarRows >= 4
+            val looksLikeChat = hasGreenBubbles && hasInputBar
+            val summary = "green=$greenBubbleRows inputBar=$inputBarRows"
+            return VisualChatSignal(looksLikeChat, greenBubbleRows, inputBarRows, summary)
+        } finally {
+            bitmap.recycle()
+        }
     }
 }
