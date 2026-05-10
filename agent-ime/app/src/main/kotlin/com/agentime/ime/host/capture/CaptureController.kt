@@ -20,6 +20,8 @@ data class CaptureResult(
     val latestInboundVoiceRedDotY: Float? = null,
     val latestInboundVoiceRedDotScore: Int = 0,
     val latestOutboundCropPath: String? = null,
+    // 检测到语音转文字正在加载中（灰色旋转 loading spinner），截图内容可能不完整
+    val voiceTranscriptionLoading: Boolean = false,
     val acceptableForOcr: Boolean = false,
     val sharpnessScore: Double = 0.0,
     val totalScore: Double = 0.0,

@@ -635,18 +635,33 @@ class HostForegroundService : Service() {
                     }
                     val sessionIdForContact = SessionIdentity.buildSessionId(this@HostForegroundService, contactName)
                     val lastReplyText = getLastReplyText(prefsReply, sessionIdForContact)
+                    // 检测语音转文字是否正在加载中，如果是则等待加载完成后重新截图
+                    var effectiveCap = cap
+                    var effectiveOcrText = ocrText
+                    if (cap.voiceTranscriptionLoading) {
+                        val updatedCap = waitForVoiceTranscriptionLoadingIfNeeded(
+                            capture = capture,
+                            initialCap = cap,
+                            sessionId = sessionIdForContact,
+                            label = "聊天页扫描语音转文字等待",
+                        )
+                        if (updatedCap !== cap) {
+                            effectiveCap = updatedCap
+                            effectiveOcrText = recognizePageWithFallbacks(ocr, updatedCap)
+                        }
+                    }
                     var inboundCandidate = extractInboundCandidate(
                         ocr = ocr,
-                        cap = cap,
+                        cap = effectiveCap,
                         contactName = contactName,
                         lastReplyText = lastReplyText,
-                        pageOcrText = ocrText,
+                        pageOcrText = effectiveOcrText,
                     )
                     var voiceTranscribeImagePathForRunOnce: String? = null
                     tryTranscribeLatestVoiceIfNeeded(
                         ocr = ocr,
                         capture = capture,
-                        initialCap = cap,
+                        initialCap = effectiveCap,
                         contactName = contactName,
                         lastReplyText = lastReplyText,
                         sessionId = sessionIdForContact,
@@ -658,10 +673,10 @@ class HostForegroundService : Service() {
                     val inboundSignature = inboundCandidate.signature
                     logger.log(
                         TAG,
-                        "聊天页触发门槛检测: latestSide=${cap.latestVisibleMessageSide} hasInboundAfterLatestOutbound=${cap.hasInboundAfterLatestOutbound} source=${inboundCandidate.sourceLabel}",
+                        "聊天页触发门槛检测: latestSide=${effectiveCap.latestVisibleMessageSide} hasInboundAfterLatestOutbound=${effectiveCap.hasInboundAfterLatestOutbound} source=${inboundCandidate.sourceLabel}",
                     )
-                    if (shouldSkipBecauseLatestVisibleIsOutbound(cap, inboundCandidate)) {
-                        val currentOutboundText = cap.latestOutboundCropPath?.let { ocr.recognize(it).trim() } ?: ""
+                    if (shouldSkipBecauseLatestVisibleIsOutbound(effectiveCap, inboundCandidate)) {
+                        val currentOutboundText = effectiveCap.latestOutboundCropPath?.let { ocr.recognize(it).trim() } ?: ""
                         val lastReplyForCompare = getLastReplyText(prefsReply, sessionIdForContact)
                         // 判断 outbound 文本是否为 AI 自动发出的回复（与上次 AI 回复高度相似时跳过上报）
                         val looksLikeAiReply = lastReplyForCompare.isNotBlank() &&
@@ -669,7 +684,7 @@ class HostForegroundService : Service() {
                         if (currentOutboundText.isNotEmpty() && currentOutboundText != getLastReportedOutbound(sessionIdForContact) && !looksLikeAiReply) {
                             val agentClient = HttpAgentClient(this@HostForegroundService)
                             try {
-                                agentClient.chat(cap.imagePath, currentOutboundText, sessionIdForContact, contactName, isHumanReply = true)
+                                agentClient.chat(effectiveCap.imagePath, currentOutboundText, sessionIdForContact, contactName, isHumanReply = true)
                                 setLastReportedOutbound(sessionIdForContact, currentOutboundText)
                                 logger.log(TAG, "检测到真人介入并发送消息: [${currentOutboundText.take(20)}]，已同步至后台接管流程")
                             } catch (e: Exception) {
@@ -679,7 +694,7 @@ class HostForegroundService : Service() {
                             setLastReportedOutbound(sessionIdForContact, currentOutboundText)
                             logger.log(TAG, "检测到 outbound 文本与 AI 上次回复高度相似，跳过真人介入上报")
                         }
-                        cleanupIntermediateOcrCrops(cap, inboundCandidate.path)
+                        cleanupIntermediateOcrCrops(effectiveCap, inboundCandidate.path)
                         logger.log(TAG, "截图分析结果：当前聊天页最新可见消息疑似己方发送，且未检测到己方之后新入站，跳过本轮")
                         returnToConversationList("聊天页最新消息非客户新消息")
                         return
@@ -690,7 +705,7 @@ class HostForegroundService : Service() {
                         val pngBytes = File(it).readBytes()
                         com.agentime.ime.host.capture.CaptureImageProcessor.exportPublicCopy(this@HostForegroundService, pngFileName, pngBytes)
                     }
-                    cleanupIntermediateOcrCrops(cap, inboundCandidate.path)
+                    cleanupIntermediateOcrCrops(effectiveCap, inboundCandidate.path)
                     logger.log(TAG, "截图分析聊天页最新客户消息预判: ${latestInbound.take(120)}")
                     if (latestInbound.isBlank()) {
                         logger.log(TAG, "截图分析结果：当前是聊天页，但未提取到有效客户新消息，跳过本轮")
@@ -718,8 +733,8 @@ class HostForegroundService : Service() {
                     runOnce(
                         sessionId = sessionIdForContact,
                         contactName = contactName,
-                        preCaptured = cap,
-                        preOcrText = ocrText,
+                        preCaptured = effectiveCap,
+                        preOcrText = effectiveOcrText,
                         preLatestInbound = latestInbound,
                         preInboundSignature = inboundSignature,
                         preVoiceTranscribeImagePath = voiceTranscribeImagePathForRunOnce,
@@ -825,18 +840,33 @@ class HostForegroundService : Service() {
             val prefsReply = getSharedPreferences("host_config", Context.MODE_PRIVATE)
             val sessionIdForContact = SessionIdentity.buildSessionId(this@HostForegroundService, contactName)
             val lastReplyText = getLastReplyText(prefsReply, sessionIdForContact)
+            // 检测语音转文字是否正在加载中，如果是则等待加载完成后重新截图
+            var effectivePostClickCap = postClickCap
+            var effectivePostClickOcr = postClickOcr
+            if (postClickCap.voiceTranscriptionLoading) {
+                val updatedCap = waitForVoiceTranscriptionLoadingIfNeeded(
+                    capture = capture,
+                    initialCap = postClickCap,
+                    sessionId = sessionIdForContact,
+                    label = "点击入会话语音转文字等待",
+                )
+                if (updatedCap !== postClickCap) {
+                    effectivePostClickCap = updatedCap
+                    effectivePostClickOcr = recognizePageWithFallbacks(ocr, updatedCap)
+                }
+            }
             var inboundCandidate = extractInboundCandidate(
                 ocr = ocr,
-                cap = postClickCap,
+                cap = effectivePostClickCap,
                 contactName = contactName,
                 lastReplyText = lastReplyText,
-                pageOcrText = postClickOcr,
+                pageOcrText = effectivePostClickOcr,
             )
             var voiceTranscribeImagePathForRunOnce: String? = null
             tryTranscribeLatestVoiceIfNeeded(
                 ocr = ocr,
                 capture = capture,
-                initialCap = postClickCap,
+                initialCap = effectivePostClickCap,
                 contactName = contactName,
                 lastReplyText = lastReplyText,
                 sessionId = sessionIdForContact,
@@ -848,17 +878,17 @@ class HostForegroundService : Service() {
             val inboundSignature = inboundCandidate.signature
             logger.log(
                 TAG,
-                "点击入会话门槛检测: latestSide=${postClickCap.latestVisibleMessageSide} hasInboundAfterLatestOutbound=${postClickCap.hasInboundAfterLatestOutbound} source=${inboundCandidate.sourceLabel}",
+                "点击入会话门槛检测: latestSide=${effectivePostClickCap.latestVisibleMessageSide} hasInboundAfterLatestOutbound=${effectivePostClickCap.hasInboundAfterLatestOutbound} source=${inboundCandidate.sourceLabel}",
             )
-            if (shouldSkipBecauseLatestVisibleIsOutbound(postClickCap, inboundCandidate)) {
-                val currentOutboundText = postClickCap.latestOutboundCropPath?.let { ocr.recognize(it).trim() } ?: ""
+            if (shouldSkipBecauseLatestVisibleIsOutbound(effectivePostClickCap, inboundCandidate)) {
+                val currentOutboundText = effectivePostClickCap.latestOutboundCropPath?.let { ocr.recognize(it).trim() } ?: ""
                 // 判断 outbound 文本是否为 AI 自动发出的回复（与上次 AI 回复高度相似时跳过上报）
                 val looksLikeAiReply = lastReplyText.isNotBlank() &&
                     ConversationTextExtractor.looksLikeAgentReplyCandidate(currentOutboundText, lastReplyText)
                 if (currentOutboundText.isNotEmpty() && currentOutboundText != getLastReportedOutbound(sessionIdForContact) && !looksLikeAiReply) {
                     val agentClient = HttpAgentClient(this@HostForegroundService)
                     try {
-                        agentClient.chat(postClickCap.imagePath, currentOutboundText, sessionIdForContact, contactName, isHumanReply = true)
+                        agentClient.chat(effectivePostClickCap.imagePath, currentOutboundText, sessionIdForContact, contactName, isHumanReply = true)
                         setLastReportedOutbound(sessionIdForContact, currentOutboundText)
                         logger.log(TAG, "检测到真人介入并发送消息: [${currentOutboundText.take(20)}]，已同步至后台接管流程 (VLM)")
                     } catch (e: Exception) {
@@ -868,7 +898,7 @@ class HostForegroundService : Service() {
                     setLastReportedOutbound(sessionIdForContact, currentOutboundText)
                     logger.log(TAG, "检测到 outbound 文本与 AI 上次回复高度相似，跳过真人介入上报")
                 }
-                cleanupIntermediateOcrCrops(postClickCap, inboundCandidate.path)
+                cleanupIntermediateOcrCrops(effectivePostClickCap, inboundCandidate.path)
                 logger.log(TAG, "点击进入聊天后，最新可见消息疑似己方发送，且未检测到己方之后新入站，取消本轮")
                 returnToConversationList("点击进入后最新消息非客户新消息")
                 return
@@ -879,7 +909,7 @@ class HostForegroundService : Service() {
                 val pngBytes = File(it).readBytes()
                 com.agentime.ime.host.capture.CaptureImageProcessor.exportPublicCopy(this@HostForegroundService, pngFileName, pngBytes)
             }
-            cleanupIntermediateOcrCrops(postClickCap, inboundCandidate.path)
+            cleanupIntermediateOcrCrops(effectivePostClickCap, inboundCandidate.path)
             logger.log(TAG, "点击进入聊天后最新客户消息预判: ${latestInbound.take(120)}")
             if (latestInbound.isBlank()) {
                 logger.log(TAG, "点击进入聊天后，未提取到有效文本，但由于是红点触发，将强行交由大模型看图处理")
@@ -904,8 +934,8 @@ class HostForegroundService : Service() {
             runOnce(
                 sessionId = sessionIdForContact,
                 contactName = contactName,
-                preCaptured = postClickCap,
-                preOcrText = postClickOcr,
+                preCaptured = effectivePostClickCap,
+                preOcrText = effectivePostClickOcr,
                 preLatestInbound = latestInbound,
                 preInboundSignature = inboundSignature,
                 isExplicitTrigger = true,
@@ -1008,6 +1038,7 @@ class HostForegroundService : Service() {
                     logger.log(TAG, "检测到微信已在前台，复用当前聊天页，不重新拉起微信")
                 } else {
                     ensureRuntimeEnabled("启动微信前")
+                    WechatAccessibilityService.showThinkingOverlay("Agent正在打开微信…")
                     if (!automation.launchWechat()) {
                         logger.log(TAG, "启动微信失败，前台信息=${com.agentime.ime.host.automation.WechatAccessibilityService.getForegroundDebugInfo()}")
                         error("无法启动微信，请检查微信是否已安装")
@@ -1049,11 +1080,25 @@ class HostForegroundService : Service() {
                 startForegroundCompat("正在分析微信聊天", includeProjectionType = true)
                 logger.log(TAG, "复用页面分析阶段已成功获取的截图与 OCR，跳过二次截图 voiceTranscribeImage=${preVoiceTranscribeImagePath != null}")
                 moveState(HostState.SCREEN_CAPTURED, "复用截图: ${cap.imagePath}")
+                // 复用截图分支也需要 show 悬浮窗（调用大模型前需要有窗口存在）
+                WechatAccessibilityService.showThinkingOverlay("Agent正在整理话术…")
             } else {
                 startForegroundCompat("正在分析微信聊天", includeProjectionType = true)
                 logger.log(TAG, "开始截图，executionMode=$executionMode provider=$captureProvider")
-                cap = capture.captureScreen(sessionId)
+                WechatAccessibilityService.showThinkingOverlay("Agent正在看看聊天内容…")
+                var initialCap = capture.captureScreen(sessionId)
                 ensureRuntimeEnabled("截图完成后")
+                // 检测语音转文字是否正在加载中，如果是则等待加载完成后重新截图
+                if (initialCap.voiceTranscriptionLoading) {
+                    WechatAccessibilityService.updateThinkingOverlay("正在识别语音内容，请稍候…")
+                    initialCap = waitForVoiceTranscriptionLoadingIfNeeded(
+                        capture = capture,
+                        initialCap = initialCap,
+                        sessionId = sessionId,
+                        label = "runOnce语音转文字等待",
+                    )
+                }
+                cap = initialCap
                 logger.log(
                     TAG,
                     "截图尝试#1 acceptable=${cap.acceptableForOcr} total=${"%.1f".format(cap.totalScore)} sharp=${"%.1f".format(cap.sharpnessScore)}",
@@ -1083,6 +1128,7 @@ class HostForegroundService : Service() {
                 cap.captureTrace?.takeIf { it.isNotBlank() }?.lines()?.forEach {
                     logger.log(TAG, it)
                 }
+                WechatAccessibilityService.updateThinkingOverlay("正在读取消息内容…")
                 val headerOcrText = recognizeHeaderWithFallbacks(ocr, cap)
                 ocrText = recognizePageWithFallbacks(ocr, cap)
                 logger.log(TAG, "OCR 文本: ${ocrText.take(200)}")
@@ -1127,6 +1173,7 @@ class HostForegroundService : Service() {
                     lastReplyText = getLastReplyText(prefs, sessionId),
                     sessionId = sessionId,
                 )?.let {
+                    WechatAccessibilityService.updateThinkingOverlay("正在识别语音内容，请稍候…")
                     inboundCandidate = it
                     // 记录语音转文字后的全屏截图路径，后续发给 VLM 时使用
                     voiceTranscribeImagePath = it.fullScreenshotPath
@@ -1184,8 +1231,8 @@ class HostForegroundService : Service() {
             // ── 思考中进度反馈 ──
             // 在 VLM + LLM 处理期间（通常 5-10s），通过悬浮窗 Overlay 显示醒目的思考状态提示。
             // 悬浮窗属于无障碍服务 Overlay 层，不修改微信界面，不会触发无障碍事件二次截图。
-            moveState(HostState.THINKING, "🤔 正在分析截图并生成回复...")
-            WechatAccessibilityService.showThinkingOverlay("🤔 正在分析截图...")
+            moveState(HostState.THINKING, "Agent正在整理话术…")
+            WechatAccessibilityService.updateThinkingOverlay("Agent正在整理话术…")
 
             val thinkingStartMs = System.currentTimeMillis()
             val reply = agentClient.chat(imageForVlm, latestInbound, sessionId, contactName)
@@ -1222,6 +1269,7 @@ class HostForegroundService : Service() {
             if (executionMode == "manual") {
                 moveState(HostState.INPUT_FOCUSED, "手动模式：请先聚焦输入框，再继续注入")
             } else {
+                WechatAccessibilityService.updateThinkingOverlay("正在为您发送回复…")
                 ensureRuntimeEnabled("聚焦输入框前")
                 if (!automation.focusInputArea()) error("聚焦输入框失败")
                 moveState(HostState.INPUT_FOCUSED, "输入框聚焦完成")
@@ -1666,30 +1714,41 @@ class HostForegroundService : Service() {
 
             if (tapOk) {
                 Thread.sleep(1200)
-                // 快捷按钮只等 3 轮；如果按钮点击未生效，后续通过长按兜底。
-                for (attempt in 1..VOICE_SHORTCUT_MAX_WAIT_ROUNDS) {
-                    val cap = capture.captureScreen("${sessionId}_voice_transcribe_$attempt")
+                // 快捷按钮初始等 3 轮；如果检测到 loading spinner 说明转文字正在进行中，自适应延长上限。
+                val effectiveMaxRounds = VOICE_SHORTCUT_MAX_WAIT_ROUNDS + VOICE_LOADING_SPINNER_MAX_WAIT_ROUNDS
+                var round = 0
+                while (round < VOICE_SHORTCUT_MAX_WAIT_ROUNDS) {
+                    round++
+                    val cap = capture.captureScreen("${sessionId}_voice_transcribe_$round")
                     val candidate = extractVoiceTranscriptionFromAnchor(
                         ocr = ocr,
                         cap = cap,
                         anchorY = redY,
                         contactName = contactName,
                         lastReplyText = lastReplyText,
-                        label = "语音转文字等待#$attempt",
+                        label = "语音转文字等待#$round",
                     )
                     if (isUsableVoiceTranscriptionText(candidate.text)) {
                         logger.log(TAG, "语音快捷转文字已提取有效文本: ${candidate.text.take(120)}")
                         // 返回时携带转文字后的全屏截图路径，供后续 VLM 使用
                         return candidate.copy(fullScreenshotPath = cap.imagePath)
                     }
+                    // 检测到 loading spinner 时延长等待上限（转文字确实在进行中）
+                    if (cap.voiceTranscriptionLoading && round >= VOICE_SHORTCUT_MAX_WAIT_ROUNDS && round < effectiveMaxRounds) {
+                        logger.log(TAG, "语音转文字等待#$round 检测到 loading spinner，延长等待 (上限=$effectiveMaxRounds)")
+                        // 动态增加上限以继续循环
+                    }
                     if (candidate.text.isNotBlank()) {
-                        logger.log(TAG, "语音转文字等待#$attempt 候选疑似 OCR 噪声，继续等待/准备长按兜底: ${candidate.text.take(80)}")
+                        logger.log(TAG, "语音转文字等待#$round 候选疑似 OCR 噪声，继续等待/准备长按兜底: ${candidate.text.take(80)}")
                     }
                     logger.log(
                         TAG,
-                        "语音转文字等待#$attempt 暂未得到有效文本 redDot=${cap.latestInboundVoiceRedDot} side=${cap.latestVisibleMessageSide}",
+                        "语音转文字等待#$round 暂未得到有效文本 redDot=${cap.latestInboundVoiceRedDot} side=${cap.latestVisibleMessageSide} loading=${cap.voiceTranscriptionLoading}",
                     )
-                    Thread.sleep(700)
+                    Thread.sleep(if (cap.voiceTranscriptionLoading) VOICE_LOADING_SPINNER_POLL_INTERVAL_MS else 700L)
+                    // 如果仍在加载中，允许超出初始轮次继续循环
+                    if (cap.voiceTranscriptionLoading && round >= VOICE_SHORTCUT_MAX_WAIT_ROUNDS && round < effectiveMaxRounds) continue
+                    if (round >= VOICE_SHORTCUT_MAX_WAIT_ROUNDS) break
                 }
             } else {
                 logger.log(TAG, "快捷转文字按钮点击手势未完成，直接回退长按语音气泡")
@@ -1893,8 +1952,11 @@ class HostForegroundService : Service() {
         // 等待"转文字"展开
         Thread.sleep(1500)
 
-        // 轮询等待转文字结果
-        for (attempt in 1..VOICE_LONGPRESS_MAX_WAIT_ROUNDS) {
+        // 轮询等待转文字结果（如果检测到 loading spinner 说明转文字正在进行中，自适应延长等待）
+        val longpressEffectiveMaxRounds = VOICE_LONGPRESS_MAX_WAIT_ROUNDS + VOICE_LOADING_SPINNER_MAX_WAIT_ROUNDS
+        var attempt = 0
+        while (attempt < VOICE_LONGPRESS_MAX_WAIT_ROUNDS) {
+            attempt++
             val cap = capture.captureScreen("${sessionId}_voice_longpress_transcribe_$attempt")
             val candidate = extractVoiceTranscriptionFromAnchor(
                 ocr = ocr,
@@ -1913,9 +1975,15 @@ class HostForegroundService : Service() {
             }
             logger.log(
                 TAG,
-                "长按转文字等待#$attempt 暂未得到有效文本 redDot=${cap.latestInboundVoiceRedDot} side=${cap.latestVisibleMessageSide}",
+                "长按转文字等待#$attempt 暂未得到有效文本 redDot=${cap.latestInboundVoiceRedDot} side=${cap.latestVisibleMessageSide} loading=${cap.voiceTranscriptionLoading}",
             )
-            Thread.sleep(700)
+            Thread.sleep(if (cap.voiceTranscriptionLoading) VOICE_LOADING_SPINNER_POLL_INTERVAL_MS else 700L)
+            // 如果仍在加载中，允许超出初始轮次继续循环
+            if (cap.voiceTranscriptionLoading && attempt >= VOICE_LONGPRESS_MAX_WAIT_ROUNDS && attempt < longpressEffectiveMaxRounds) {
+                logger.log(TAG, "长按转文字等待#$attempt 检测到 loading spinner，延长等待 (上限=$longpressEffectiveMaxRounds)")
+                continue
+            }
+            if (attempt >= VOICE_LONGPRESS_MAX_WAIT_ROUNDS) break
         }
         return null
     }
@@ -2302,6 +2370,42 @@ class HostForegroundService : Service() {
         return if (width > 0 && height > 0) width to height else null
     }
 
+    /**
+     * 当截图检测到语音转文字 loading spinner 时，轮询等待转文字完成后重新截图。
+     *
+     * 解决场景：
+     * - 用户手动或 Agent 触发了"转文字"后，截图时转文字还在加载中（灰色旋转动画）
+     * - 如果直接将此截图发给 VLM，VLM 看到的只有加载动画而无法识别实际文字内容
+     *
+     * @return 转文字完成后的新 CaptureResult，如果超时仍未完成则返回最后一次截图
+     */
+    private fun waitForVoiceTranscriptionLoadingIfNeeded(
+        capture: com.agentime.ime.host.capture.CaptureController,
+        initialCap: com.agentime.ime.host.capture.CaptureResult,
+        sessionId: String,
+        label: String,
+    ): com.agentime.ime.host.capture.CaptureResult {
+        if (!initialCap.voiceTranscriptionLoading) return initialCap
+        logger.log(TAG, "$label: 检测到语音转文字 loading spinner，开始等待转文字完成")
+
+        var latestCap = initialCap
+        for (attempt in 1..VOICE_LOADING_SPINNER_MAX_WAIT_ROUNDS) {
+            Thread.sleep(VOICE_LOADING_SPINNER_POLL_INTERVAL_MS)
+            if (!isRuntimeEnabled()) {
+                logger.log(TAG, "$label: 等待语音转文字期间运行已停止，使用当前截图")
+                return latestCap
+            }
+            latestCap = capture.captureScreen("${sessionId}_voice_loading_wait_$attempt")
+            if (!latestCap.voiceTranscriptionLoading) {
+                logger.log(TAG, "$label: 语音转文字 loading 已消失 (第${attempt}轮)，使用新截图")
+                return latestCap
+            }
+            logger.log(TAG, "$label: 语音转文字仍在加载中 (第${attempt}/${VOICE_LOADING_SPINNER_MAX_WAIT_ROUNDS}轮)")
+        }
+        logger.log(TAG, "$label: 等待语音转文字 loading 超时 (${VOICE_LOADING_SPINNER_MAX_WAIT_ROUNDS}轮)，使用最后截图继续")
+        return latestCap
+    }
+
     private fun inboundSourceTier(label: String): Int {
         return when {
             label.contains("最新左侧气泡") -> 0
@@ -2619,6 +2723,9 @@ class HostForegroundService : Service() {
         private const val VOICE_SHORTCUT_MAX_WAIT_ROUNDS = 3
         // 语音转文字：长按弹窗菜单后最大等待轮数（每轮 ~700ms）
         private const val VOICE_LONGPRESS_MAX_WAIT_ROUNDS = 8
+        // 语音转文字 loading spinner 等待：最多轮询此轮数等待转文字完成（每轮 ~1000ms）
+        private const val VOICE_LOADING_SPINNER_MAX_WAIT_ROUNDS = 6
+        private const val VOICE_LOADING_SPINNER_POLL_INTERVAL_MS = 1000L
         private const val MAX_PENDING_RUN_ONCE = 20
         private const val PENDING_DRAIN_DELAY_MS = 800L
         private val pendingLock = Any()

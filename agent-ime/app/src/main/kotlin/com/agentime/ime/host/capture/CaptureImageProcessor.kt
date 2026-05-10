@@ -86,6 +86,8 @@ object CaptureImageProcessor {
         val latestInboundVoiceTranscriptionCrop = createLatestInboundVoiceTranscriptionCrop(bitmap)
         val latestInboundVoiceTranscriptionCropPath = saveBitmapIfPresent(context, latestInboundVoiceTranscriptionCrop, outDir, fileName, "leftmsg_voice_transcription")
         val latestInboundVoiceRedDot = detectLatestInboundVoiceRedDot(bitmap)
+        // 检测语音转文字是否正在加载中（灰色旋转 loading spinner）
+        val voiceTranscriptionLoading = detectVoiceTranscriptionLoading(bitmap)
         val latestOutboundCrop = chatCrop?.let(::createLatestOutboundCrop)
         val latestOutboundCropPath = saveBitmapIfPresent(context, latestOutboundCrop, outDir, fileName, "latest_outbound")
         headerCrop?.recycle()
@@ -117,6 +119,7 @@ object CaptureImageProcessor {
             latestInboundVoiceRedDotY = latestInboundVoiceRedDot?.centerY,
             latestInboundVoiceRedDotScore = latestInboundVoiceRedDot?.count ?: 0,
             latestOutboundCropPath = latestOutboundCropPath,
+            voiceTranscriptionLoading = voiceTranscriptionLoading,
             acceptableForOcr = acceptableForOcr,
             sharpnessScore = sharpnessScore,
             totalScore = totalScore,
@@ -917,6 +920,175 @@ object CaptureImageProcessor {
             bitmap.compress(Bitmap.CompressFormat.PNG, 100, bos)
             bos.toByteArray()
         }
+    }
+
+    /**
+     * 检测微信语音转文字正在加载中的灰色旋转 loading spinner。
+     *
+     * 微信的 loading spinner 特征：
+     * - 位于最新左侧消息气泡的下方（聊天区域的中下部区域）
+     * - 灰色环形图案（RGB 近似，亮度在 150~210 之间），背景为白色
+     * - 尺寸较小（约 20~60px 的环形），近似圆形
+     * - 周围为大面积白色/浅灰背景
+     *
+     * 检测策略：
+     * 在聊天区域的底部 60% 区域，扫描宽度左侧 50% 中搜索符合灰色 spinner 特征的连通区域。
+     */
+    fun detectVoiceTranscriptionLoading(source: Bitmap): Boolean {
+        val width = source.width
+        val height = source.height
+        if (width < 200 || height < 400) return false
+
+        // 搜索区域：聊天内容区域的下半部分，左侧（语音气泡区域）
+        val xStart = (width * 0.05f).toInt().coerceAtLeast(0)
+        val xEnd = (width * 0.55f).toInt().coerceAtMost(width)
+        val yStart = (height * 0.40f).toInt().coerceAtLeast(0)
+        val yEnd = (height * 0.92f).toInt().coerceAtMost(height)
+        if (xEnd - xStart < 40 || yEnd - yStart < 40) return false
+
+        val step = 2
+        val gridWidth = ((xEnd - xStart) / step).coerceAtLeast(1)
+        val gridHeight = ((yEnd - yStart) / step).coerceAtLeast(1)
+        val mask = BooleanArray(gridWidth * gridHeight)
+
+        // 灰色 spinner 像素特征：
+        // - RGB 通道接近（低饱和度，max-min <= 25）
+        // - 亮度在中等偏灰范围（130~215）
+        // - 非纯白（排除背景）
+        fun isSpinnerGray(pixel: Int): Boolean {
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            val max = maxOf(r, g, b)
+            val min = minOf(r, g, b)
+            val brightness = (r + g + b) / 3
+            return max - min <= 25 && brightness in 130..215
+        }
+
+        fun idx(gx: Int, gy: Int): Int = gy * gridWidth + gx
+
+        for (gy in 0 until gridHeight) {
+            val y = yStart + gy * step
+            for (gx in 0 until gridWidth) {
+                val x = xStart + gx * step
+                mask[idx(gx, gy)] = isSpinnerGray(source.getPixel(x, y))
+            }
+        }
+
+        // BFS 查找连通的灰色区域，判断是否符合 loading spinner 形态
+        val visited = BooleanArray(mask.size)
+        val queueX = IntArray(mask.size)
+        val queueY = IntArray(mask.size)
+        val widthScale = (width / 480f).coerceAtLeast(1f)
+        // spinner 尺寸范围（网格单元）
+        val minDim = (6 * widthScale).toInt().coerceAtLeast(5)
+        val maxDim = (40 * widthScale).toInt().coerceAtLeast(minDim + 2)
+        val minCount = (8 * widthScale * widthScale).toInt().coerceAtLeast(5)
+        val maxCount = (120 * widthScale * widthScale).toInt().coerceAtLeast(minCount + 2)
+
+        for (gy in 0 until gridHeight) {
+            for (gx in 0 until gridWidth) {
+                val start = idx(gx, gy)
+                if (!mask[start] || visited[start]) continue
+
+                var head = 0
+                var tail = 0
+                queueX[tail] = gx
+                queueY[tail] = gy
+                tail++
+                visited[start] = true
+
+                var count = 0
+                var compMinX = gx
+                var compMaxX = gx
+                var compMinY = gy
+                var compMaxY = gy
+
+                while (head < tail) {
+                    val cx = queueX[head]
+                    val cy = queueY[head]
+                    head++
+                    count++
+                    if (cx < compMinX) compMinX = cx
+                    if (cx > compMaxX) compMaxX = cx
+                    if (cy < compMinY) compMinY = cy
+                    if (cy > compMaxY) compMaxY = cy
+
+                    for (dy in -1..1) {
+                        for (dx in -1..1) {
+                            if (dx == 0 && dy == 0) continue
+                            val nx = cx + dx
+                            val ny = cy + dy
+                            if (nx !in 0 until gridWidth || ny !in 0 until gridHeight) continue
+                            val next = idx(nx, ny)
+                            if (!mask[next] || visited[next]) continue
+                            visited[next] = true
+                            queueX[tail] = nx
+                            queueY[tail] = ny
+                            tail++
+                        }
+                    }
+                }
+
+                val compWidth = (compMaxX - compMinX + 1) * step
+                val compHeight = (compMaxY - compMinY + 1) * step
+                val aspect = compWidth.toDouble() / compHeight.coerceAtLeast(1)
+
+                // Spinner 特征：近似正方形、大小合适、填充率适中（环形，不是实心）
+                val isPlausibleSpinner =
+                    count in minCount..maxCount &&
+                        compWidth in minDim..maxDim &&
+                        compHeight in minDim..maxDim &&
+                        aspect in 0.6..1.7
+
+                if (!isPlausibleSpinner) continue
+
+                // 额外验证：检查中心区域是否为白色（环形 spinner 的中心是空的）
+                val centerGx = (compMinX + compMaxX) / 2
+                val centerGy = (compMinY + compMaxY) / 2
+                val centerX = xStart + centerGx * step
+                val centerY = yStart + centerGy * step
+                if (centerX in 0 until width && centerY in 0 until height) {
+                    val centerPixel = source.getPixel(centerX, centerY)
+                    val cR = (centerPixel shr 16) and 0xFF
+                    val cG = (centerPixel shr 8) and 0xFF
+                    val cB = centerPixel and 0xFF
+                    val centerBrightness = (cR + cG + cB) / 3
+                    // 中心应该是白色或接近白色（亮度 > 235），表示环形而非实心
+                    if (centerBrightness >= 230) {
+                        // 附加验证：环形周围大面积白色背景
+                        val bgCheckRadius = maxOf(maxDim / 2 + 4, 8)
+                        var whiteCount = 0
+                        var totalSampled = 0
+                        for (dy in -bgCheckRadius..bgCheckRadius step 3) {
+                            for (dx in -bgCheckRadius..bgCheckRadius step 3) {
+                                val sx = centerX + dx
+                                val sy = centerY + dy
+                                if (sx !in 0 until width || sy !in 0 until height) continue
+                                val p = source.getPixel(sx, sy)
+                                val pr = (p shr 16) and 0xFF
+                                val pg = (p shr 8) and 0xFF
+                                val pb = p and 0xFF
+                                val pb2 = (pr + pg + pb) / 3
+                                totalSampled++
+                                if (pb2 >= 230) whiteCount++
+                            }
+                        }
+                        // 背景至少 50% 为白色
+                        if (totalSampled > 0 && whiteCount.toDouble() / totalSampled >= 0.50) {
+                            Log.i(
+                                TAG,
+                                "检测到语音转文字 loading spinner: center=($centerX,$centerY) " +
+                                    "size=${compWidth}x$compHeight count=$count aspect=${"%.2f".format(aspect)} " +
+                                    "bgWhiteRatio=${"%.2f".format(whiteCount.toDouble() / totalSampled)}",
+                            )
+                            return true
+                        }
+                    }
+                }
+            }
+        }
+        return false
     }
 
     fun exportPublicCopy(context: Context, fileName: String, pngBytes: ByteArray): String? {
