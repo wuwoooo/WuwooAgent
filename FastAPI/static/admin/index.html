@@ -2068,9 +2068,19 @@
                     }
                 };
 
-                onMounted(() => {
+                onMounted(async () => {
                     // Make sure audio is initialized on first user interaction anywhere on the document
                     document.addEventListener('click', initAudio, { once: true });
+                    
+                    if(!authToken.value) {
+                        triggerLogin();
+                        return;
+                    }
+                    const ok = await fetchCurrentUser();
+                    if (!ok) {
+                        triggerLogin();
+                        return;
+                    }
                     
                     fetchAgents();
                     fetchSessions();
