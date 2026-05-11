@@ -231,7 +231,7 @@ object ConversationListUnreadDetector {
             val barTop = (height * 0.86f).toInt()
             val barBottom = (height * 0.985f).toInt().coerceAtMost(height)
             for (y in barTop until barBottom step 3) {
-                var whiteHit = 0
+                var pureWhiteHit = 0
                 var whiteTotal = 0
                 var x = (width * 0.12f).toInt()
                 while (x < (width * 0.76f).toInt()) {
@@ -239,11 +239,12 @@ object ConversationListUnreadDetector {
                     val r = (c shr 16) and 0xFF
                     val g = (c shr 8) and 0xFF
                     val b = c and 0xFF
-                    if (r >= 245 && g >= 245 && b >= 245) whiteHit++
+                    // 必须是纯白（>250），排除列表页的浅灰（F5/F7）底部 Tab 栏
+                    if (r >= 250 && g >= 250 && b >= 250) pureWhiteHit++
                     whiteTotal++
                     x += 4
                 }
-                val centerWhiteRatio = if (whiteTotal == 0) 0.0 else whiteHit.toDouble() / whiteTotal
+                val centerWhiteRatio = if (whiteTotal == 0) 0.0 else pureWhiteHit.toDouble() / whiteTotal
 
                 var leftDarkHit = 0
                 var leftDarkTotal = 0
