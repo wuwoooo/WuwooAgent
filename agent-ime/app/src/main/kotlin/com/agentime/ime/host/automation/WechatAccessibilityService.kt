@@ -752,18 +752,15 @@ class WechatAccessibilityService : AccessibilityService() {
 
             if (now - lastScreenshotAnalysisTriggerAt < SCREENSHOT_ANALYSIS_TRIGGER_COOLDOWN_MS) return
             lastScreenshotAnalysisTriggerAt = now
-            val rootClassName = root?.className?.toString() ?: "null"
+            val intent = Intent(svc, HostForegroundService::class.java).apply {
+                action = HostForegroundService.ACTION_SCAN_CONVERSATION_LIST
+                putExtra(HostForegroundService.EXTRA_SCAN_SOURCE, triggerSource)
+            }
+            svc.startService(intent)
             hostLog(
                 svc,
-                "前台变化已触发截图分析当前微信页，将延时 600ms 执行以等待 UI 动画（source=$triggerSource root=$rootClassName）",
+                "前台变化已触发截图分析当前微信页（source=$triggerSource root=${root?.className ?: "null"}）",
             )
-            Handler(Looper.getMainLooper()).postDelayed({
-                val intent = Intent(svc, HostForegroundService::class.java).apply {
-                    action = HostForegroundService.ACTION_SCAN_CONVERSATION_LIST
-                    putExtra(HostForegroundService.EXTRA_SCAN_SOURCE, triggerSource)
-                }
-                svc.startService(intent)
-            }, 600L)
         }
 
         private fun resolveWechatRoot(

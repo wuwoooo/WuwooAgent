@@ -365,12 +365,12 @@ object MediaProjectionSession {
             h = handler ?: throw IllegalStateException("截图管线未初始化")
             reader = imageReader ?: throw IllegalStateException("ImageReader 未初始化")
         }
-        val drainedBeforeStart = drainBufferedImages()
         Thread.sleep(320)
         val trace = mutableListOf<String>()
         trace += "legacySingleShot=true"
         trace += "沿用既有 ImageReader Surface width=$width height=$height"
-        trace += "capture 开始前已主动清空缓存帧数量: $drainedBeforeStart"
+        val drainedBeforeStart = 0
+        trace += "capture 开始前保留最近帧（不主动清空）"
 
         var chosen: BitmapWithInfo? = null
         var attempts = 0
