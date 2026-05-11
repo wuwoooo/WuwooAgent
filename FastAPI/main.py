@@ -103,6 +103,22 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 security = HTTPBasic()
 agent_security = HTTPBearer(auto_error=False)
 
+class AdminUser(str):
+    @property
+    def is_super(self) -> bool:
+        return getattr(self, "_is_super", False)
+
+    @property
+    def agent_id(self) -> Optional[int]:
+        return getattr(self, "_agent_id", None)
+
+    @classmethod
+    def create(cls, username: str, is_super: bool, agent_id: Optional[int]):
+        obj = cls(username)
+        obj._is_super = is_super
+        obj._agent_id = agent_id
+        return obj
+
 def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
     admin_user = os.environ.get("ADMIN_USER", "admin").strip()
     admin_pass = os.environ.get("ADMIN_PASSWORD", "admin123").strip()
@@ -110,13 +126,29 @@ def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
     is_user_ok = secrets.compare_digest(credentials.username, admin_user)
     is_pass_ok = secrets.compare_digest(credentials.password, admin_pass)
     
-    if not (is_user_ok and is_pass_ok):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "CustomBasic"},
-        )
-    return credentials.username
+    if is_user_ok and is_pass_ok:
+        return AdminUser.create(credentials.username, is_super=True, agent_id=None)
+        
+    try:
+        agent = database.verify_agent_credentials(credentials.username, credentials.password)
+        if agent:
+            return AdminUser.create(agent["username"], is_super=False, agent_id=agent["id"])
+    except Exception:
+        pass
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Incorrect username or password",
+        headers={"WWW-Authenticate": "CustomBasic"},
+    )
+
+def check_admin_session_access(session: dict | None, username: str):
+    if not session:
+        return
+    if not getattr(username, "is_super", True):
+        agent_id = getattr(username, "agent_id", None)
+        if session.get("agent_id") != agent_id:
+            raise HTTPException(status_code=403, detail="无权访问该会话")
 
 
 def verify_agent(credentials: HTTPAuthorizationCredentials | None = Depends(agent_security)):
@@ -1635,6 +1667,15 @@ async def get_admin_page():
     html_path = BASE_DIR / "static" / "admin" / "index.html"
     return html_path.read_text(encoding="utf-8")
 
+@app.get("/api/admin/me")
+async def api_admin_me(username: str = Depends(verify_admin)):
+    return {
+        "username": str(username),
+        "is_super": getattr(username, "is_super", True),
+        "agent_id": getattr(username, "agent_id", None),
+    }
+
+
 @app.get("/api/admin/sessions")
 async def api_get_sessions(
     agent_id: Optional[int] = None,
@@ -1642,11 +1683,14 @@ async def api_get_sessions(
     offset: int = 0,
     username: str = Depends(verify_admin),
 ):
+    if not getattr(username, "is_super", True):
+        agent_id = getattr(username, "agent_id", None)
     return database.get_all_sessions(agent_id=agent_id, limit=limit, offset=offset)
 
 @app.get("/api/admin/sessions/{session_id}")
 async def api_get_session_detail(session_id: str, username: str = Depends(verify_admin)):
     session = database.get_session(session_id)
+    check_admin_session_access(session, username)
     messages = database.get_session_messages(session_id)
     profile = database.get_session_profile(session_id)
     contact = database.get_contact_for_session(session_id) if session else None
@@ -1661,11 +1705,15 @@ async def api_admin_list_outbound_tasks(
     limit: int = 30,
     username: str = Depends(verify_admin),
 ):
+    if not getattr(username, "is_super", True):
+        agent_id = getattr(username, "agent_id", None)
     return {"ok": True, "items": database.list_outbound_tasks(agent_id=agent_id, limit=limit)}
 
 
 @app.post("/api/admin/outbound-tasks")
 async def api_admin_create_outbound_task(payload: AdminOutboundTaskRequest, username: str = Depends(verify_admin)):
+    if not getattr(username, "is_super", True):
+        payload.agent_id = getattr(username, "agent_id", None)
     try:
         task = database.create_outbound_task(
             agent_id=payload.agent_id,
@@ -1690,11 +1738,15 @@ async def api_admin_create_outbound_task(payload: AdminOutboundTaskRequest, user
 
 @app.get("/api/admin/agents")
 async def api_admin_list_agents(username: str = Depends(verify_admin)):
+    if not getattr(username, "is_super", True):
+        raise HTTPException(status_code=403, detail="无权访问 Agent 列表")
     return database.list_agents()
 
 
 @app.post("/api/admin/agents")
 async def api_admin_create_agent(payload: AdminAgentCreateRequest, username: str = Depends(verify_admin)):
+    if not getattr(username, "is_super", True):
+        raise HTTPException(status_code=403, detail="无权创建 Agent")
     try:
         agent = database.create_agent(
             username=payload.username,
@@ -1710,6 +1762,8 @@ async def api_admin_create_agent(payload: AdminAgentCreateRequest, username: str
 
 @app.put("/api/admin/agents/{agent_id}")
 async def api_admin_update_agent(agent_id: int, payload: AdminAgentUpdateRequest, username: str = Depends(verify_admin)):
+    if not getattr(username, "is_super", True):
+        raise HTTPException(status_code=403, detail="无权更新 Agent")
     try:
         agent = database.update_agent(agent_id, payload.display_name, payload.status, payload.note)
         if not agent:
@@ -1722,6 +1776,8 @@ async def api_admin_update_agent(agent_id: int, payload: AdminAgentUpdateRequest
 
 @app.post("/api/admin/agents/{agent_id}/password")
 async def api_admin_set_agent_password(agent_id: int, payload: AdminAgentPasswordRequest, username: str = Depends(verify_admin)):
+    if not getattr(username, "is_super", True):
+        raise HTTPException(status_code=403, detail="无权设置 Agent 密码")
     try:
         database.set_agent_password(agent_id, payload.password)
         logger.info("管理员 %s 重置 Agent 密码并清空旧 token: agent_id=%s", username, agent_id)

@@ -443,6 +443,19 @@ def set_agent_password(agent_id: int, password: str) -> None:
     conn.close()
 
 
+def verify_agent_credentials(username: str, password: str) -> Optional[Dict[str, Any]]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM agents WHERE username = ?", ((username or "").strip(),))
+    row = cursor.fetchone()
+    if not row or row["status"] != "active" or not _verify_password(password, row["password_hash"]):
+        conn.close()
+        return None
+    agent = _agent_public(row)
+    conn.close()
+    return agent
+
+
 def authenticate_agent(username: str, password: str, device_id: str = "") -> Optional[Dict[str, Any]]:
     conn = get_connection()
     cursor = conn.cursor()

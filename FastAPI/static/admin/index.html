@@ -233,14 +233,17 @@
             <div class="mx-3 mb-3 p-3 rounded-2xl border border-indigo-100 bg-indigo-50">
                 <div class="flex items-center justify-between mb-2">
                     <span class="text-sm font-bold text-indigo-700"><i class="fa-solid fa-user-shield mr-1"></i>Agent 身份</span>
-                    <button @click="openAgentPanel" class="text-xs text-indigo-600 hover:text-indigo-800 font-bold">管理</button>
+                    <button v-if="currentUser?.is_super" @click="openAgentPanel" class="text-xs text-indigo-600 hover:text-indigo-800 font-bold">管理</button>
                 </div>
-                <select v-model="selectedAgentId" @change="onAgentFilterChange" class="w-full px-3 py-2 rounded-xl border border-indigo-100 bg-white text-sm text-slate-700 outline-none">
+                <select v-if="currentUser?.is_super" v-model="selectedAgentId" @change="onAgentFilterChange" class="w-full px-3 py-2 rounded-xl border border-indigo-100 bg-white text-sm text-slate-700 outline-none">
                     <option value="">全部 Agent</option>
                     <option v-for="agent in agents" :key="agent.id" :value="String(agent.id)">
                         {{ agent.display_name || agent.username }}
                     </option>
                 </select>
+                <div v-else class="text-sm text-slate-700 px-3 py-2 bg-white rounded-xl border border-indigo-100 font-medium text-center shadow-sm">
+                    当前账号：{{ currentUser?.username }}
+                </div>
             </div>
             
             <div class="flex-1 overflow-y-auto p-2 space-y-2">
@@ -883,6 +886,7 @@
 
         createApp({
             setup() {
+
                 const sessions = ref([]);
                 const sessionLimit = 50;
                 const sessionOffset = ref(0);
@@ -930,6 +934,31 @@
                 const isLoggingIn = ref(false);
                 const loginForm = ref({ username: '', password: '' });
                 const authToken = ref(localStorage.getItem('admin_token') || '');
+                const currentUser = ref(null);
+
+                const fetchCurrentUser = async () => {
+                    if (!authToken.value) return false;
+                    try {
+                        const res = await fetch('/api/admin/me', {
+                            headers: { 'Authorization': `Basic ${authToken.value}` }
+                        });
+                        if (res.ok) {
+                            currentUser.value = await res.json();
+                            if (!currentUser.value?.is_super) {
+                                selectedAgentId.value = '';
+                                localStorage.removeItem('selected_agent_id');
+                            }
+                            return true;
+                        } else if (res.status === 401) {
+                            authToken.value = '';
+                            localStorage.removeItem('admin_token');
+                            return false;
+                        }
+                    } catch (e) {
+                        console.error('获取当前用户信息失败', e);
+                    }
+                    return false;
+                };
                 const showStatusPanel = ref(false);
                 const serviceStatus = ref(null);
                 const isLoadingStatus = ref(false);
@@ -1120,6 +1149,7 @@
                         if (res.ok) {
                             authToken.value = token;
                             localStorage.setItem('admin_token', token);
+                            await fetchCurrentUser();
                             loginAnimate.value = false;
                             setTimeout(() => { showLogin.value = false; }, 500); 
                             initAudio(); // Initialize audio on login interaction
@@ -1198,7 +1228,7 @@
                 };
 
                 const fetchAgents = async () => {
-                    if (showLogin.value) return;
+                    if (showLogin.value || !currentUser.value?.is_super) return;
                     try {
                         const res = await fetch('/api/admin/agents', { headers: getAuthHeaders() });
                         if (res.ok) {
@@ -2062,6 +2092,7 @@
                     sessionHasMore,
                     currentPage,
                     currentSession,
+                    currentUser,
                     messages,
                     profile,
                     contact,
