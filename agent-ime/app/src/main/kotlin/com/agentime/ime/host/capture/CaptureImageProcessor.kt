@@ -781,6 +781,43 @@ object CaptureImageProcessor {
                 if (!plausible) continue
 
                 val candidate = RedDot(centerX, centerY, compWidth, compHeight, count)
+
+                // 语音消息的红点位于气泡外部：其左侧是气泡，而上下右侧都是聊天背景。
+                // 文本气泡内的 emoji：其左、上、下、右侧通常都是相同的气泡底色。
+                // 我们可以通过对比左侧和上下侧的颜色/亮度来区分。
+                val checkDistX = compWidth * 1.8f
+                val checkDistY = compHeight * 1.2f
+                val rx = (centerX + checkDistX).toInt().coerceIn(0, width - 1)
+                val ty = (centerY - checkDistY).toInt().coerceIn(0, height - 1)
+                val by = (centerY + checkDistY).toInt().coerceIn(0, height - 1)
+                val cx = centerX.toInt()
+                val cy = centerY.toInt()
+                
+                fun getLum(x: Int, y: Int): Int {
+                    val px = source.getPixel(x, y)
+                    return ((px shr 16) and 0xFF) + ((px shr 8) and 0xFF) + (px and 0xFF)
+                }
+                
+                // 获取左侧气泡亮度的最大值（避免左侧刚好踩到黑色文字）
+                var lumL = 0
+                for (i in 2..5) {
+                    val sampleX = (centerX - compWidth * i * 0.5f).toInt().coerceAtLeast(0)
+                    lumL = maxOf(lumL, getLum(sampleX, cy))
+                }
+                
+                val lumT = getLum(cx, ty)
+                val lumB = getLum(cx, by)
+                val lumR = getLum(rx, cy)
+                
+                // 取上、下、右三者的最大亮度，代表红点"非气泡侧"的环境亮度
+                val lumEnv = maxOf(lumT, lumB, lumR)
+                
+                // 真实语音红点：左侧是气泡，环境是背景，气泡必定比背景亮（不论深色还是浅色模式）。
+                // 如果左侧并没有明显比环境亮，说明红点四面都是同一种底色（气泡内部）。
+                if (lumL <= lumEnv + 15) {
+                    continue
+                }
+
                 val current = best
                 if (
                     current == null ||
@@ -799,7 +836,9 @@ object CaptureImageProcessor {
     }
 
     private fun isWechatVoiceUnreadRed(r: Int, g: Int, b: Int): Boolean {
-        return r >= 200 && (r - g) >= 50 && (r - b) >= 50
+        // 微信语音未读红点颜色为纯正的红色（如 r=250, g=81, b=81）。
+        // 严格限制颜色，避免将包含红色/粉色的 emoji（如脸红、爱心、嘴唇等）误判为语音红点。
+        return r >= 220 && g <= 90 && b <= 90 && (r - g) >= 140 && (r - b) >= 140
     }
 
     private fun createLatestOutboundCrop(source: Bitmap): Bitmap? {
