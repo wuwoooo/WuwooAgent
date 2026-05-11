@@ -225,10 +225,64 @@ object ConversationListUnreadDetector {
                     // 列表页底部中心通常接近纯白；聊天页输入栏通常更“实”。
                     bottomCenterNonWhite <= 0.20 &&
                     leftAvatarNonWhite >= 0.10
+            // 检测是否存在聊天页特有的文本输入栏（两侧深色图标 + 中间大片白色）
+            // 解决聊天页在文本模式下（无“按住说话”等文字）由于底部中间纯白导致 bottomCenterNonWhite 极低，从而被误判为列表页的问题。
+            var visualInputBarRows = 0
+            val barTop = (height * 0.86f).toInt()
+            val barBottom = (height * 0.985f).toInt().coerceAtMost(height)
+            for (y in barTop until barBottom step 3) {
+                var whiteHit = 0
+                var whiteTotal = 0
+                var x = (width * 0.12f).toInt()
+                while (x < (width * 0.76f).toInt()) {
+                    val c = bitmap.getPixel(x, y)
+                    val r = (c shr 16) and 0xFF
+                    val g = (c shr 8) and 0xFF
+                    val b = c and 0xFF
+                    if (r >= 245 && g >= 245 && b >= 245) whiteHit++
+                    whiteTotal++
+                    x += 4
+                }
+                val centerWhiteRatio = if (whiteTotal == 0) 0.0 else whiteHit.toDouble() / whiteTotal
+
+                var leftDarkHit = 0
+                var leftDarkTotal = 0
+                x = (width * 0.02f).toInt()
+                while (x < (width * 0.13f).toInt()) {
+                    val c = bitmap.getPixel(x, y)
+                    val r = (c shr 16) and 0xFF
+                    val g = (c shr 8) and 0xFF
+                    val b = c and 0xFF
+                    if (r <= 90 && g <= 90 && b <= 90) leftDarkHit++
+                    leftDarkTotal++
+                    x += 4
+                }
+                val leftDarkRatio = if (leftDarkTotal == 0) 0.0 else leftDarkHit.toDouble() / leftDarkTotal
+
+                var rightDarkHit = 0
+                var rightDarkTotal = 0
+                x = (width * 0.78f).toInt()
+                while (x < (width * 0.98f).toInt()) {
+                    val c = bitmap.getPixel(x, y)
+                    val r = (c shr 16) and 0xFF
+                    val g = (c shr 8) and 0xFF
+                    val b = c and 0xFF
+                    if (r <= 90 && g <= 90 && b <= 90) rightDarkHit++
+                    rightDarkTotal++
+                    x += 4
+                }
+                val rightDarkRatio = if (rightDarkTotal == 0) 0.0 else rightDarkHit.toDouble() / rightDarkTotal
+
+                if (centerWhiteRatio >= 0.32 && (leftDarkRatio >= 0.018 || rightDarkRatio >= 0.018)) {
+                    visualInputBarRows++
+                }
+            }
+            val hasVisualInputBar = visualInputBarRows >= 4
+
             val textLooksLikeList =
                 titleLooksLikeList || bottomTabHitCount >= 2
             val notChatInputBar =
-                inputBarHitCount <= 1
+                inputBarHitCount <= 1 && !hasVisualInputBar
             // 当 OCR 完全为空时（ML Kit 未就绪/远程 OCR 失败），如果视觉信号足够强，
             // 则不再要求 textLooksLikeList 也为 true，避免 OCR 空白导致列表页始终无法识别。
             // 使用更高的视觉阈值以降低误判风险。
@@ -249,6 +303,7 @@ object ConversationListUnreadDetector {
                 "titleLooksLikeList=$titleLooksLikeList " +
                     "bottomTabHitCount=$bottomTabHitCount " +
                     "inputBarHitCount=$inputBarHitCount " +
+                    "hasVisualInputBar=$hasVisualInputBar " +
                     "topHeaderLight=${"%.2f".format(topHeaderLight)} " +
                     "bottomBarLight=${"%.2f".format(bottomBarLight)} " +
                     "bottomBarNonWhite=${"%.2f".format(bottomBarNonWhite)} " +

@@ -289,7 +289,7 @@
                         </span>
                         <span v-if="session.suggested_remark" class="text-xs px-2 py-0.5 rounded-full"
                               :class="session.suggested_remark_status === 'applied' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'">
-                            <i class="fa-solid fa-tag mr-1"></i>{{ session.suggested_remark_status === 'applied' ? '已备注' : '待备注' }}
+                            <i class="fa-solid fa-tag mr-1"></i>{{ session.suggested_remark_status === 'applied' ? '已备注' : '' }}
                         </span>
                     </div>
                 </div>
