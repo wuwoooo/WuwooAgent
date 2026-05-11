@@ -1035,11 +1035,12 @@ object CaptureImageProcessor {
                 val aspect = compWidth.toDouble() / compHeight.coerceAtLeast(1)
 
                 // Spinner 特征：近似正方形、大小合适、填充率适中（环形，不是实心）
+                // 收紧长宽比（0.8 ~ 1.25），严格过滤细长型的噪点或非 spinner 元素
                 val isPlausibleSpinner =
                     count in minCount..maxCount &&
                         compWidth in minDim..maxDim &&
                         compHeight in minDim..maxDim &&
-                        aspect in 0.6..1.7
+                        aspect in 0.8..1.25
 
                 if (!isPlausibleSpinner) continue
 
@@ -1056,8 +1057,8 @@ object CaptureImageProcessor {
                     val centerBrightness = (cR + cG + cB) / 3
                     // 中心应该是白色或接近白色（亮度 > 235），表示环形而非实心
                     if (centerBrightness >= 230) {
-                        // 附加验证：环形周围大面积白色背景
-                        val bgCheckRadius = maxOf(maxDim / 2 + 4, 8)
+                        // 附加验证：环形周围大面积白色背景（转文字的弹出气泡是白色的）
+                        val bgCheckRadius = maxOf(maxDim / 2 + 6, 12)
                         var whiteCount = 0
                         var totalSampled = 0
                         for (dy in -bgCheckRadius..bgCheckRadius step 3) {
@@ -1074,8 +1075,9 @@ object CaptureImageProcessor {
                                 if (pb2 >= 230) whiteCount++
                             }
                         }
-                        // 背景至少 50% 为白色
-                        if (totalSampled > 0 && whiteCount.toDouble() / totalSampled >= 0.50) {
+                        // 背景必须大部分为白色（>70%），因为转文字 UI 是纯白色底板。
+                        // 这个严格的过滤可以排除聊天背景图上的灰色图案或者普通系统图标。
+                        if (totalSampled > 0 && whiteCount.toDouble() / totalSampled >= 0.70) {
                             Log.i(
                                 TAG,
                                 "检测到语音转文字 loading spinner: center=($centerX,$centerY) " +
