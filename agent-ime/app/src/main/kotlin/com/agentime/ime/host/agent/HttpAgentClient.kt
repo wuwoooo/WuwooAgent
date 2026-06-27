@@ -28,7 +28,7 @@ class HttpAgentClient(private val context: Context) : AgentClient {
         }
     }
     companion object {
-        const val DEFAULT_ENDPOINT = "http://118.24.71.189/api/wechat/chat"
+        const val DEFAULT_ENDPOINT = "http://42.193.118.91:8000/api/wechat/chat"
 
         fun login(context: Context, endpoint: String, username: String, password: String): AgentLoginResult {
             val loginUrls = buildLoginUrls(endpoint.ifBlank { DEFAULT_ENDPOINT })

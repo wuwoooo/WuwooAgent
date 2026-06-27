@@ -23,7 +23,7 @@ importClass(android.content.IntentFilter);
 importClass(android.content.ComponentName);
 importClass(java.util.UUID);
 
-const API_URL = "http://118.24.71.189/api/wechat/chat";
+const API_URL = "http://42.193.118.91:8000/api/wechat/chat";
 const OCR_ACTION = "com.agentime.ime.action.OCR_IMAGE";
 const OCR_RESULT_ACTION = "com.agentime.ime.action.OCR_RESULT";
 const INJECT_ACTION = "com.agentime.ime.action.INJECT_TEXT";
