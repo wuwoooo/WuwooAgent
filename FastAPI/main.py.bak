@@ -269,22 +269,6 @@ def get_current_time_str() -> str:
     return now.strftime("%Y-%m-%d %H:%M") + f"（{weekday_str}）"
 
 
-def _get_industry_id_for_session(session_id: str, agent_id: int | None = None) -> str:
-    """根据 session 或 agent 获取行业 ID。"""
-    if not industry_engine:
-        return "travel"
-    if not agent_id and session_id:
-        try:
-            sess = database.get_session(session_id)
-            if sess:
-                agent_id = sess.get("agent_id")
-        except Exception:
-            pass
-    if agent_id:
-        return industry_engine.get_agent_industry_id(agent_id)
-    return "travel"
-
-
 HANDOFF_DIRECT_RE = re.compile(
     r"(报个价|核价|核算报价|最终报价|算一下价格|算一下报价|具体多少钱|"
     r"下单|预订|订一下|定一下|打款|付款|交钱|"
@@ -584,40 +568,24 @@ def _repair_time_blind_reply(
     return text
 
 
-def _format_profile_for_prompt(profile: dict[str, Any] | None, industry_id: str = "travel") -> str:
+def _format_profile_for_prompt(profile: dict[str, Any] | None) -> str:
     if not profile:
         return "暂无已提取画像。"
 
-    # 尝试从行业模板获取字段标签
-    labels = None
-    if industry_engine:
-        try:
-            import json
-            tpl = industry_engine.get_template(industry_id)
-            schema_str = tpl.get("session_profile_schema") or ""
-            if schema_str:
-                schema = json.loads(schema_str)
-                labels = {f["key"]: f["label"] for f in schema.get("fields", [])}
-        except Exception:
-            pass
-
-    if not labels:
-        # 回退到旅游行业默认标签
-        labels = {
-            "destination": "目的地",
-            "departure_city": "出发地",
-            "people_count": "人数",
-            "travel_time": "出行时间",
-            "elder_child_status": "老人/孩子同行情况",
-            "has_elder_or_child": "老人/孩子同行情况",
-            "health_mobility_status": "健康/行动限制",
-            "health_mobility": "健康/行动限制",
-            "budget": "预算",
-            "preferences": "偏好",
-            "sales_stage": "销售阶段",
-        }
-
     parts = []
+    labels = {
+        "destination": "目的地",
+        "departure_city": "出发地",
+        "people_count": "人数",
+        "travel_time": "出行时间",
+        "elder_child_status": "老人/孩子同行情况",
+        "has_elder_or_child": "老人/孩子同行情况",
+        "health_mobility_status": "健康/行动限制",
+        "health_mobility": "健康/行动限制",
+        "budget": "预算",
+        "preferences": "偏好",
+        "sales_stage": "销售阶段",
+    }
     for key, label in labels.items():
         value = profile.get(key)
         if value:
@@ -638,7 +606,6 @@ def _memory_value_text(value: Any) -> str:
 def _format_contact_context_for_prompt(
     contact: dict[str, Any] | None,
     session_profile: dict[str, Any] | None = None,
-    industry_id: str = "travel",
 ) -> str:
     """压缩联系人长期记忆，供模型作为参考上下文使用。"""
     lines = [
@@ -684,7 +651,7 @@ def _format_contact_context_for_prompt(
             if shown >= 5:
                 break
 
-    session_profile_text = _format_profile_for_prompt(session_profile, industry_id=industry_id)
+    session_profile_text = _format_profile_for_prompt(session_profile)
     if session_profile_text != "\u6682\u65e0\u5df2\u63d0\u53d6\u753b\u50cf\u3002":
         lines.append("\u672c\u6b21\u54a8\u8be2\u753b\u50cf\uff1a")
         lines.append(session_profile_text)
@@ -766,49 +733,31 @@ def _build_agent_continuation_prompt(
         f"{contact_context or '暂无长期联系人记忆。'}\n\n"
         f"最近聊天记录：\n{_format_messages_for_prompt(messages, limit)}\n\n"
         "任务：后台人员已经点击“由 Agent 出方案”，请你继续以旅游定制顾问“小鹿”的身份，"
-        "直接生成一条可以发送给客户的初版方案。请使用微信里容易阅读和复制的排版，"
+        "直接生成一条可以发送给客户的初版行程方案。请使用微信里容易阅读和复制的排版，"
         "每个自然段之间必须用空行分隔。"
     )
 
 
-def _run_volc_agent_continuation(prompt: str, industry_id: str = "travel",
-                                  agent_brand: str = "", agent_persona: str = "") -> str:
+def _run_volc_agent_continuation(prompt: str) -> str:
     cfg = load_volc_config_from_env()
     cfg["max_tokens"] = max(int(cfg.get("max_tokens") or 250), 1200)
     cfg["temperature"] = min(float(cfg.get("temperature") or 0.7), 0.5)
 
-    # dynamic knowledge collection
-    if industry_engine:
-        dynamic_collection = industry_engine.get_knowledge_collection(industry_id)
-        if dynamic_collection:
-            cfg = dict(cfg)
-            cfg["collection"] = dynamic_collection
-
     search_payload = search_knowledge(prompt[-1200:], cfg)
     knowledge_context = build_knowledge_context(search_payload)
 
-    # load plan generation prompt from industry template
-    system_prompt = None
-    if industry_engine:
-        system_prompt = industry_engine.get_plan_generation_prompt(
-            industry_id, agent_brand=agent_brand, agent_persona=agent_persona
-        )
-    if not system_prompt:
-        persona_label = agent_persona or "\u5c0f\u9e7f"
-        brand_label = agent_brand or "\u4e91\u5357\u4e91\u9e7f\u65c5\u884c\u793e"
-        system_prompt = (
-            f"\u4f60\u662f{brand_label}\u7684\u9ad8\u7ea7\u987e\u95ee\u201c{persona_label}\u201d\uff0c\u6b63\u5728\u5fae\u4fe1\u91cc\u548c\u5ba2\u6237\u4e00\u5bf9\u4e00\u6c9f\u901a\u3002\n"
-            "\u73b0\u5728\u5ba2\u6237\u5df2\u7ecf\u8bf7\u6c42\u63a8\u8fdb\u65b9\u6848\uff0c\u540e\u53f0\u4eba\u5458\u70b9\u51fb\u6309\u94ae\u8ba9 Agent \u7ee7\u7eed\u51fa\u65b9\u6848\u3002\n\n"
-            "\u8f93\u51fa\u8981\u6c42\uff1a\n"
-            "1. \u76f4\u63a5\u8f93\u51fa\u8981\u53d1\u7ed9\u5ba2\u6237\u7684\u5fae\u4fe1\u6d88\u606f\uff0c\u4e0d\u8981\u89e3\u91ca\u4f60\u7684\u601d\u8003\u8fc7\u7a0b\u3002\n"
-            "2. \u53ef\u4ee5\u7ed9\u51fa\u521d\u7248\u65b9\u6848\u6846\u67b6\u3001\u5efa\u8bae\u3001\u4e0b\u4e00\u6b65\u786e\u8ba4\u9879\u3002\n"
-            "3. \u5982\u679c\u4ef7\u683c\u7b49\u4fe1\u606f\u6ca1\u6709\u53ef\u9760\u4f9d\u636e\uff0c\u4e0d\u8981\u7f16\u9020\u5177\u4f53\u6570\u5b57\u3002\n"
-            "4. \u5982\u679c\u5173\u952e\u4fe1\u606f\u4e0d\u8db3\uff0c\u4e5f\u8981\u5148\u7ed9\u4e00\u4e2a\u53ef\u6267\u884c\u7684\u521d\u6b65\u65b9\u5411\uff0c\u5e76\u7528 1 \u5230 3 \u4e2a\u95ee\u9898\u8865\u9f50\u7f3a\u53e3\u3002\n"
-            "5. \u5fc5\u987b\u4fdd\u7559\u6e05\u6670\u6392\u7248\uff0c\u6bb5\u843d\u4e4b\u95f4\u7528\u7a7a\u884c\u5206\u9694\u3002\n"
-            "6. \u4e0d\u8981\u4f7f\u7528 Markdown \u8868\u683c\uff0c\u9002\u5408\u590d\u5236\u5230\u5fae\u4fe1\u540e\u4ecd\u80fd\u5206\u6bb5\u9605\u8bfb\u3002\n"
-            "7. \u4e0d\u8981\u627f\u8bfa\u5177\u4f53\u4ea4\u4ed8\u65f6\u95f4\u3002\n"
-            "8. \u8bed\u6c14\u81ea\u7136\u3001\u4e13\u4e1a\u3001\u50cf\u771f\u4eba\u987e\u95ee\uff1b\u4e0d\u8981\u8f93\u51fa [HANDOFF]\u3002"
-        )
+    system_prompt = """你是云南云鹿旅行社的高级旅游顾问“小鹿”，正在微信里和客户一对一沟通。
+现在客户已经请求推进方案，后台人员点击按钮让 Agent 继续出方案。
+
+输出要求：
+1. 直接输出要发给客户的微信消息，不要解释你的思考过程。
+2. 可以给出初版行程框架、玩法/住宿/用车建议、下一步确认项。
+3. 如果价格、酒店房态、车价等信息没有可靠依据，不要编造具体数字，用“我这边继续核算后发您准确报价”表达。
+4. 如果关键信息不足，也要先给一个可执行的初步方向，并用 1 到 3 个问题补齐缺口；不要把当前日期默认当成出行日期。
+5. 必须保留清晰排版：开头一句话单独成段；方案按“初步安排：”“推荐重点：”“还需要确认：”等小段落组织；段落之间用空行分隔。
+6. 不要使用 Markdown 表格，不要堆成一整段；适合复制到微信后仍能分段阅读。
+7. 不要承诺“几点前发方案/报价”这类具体交付时间，完成时间以人工核算和确认进度为准。
+8. 语气自然、专业、像真人定制师；不要输出 [HANDOFF]。"""
 
     messages = [{"role": "system", "content": system_prompt}]
     if knowledge_context:
@@ -816,6 +765,7 @@ def _run_volc_agent_continuation(prompt: str, industry_id: str = "travel",
     messages.append({"role": "user", "content": prompt})
 
     return _repair_time_blind_reply(chat_completion(messages, cfg).replace("[HANDOFF]", "").strip())
+
 
 async def _generate_agent_continuation(session_id: str, limit: int | None = 30) -> tuple[str, dict[str, Any]]:
     session = database.get_session(session_id)
@@ -829,13 +779,7 @@ async def _generate_agent_continuation(session_id: str, limit: int | None = 30) 
     contact_name = session.get("contact_name") or "客户"
     profile = database.get_session_profile(session_id)
     contact = database.get_contact_for_session(session_id, agent_id=session.get("agent_id"))
-    # 获取 Agent 行业信息
-    agent_id = session.get("agent_id")
-    agent_info = database.get_agent_by_id(agent_id) if agent_id else None
-    industry_id = (agent_info or {}).get("industry_id") or "travel"
-    agent_brand = (agent_info or {}).get("brand_name") or ""
-    agent_persona_val = (agent_info or {}).get("agent_persona") or ""
-    contact_context = _format_contact_context_for_prompt(contact, profile, industry_id=industry_id)
+    contact_context = _format_contact_context_for_prompt(contact, profile)
     # 人工纠错称呼：如果联系人设置了 preferred_name，优先使用它
     if contact and contact.get("preferred_name"):
         contact_name = contact["preferred_name"]
@@ -845,55 +789,31 @@ async def _generate_agent_continuation(session_id: str, limit: int | None = 30) 
         profile=profile,
         contact_context=contact_context,
         limit=limit,
-        industry_id=industry_id,
-        agent_persona=agent_persona_val,
     )
-
-
 
     provider = _provider_from_env()
     if provider == "adp":
         sid, skey, region, app_key = load_adp_config_from_env()
-        reply_text = await run_adp_chat(
-            secret_id=sid,
-            secret_key=skey,
-            region=region,
-            bot_app_key=app_key,
-            session_id=session_id,
-            user_text=prompt,
-        )
-        reply_text = reply_text.replace("[HANDOFF]", "").strip()
-    else:
-        reply_text = await asyncio.to_thread(
-            _run_volc_agent_continuation, prompt,
-            industry_id=industry_id,
-            agent_brand=agent_brand,
-            agent_persona=agent_persona_val,
-        )
+        reply_text     # 构建角色身份描述
+    persona_desc = ""
+    if agent_persona:
+        persona_desc = f"\uff0c\u56e0\u4e3a\u4f60\u672c\u8eab\u5c31\u662f\u8fd9\u4f4d\u4e13\u5c5e\u7684\u987e\u95ee{agent_persona}"
 
-    if not reply_text:
-        raise ValueError("Agent 未生成可用方案，请稍后重试")
-    reply_text = _strip_repeated_customer_address(reply_text, contact_name, session_id)
-
-    return reply_text, session
-
-
-def _format_duration(seconds: int) -> str:
-    days, rem = divmod(max(seconds, 0), 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes, seconds = divmod(rem, 60)
-    parts = []
-    if days:
-        parts.append(f"{days}天")
-    if hours or parts:
-        parts.append(f"{hours}小时")
-    if minutes or parts:
-        parts.append(f"{minutes}分钟")
-    parts.append(f"{seconds}秒")
-    return "".join(parts)
-
-
-def _read_recent_log_lines(log_path: Path, limit: int) -> list[str]:
+    system_additions = (
+        f'(\u7cfb\u7edf\u63d0\u793a\uff1a\u5f53\u524d\u5b9e\u9645\u65f6\u95f4\u662f {current_time}\u3002\u6ce8\u610f\uff1a\u4ec5\u5728\u7b2c\u4e00\u8f6e\u5bf9\u8bdd\u6216\u4e3b\u52a8\u6253\u62db\u547c\u65f6\u624d\u8fdb\u884c\u65f6\u95f4\u95ee\u5019\uff0c\u5728\u540e\u7eed\u8fde\u7eed\u7684\u5bf9\u8bdd\u4e2d\u76f4\u63a5\u56de\u7b54\u7528\u6237\u7684\u95ee\u9898\uff0c\u7edd\u5bf9\u4e0d\u8981\u91cd\u590d\u95ee\u5019\uff01\u4f60\u5728\u95ee\u5019\u5ba2\u6237\u65f6\u5fc5\u987b\u4ee5\u6b64\u4e3a\u51c6\u5224\u65ad\u4eca\u5929\u662f\u661f\u671f\u51e0\uff0c\u7edd\u5bf9\u4e0d\u8981\u53c2\u8003\u4e0b\u65b9\u6587\u672c\u4e2d\u53ef\u80fd\u51fa\u73b0\u7684\u65e7\u65f6\u95f4\u6807\u7b7e\uff08\u5982"\u5468\u4e0016:40"\u7b49\u662f\u5fae\u4fe1\u754c\u9762\u4e0a\u65e7\u6d88\u606f\u7684\u65f6\u95f4\u6233\uff0c\u4e0d\u4ee3\u8868\u5f53\u524d\u65f6\u95f4\uff09\u3002{time_extra}\n'
+        f'\u3010\u79f0\u547c\u89c4\u5219\u3011\u5982\u679c\u786e\u5b9e\u9700\u8981\u79f0\u547c\u5ba2\u6237\uff0c\u53ea\u80fd\u4f7f\u7528\u7cfb\u7edf\u63d0\u4f9b\u7684\u8054\u7cfb\u4eba\u540d\u300c{name}\u300d\uff1b\u4f46\u3010\u7edd\u5bf9\u4e0d\u8981\u3011\u5728\u6bcf\u6761\u6d88\u606f\u5f00\u5934\u52a0"\u4f60\u597d"\u3001"\u665a\u4e0a\u597d"\u7b49\u95ee\u5019\u8bed\uff0c\u66f4\u4e0d\u8981\u91cd\u590d\u79f0\u547c\u5ba2\u6237\u59d3\u540d\u3002\u8fd9\u662f\u8fde\u7eed\u5bf9\u8bdd\uff0c\u8bf7\u5f00\u95e8\u89c1\u5c71\u76f4\u63a5\u56de\u7b54\u5ba2\u6237\u95ee\u9898\u3002\u4e0d\u8981\u4f7f\u7528\u804a\u5929\u8bb0\u5f55\u6216 OCR \u6587\u672c\u4e2d\u51fa\u73b0\u7684\u540d\u5b57\u3002\u56e0\u4e3a OCR \u8bc6\u522b\u5b58\u5728\u540c\u97f3\u5b57\u8bef\u5dee\uff08\u5982\u7d22\u88ab\u8bc6\u522b\u4e3a\u7d20\uff09\uff0c\u804a\u5929\u8bb0\u5f55\u4e2d\u7684\u540d\u5b57\u4e0d\u53ef\u9760\uff0c\u4ee5\u7cfb\u7edf\u63d0\u4f9b\u7684\u8054\u7cfb\u4eba\u540d\u4e3a\u552f\u4e00\u51c6\u786e\u6765\u6e90\u3002\n'
+        f"{_time_awareness_rule()}\n"
+        f"{readiness_rule}"
+        "\u3010HANDOFF \u89c4\u5219\u3011\u5728\u4ee5\u4e0b\u4e24\u79cd\u60c5\u51b5\u4e0b\uff0c\u4e14\u63a5\u7ba1\u6210\u719f\u5ea6\u7f3a\u5931\u9879\u4e3a\u201c\u65e0\u201d\u65f6\uff0c\u624d\u53ef\u5728\u56de\u590d\u672b\u5c3e\u52a0\u4e0a [HANDOFF] \u6807\u8bb0\uff1a"
+        "1) \u5ba2\u6237\u5728\u672c\u8f6e\u6d88\u606f\u4e2d\u660e\u786e\u8868\u8fbe\u4e86\u8981\u8fdb\u884c\u3010\u6700\u7ec8\u65b9\u6848\u786e\u5b9a\u3011\u3001\u3010\u8981\u6c42\u6838\u7b97\u6700\u7ec8\u62a5\u4ef7\u3011\u6216\u3010\u51c6\u5907\u4e0b\u5355\u3011\u7684\u610f\u56fe\uff1b"
+        "2) \u4ece\u5bf9\u8bdd\u4e0a\u4e0b\u6587\u5224\u65ad\u5ba2\u6237\u5bf9\u5f53\u524d\u65b9\u6848\u5df2\u7ecf\u5b8c\u5168\u6ee1\u610f\u5e76\u786e\u8ba4\uff0c\u8868\u73b0\u51fa\u6700\u7ec8\u7684\u51b3\u7b56\u503e\u5411\u3002"
+        "\u5982\u679c\u5ba2\u6237\u53ea\u662f\u5728\u521d\u6b65\u8ba8\u8bba\u3001\u8be2\u95ee\u4f30\u7b97\u3001\u6216\u8005\u4f60\u81ea\u5df1\u8fd8\u5728\u5b8c\u5584\u7ec6\u8282\uff0c**\u7edd\u5bf9\u4e0d\u8981**\u52a0 [HANDOFF]\u3002"
+        "\u5982\u679c\u5ba2\u6237\u63a8\u8fdb\u4f46\u63a5\u7ba1\u6210\u719f\u5ea6\u4ecd\u6709\u7f3a\u5931\uff0c\u5fc5\u987b\u5148\u8865\u95ee\u7f3a\u5931\u9879\uff0c\u4e0d\u8981\u63a5\u7ba1\u3002"
+        "\u89e6\u53d1 [HANDOFF] \u65f6\uff0c\u4f60\u7684\u56de\u590d**\u5fc5\u987b\u662f\u4e00\u53e5\u786e\u8ba4\u6027\u7684\u7b2c\u4e00\u4eba\u79f0\u8fc7\u6e21\u8bdd\u672f**\uff08\u4f8b\u5982'\u597d\u7684\uff0c\u6211\u8fd9\u5c31\u4e3a\u60a8\u6838\u7b97\u6700\u7ec8\u7684\u62a5\u4ef7\u5e76\u6574\u7406\u786e\u8ba4\u65b9\u6848\uff5e'\uff09\uff0c"
+        f"**\u7edd\u5bf9\u4e0d\u80fd\u662f\u63d0\u95ee\u53e5**\uff0c\u4e5f\u7edd\u5bf9\u4e0d\u80fd\u8bf4'\u8f6c\u4ea4\u7ed9\u4eba\u5de5'\u6216'\u8f6c\u4ea4\u7ed9\u987e\u95ee'{persona_desc}\u3002\uff09\n\n"
+        f"{receptionist_rule}"
+    )
+    return pure_text, system_additions, message_section_lines(log_path: Path, limit: int) -> list[str]:
     if not log_path.exists() or not log_path.is_file():
         return []
 
@@ -906,6 +826,7 @@ def _read_recent_log_lines(log_path: Path, limit: int) -> list[str]:
     except OSError:
         return []
     return list(lines)
+
 
 def _build_restart_script(current_pid: int, log_path: Path, pid_path: Path) -> str:
     uvicorn_path = BASE_DIR / "venv" / "bin" / "uvicorn"
@@ -971,7 +892,7 @@ def _build_user_prompt(
 
     receptionist_rule = ""
     if current_status == "handoff_requested":
-        receptionist_rule = "【当前状态：正在为客户整理方案】你之前已告知客户要去整理方案和报价了。对于客户的新消息，请注意：如果客户询问普通问题，可正常解答；如果客户催促方案进度，必须以第一人称安抚（例如：'正在抓紧为您整理方案和报价呢，请您稍等片刻哦～'），绝对不要自己编造具体方案或报价数字。\n"
+        receptionist_rule = "【当前状态：正在为客户制作方案】你之前已告知客户要去整理行程方案和报价了。对于客户的新消息，请注意：如果客户询问普通旅行问题，可正常解答；如果客户催促方案进度，必须以第一人称安抚（例如：'我正在快马加鞭为您核算报价和行程呢，请您稍等片刻哦～'），绝对不要自己编造具体方案或报价数字。\n"
     readiness_rule = ""
     if session_id:
         readiness_rule = _format_handoff_readiness_for_prompt(
@@ -1001,7 +922,7 @@ def _build_user_prompt(
         f'【称呼规则】如果确实需要称呼客户，只能使用系统提供的联系人名「{name}」；但【绝对不要】在每条消息开头加"你好"、"晚上好"等问候语，更不要重复称呼客户姓名。这是连续对话，请开门见山直接回答客户问题。不要使用聊天记录或 OCR 文本中出现的名字。因为 OCR 识别存在同音字误差（如索被识别为素），聊天记录中的名字不可靠，以系统提供的联系人名为唯一准确来源。\n'
         f"{_time_awareness_rule()}\n"
         f"{readiness_rule}"
-        "【HANDOFF 规则】在以下两种情况下，且接管成熟度缺失项为“无”时，才可在回复末尾加上 [HANDOFF] 标记：1) 客户在本轮消息中明确表达了要进行【最终方案确定】、【要求核算最终报价】或【准备下单】的意图；2) 从对话上下文判断客户对当前方案已经完全满意并确认，表现出最终的决策倾向。如果客户只是在初步讨论、询问估算、或者你自己还在完善细节，**绝对不要**加 [HANDOFF]。如果客户推进但接管成熟度仍有缺失，必须先补问缺失项，不要接管。触发 [HANDOFF] 时，你的回复**必须是一句确认性的第一人称过渡话术**（例如'好的，我这就为您核算最终的报价并整理确认方案～'），**绝对不能是提问句**，也绝对不能说'转交给人工'或'转交给顾问'。）\n\n"
+        "【HANDOFF 规则】在以下两种情况下，且接管成熟度缺失项为“无”时，才可在回复末尾加上 [HANDOFF] 标记：1) 客户在本轮消息中明确表达了要进行【最终方案确定】、【要求核算最终报价】或【准备下单打款】的意图（例如'算一下报价吧'、'方案确定了'、'怎么付款'）；2) 虽然客户没有直接说'报价'或'下单'，但从对话上下文判断客户对当前的行程方案已经完全满意并确认，表现出最终的决策倾向（例如'就按这个定'、'确定了，算下多少钱'）。如果客户只是在初步讨论方案、要一个大概的行程、询问价格估算、或者你自己还在完善方案细节，**绝对不要**加 [HANDOFF]。如果客户推进最终报价/方案但接管成熟度仍有缺失，必须先补问缺失项，不要接管。触发 [HANDOFF] 时，你的回复**必须是一句确认性的第一人称过渡话术**（例如'好的，我这就为您核算最终的报价并整理确认方案～'），**绝对不能是提问句**，也绝对不能说'转交给人工'或'转交给定制师'，因为你本身就是这位专属的定制师小鹿。）\n\n"
         f"{receptionist_rule}"
     )
     return pure_text, system_additions, message_section
@@ -1024,24 +945,7 @@ async def api_agent_login(payload: AgentLoginRequest):
             content={"ok": False, "error": "用户名或密码错误，或账号已被禁用"},
         )
     token = agent.pop("access_token")
-    
-    # 返回行业相关信息给客户端
-    industry_id = (agent.get("industry_id") or "travel").strip()
-    agent_style_keywords = []
-    if industry_engine:
-        agent_style_keywords = industry_engine.get_agent_style_keywords(
-            industry_id,
-            agent_brand=agent.get("brand_name"),
-            agent_persona=agent.get("agent_persona"),
-        )
-    
-    return {
-        "ok": True,
-        "access_token": token,
-        "agent": agent,
-        "industry_id": industry_id,
-        "agent_style_keywords": agent_style_keywords,
-    }
+    return {"ok": True, "access_token": token, "agent": agent}
 
 
 @app.get("/agent/outbound-tasks/next")
@@ -1071,37 +975,7 @@ async def api_agent_complete_outbound_task(
 
 import base64
 
-def _run_doubao_seed_chat(messages: list[dict[str, Any]]) -> str:
-    """使用与 VLM 相同的 API 密钥和模型 ID 进行纯文本的对话回复生成。"""
-    api_key = os.environ.get("ARK_VISION_API_KEY", "ark-0773e8a1-0054-4243-83b9-b1a4f06b67da-d677d")
-    model_id = os.environ.get("ARK_VISION_MODEL_ID", "doubao-seed-2-0-mini-260215")
-    base_url = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
-    
-    payload = {
-        "model": model_id,
-        "messages": messages,
-        "temperature": 0.5,
-        "max_tokens": 1024
-    }
-    
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}"
-    }
-    
-    try:
-        response = requests.post(base_url, headers=headers, json=payload, timeout=(10, 30))
-        if response.status_code == 200:
-            result = response.json()
-            return result["choices"][0]["message"]["content"].strip()
-        else:
-            logger.error(f"Doubao-Seed-2.0 文本聊天失败: {response.status_code} {response.text}")
-            raise RuntimeError(f"Doubao-Seed-2.0 文本聊天失败: {response.status_code}")
-    except Exception as e:
-        logger.error(f"Doubao-Seed-2.0 文本聊天异常: {e}")
-        raise
-
-def _run_vision_ocr(image_bytes: bytes, reply_prompt: Optional[str] = None) -> dict[str, Any]:
+def _run_vision_ocr(image_bytes: bytes) -> dict[str, Any]:
     api_key = os.environ.get("ARK_VISION_API_KEY", "ark-0773e8a1-0054-4243-83b9-b1a4f06b67da-d677d")
     model_id = os.environ.get("ARK_VISION_MODEL_ID", "doubao-seed-2-0-mini-260215")
     base_url = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
@@ -1109,25 +983,13 @@ def _run_vision_ocr(image_bytes: bytes, reply_prompt: Optional[str] = None) -> d
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
     prompt = (
         "你是一个微信界面提取专家。请先判断图片是否为一对一微信聊天页，再提取顶部标题栏的「联系人名称」以及所有的「聊天记录」。\n"
-        "请注意:\n"
+        "请注意：\n"
         "1. 绿色气泡表示'我方(agent)'发送的，白色/其他非绿色气泡表示'客户(client)'发送的。\n"
         "2. 请判断该聊天是否为群聊（例如标题栏有群成员数量如“旅游群(5)”，或者聊天界面有多人发言）。\n"
-        "3. 如果图片是微信搜索页、联系人搜索结果页、会话列表页、通讯录页、系统通知浮层，或者没有明确的聊天气泡 and 输入栏，请把 is_chat_page 设为 false，messages 返回空数组，绝对不要把搜索框里的联系人名称当成客户消息。\n"
+        "3. 如果图片是微信搜索页、联系人搜索结果页、会话列表页、通讯录页、系统通知浮层，或者没有明确的聊天气泡和输入栏，请把 is_chat_page 设为 false，messages 返回空数组，绝对不要把搜索框里的联系人名称当成客户消息。\n"
+        "严格返回一个 JSON 对象，不要包裹在任何 Markdown 标记中，格式如下：\n"
+        '{"page_type": "chat", "is_chat_page": true, "contact_name": "张三", "is_group_chat": false, "messages": [{"sender": "client", "text": "你好"}, {"sender": "agent", "text": "您好，需要什么旅游定制服务？"}]}'
     )
-    
-    if reply_prompt:
-        prompt += (
-            f"\n另外，作为一个专业的客户顾问，请针对提取出的微信聊天记录，结合以下背景与约束规则，直接生成一条【给客户的微信消息回复】，"
-            f"并放入返回 JSON 的 'reply_text' 字段中。\n"
-            f"【背景与约束规则如下】:\n{reply_prompt}\n"
-            "严格返回一个 JSON 对象，不要包裹在任何 Markdown 标记中，格式如下:\n"
-            '{"page_type": "chat", "is_chat_page": true, "contact_name": "张三", "is_group_chat": false, "messages": [{"sender": "client", "text": "你好"}], "reply_text": "这里是你要回复的文本"}'
-        )
-    else:
-        prompt += (
-            "严格返回一个 JSON 对象，不要包裹在任何 Markdown 标记中，格式如下:\n"
-            '{"page_type": "chat", "is_chat_page": true, "contact_name": "张三", "is_group_chat": false, "messages": [{"sender": "client", "text": "你好"}, {"sender": "agent", "text": "您好，需要什么旅游定制服务？"}]}'
-        )
     
     payload = {
         "model": model_id,
@@ -1207,89 +1069,22 @@ async def wechat_chat(
             },
         )
 
-    # 获取 Agent 的行业配置并判断是否启用知识库
-    agent_id = int(agent["id"])
-    industry_id = (agent.get("industry_id") or "travel").strip()
-    use_kb = True
-    if industry_engine:
-        use_kb = industry_engine.use_knowledge_base(industry_id)
-
     if has_image:
         assert image_bytes is not None
         safe_name = (image.filename or "upload.bin").replace("/", "_")[:200]
         dest = UPLOAD_DIR / safe_name
         dest.write_bytes(image_bytes)
-
-        # 如果关闭了知识库且是截图模式，我们需要组装回复 Prompt 传给 VLM，以实现一站式 OCR+回复
-        reply_prompt = None
-        if not use_kb:
-            # 提前规范化和 resolve 会话以读取画像与长期记忆
-            temp_session_id = session_id
-            temp_contact_name = database.canonicalize_contact_name(contact_name)
-            try:
-                temp_session_id = database.resolve_session_id(session_id, temp_contact_name, agent_id=agent_id)
-            except Exception:
-                pass
-            
-            temp_status = "auto"
-            try:
-                temp_status = database.get_session_status(temp_session_id)
-            except Exception:
-                pass
-            
-            temp_contact = None
-            temp_profile = None
-            temp_context = ""
-            try:
-                temp_contact = database.resolve_contact(temp_session_id, temp_contact_name, agent_id=agent_id)
-                temp_profile = database.get_session_profile(temp_session_id)
-                temp_context = _format_contact_context_for_prompt(temp_contact, temp_profile, industry_id=industry_id)
-            except Exception:
-                pass
-                
-            # 确定人设和品牌
-            agent_info = database.get_agent_by_id(agent_id) if agent_id else None
-            cur_agent_brand = (agent_info or {}).get("brand_name") or ""
-            cur_agent_persona = (agent_info or {}).get("agent_persona") or ""
-            
-            base_prompt = ""
-            if industry_engine:
-                base_prompt = industry_engine.get_base_prompt(industry_id, agent_brand=cur_agent_brand, agent_persona=cur_agent_persona)
-            if not base_prompt:
-                from volc_knowledge_client import BASE_PROMPT
-                base_prompt = BASE_PROMPT
-                
-            # 获取 system_prompt_addition
-            _, system_prompt_addition, _ = _build_user_prompt(
-                temp_contact_name,
-                client_ocr_text or "",
-                temp_status,
-                session_id=temp_session_id,
-                session_profile=temp_profile,
-                contact=temp_contact,
-                industry_id=industry_id,
-                agent_brand=cur_agent_brand,
-                agent_persona=cur_agent_persona,
-            )
-            
-            reply_prompt = (
-                f"# 系统基本顾问设定：\n{base_prompt}\n\n"
-                f"# 长期联系人背景记忆：\n{temp_context or '暂无'}\n\n"
-                f"# 附加约束与对话规则：\n{system_prompt_addition}\n"
-            )
-
+        
         vlm_contact_name = None
         # 阶段一：用 VLM 做高级云端 OCR 提取；若 VLM 漏提取，回退客户端本地 OCR。
         logger.info(
-            "接收到截图，触发 VLM 视觉大模型提取: file=%s session=%s contact=%s client_ocr_len=%d use_kb=%s",
+            "接收到截图，触发 VLM 视觉大模型提取: file=%s session=%s contact=%s client_ocr_len=%d",
             safe_name,
             session_id,
             contact_name,
             len(client_ocr_text),
-            use_kb,
         )
-        extracted_data = await asyncio.to_thread(_run_vision_ocr, image_bytes, reply_prompt=reply_prompt)
-        vlm_direct_reply = extracted_data.get("reply_text") if not extracted_data.get("vlm_error") else None
+        extracted_data = await asyncio.to_thread(_run_vision_ocr, image_bytes)
 
         if extracted_data.get("vlm_error"):
             # VLM 失败时，优先回退使用客户端本地 OCR 文本继续处理
@@ -1431,7 +1226,6 @@ async def wechat_chat(
             )
 
     agent_id = int(agent["id"])
-    industry_id = (agent.get("industry_id") or "travel").strip()
     raw_session_id = session_id
     raw_contact_name = contact_name
     contact_name = database.canonicalize_contact_name(contact_name)
@@ -1463,7 +1257,7 @@ async def wechat_chat(
         contact = database.resolve_contact(session_id, contact_name, agent_id=agent_id)
         contact_id = contact.get("id") if contact else None
         session_profile = database.get_session_profile(session_id)
-        contact_context = _format_contact_context_for_prompt(contact, session_profile, industry_id=industry_id)
+        contact_context = _format_contact_context_for_prompt(contact, session_profile)
         
         # 使用 VLM 提取的联系人名称自动纠错本地 OCR 误差
         if contact_id and locals().get("vlm_contact_name"):
@@ -1502,7 +1296,7 @@ async def wechat_chat(
                             contact = database.resolve_contact(session_id, vlm_canonical, agent_id=agent_id)
                             contact_id = contact.get("id") if contact else contact_id
                             session_profile = database.get_session_profile(session_id)
-                            contact_context = _format_contact_context_for_prompt(contact, session_profile, industry_id=industry_id)
+                            contact_context = _format_contact_context_for_prompt(contact, session_profile)
                         except Exception as merge_e:
                             logger.warning("自动合并后重新解析联系人失败: %s", merge_e)
                 except Exception as e:
@@ -1643,12 +1437,6 @@ async def wechat_chat(
             }
 
         # 统一构建 prompt：ocr_text 为空时自动降级为兜底描述；需在会话锁内基于最新状态构建。
-        # 获取 Agent 行业信息
-        agent_info = database.get_agent_by_id(agent_id) if agent_id else None
-        cur_industry_id = (agent_info or {}).get("industry_id") or "travel"
-        cur_agent_brand = (agent_info or {}).get("brand_name") or ""
-        cur_agent_persona = (agent_info or {}).get("agent_persona") or ""
-
         pure_user_text, system_prompt_addition, final_user_text = _build_user_prompt(
             contact_name,
             ocr_text or "",
@@ -1656,9 +1444,6 @@ async def wechat_chat(
             session_id=session_id,
             session_profile=session_profile,
             contact=contact,
-            industry_id=cur_industry_id,
-            agent_brand=cur_agent_brand,
-            agent_persona=cur_agent_persona,
         )
 
         duplicate_reply = await asyncio.to_thread(
@@ -1693,9 +1478,8 @@ async def wechat_chat(
             session_id=session_id,
             session_profile=session_profile,
             contact=contact,
-            industry_id=cur_industry_id,
         )
-        handoff_intent = _has_handoff_intent(pure_user_text, session_id, industry_id=cur_industry_id)
+        handoff_intent = _has_handoff_intent(pure_user_text, session_id)
         info_collection_active = _is_handoff_info_collection_active(session_id)
 
         if (handoff_intent or info_collection_active) and not readiness["ready"]:
@@ -1709,7 +1493,7 @@ async def wechat_chat(
                     agent_id=agent_id,
                     session_status=None,
                 )
-                asyncio.create_task(check_and_trigger_profile_update(session_id, contact_id=contact_id, industry_id=cur_industry_id))
+                asyncio.create_task(check_and_trigger_profile_update(session_id, contact_id=contact_id))
             except Exception as e:
                 logger.warning(
                     "接管前信息不足，补问缺失项后保存失败: agent_id=%s session_id=%s contact=%s error=%s",
@@ -1734,7 +1518,7 @@ async def wechat_chat(
             }
 
         if (
-            _should_request_handoff(pure_user_text, session_id, session_profile=session_profile, contact=contact, industry_id=cur_industry_id)
+            _should_request_handoff(pure_user_text, session_id, session_profile=session_profile, contact=contact)
             or (info_collection_active and readiness["ready"])
         ):
             reply_text = _handoff_reply_text()
@@ -1747,7 +1531,7 @@ async def wechat_chat(
                     agent_id=agent_id,
                     session_status="handoff_requested",
                 )
-                asyncio.create_task(check_and_trigger_profile_update(session_id, contact_id=contact_id, industry_id=cur_industry_id))
+                asyncio.create_task(check_and_trigger_profile_update(session_id, contact_id=contact_id))
             except Exception as e:
                 logger.warning(
                     "确定性接管触发后保存状态失败: agent_id=%s session_id=%s contact=%s error=%s",
@@ -1770,102 +1554,47 @@ async def wechat_chat(
                 "reply_text": reply_text,
             }
 
-        reply_text = None
-        messages = []
+        provider = _provider_from_env()
         try:
-            if not use_kb:
-                # 非知识库模式：直接使用 Doubao-Seed-2.0 运行
-                if locals().get("vlm_direct_reply") and vlm_direct_reply.strip():
-                    reply_text = vlm_direct_reply.strip()
-                    logger.info("非知识库模式：使用 VLM 双重职责二合一直接生成的回复: %s", reply_text)
-                    messages = [
-                        {"role": "user", "text": pure_user_text},
-                        {"role": "assistant", "text": reply_text},
-                    ]
-                else:
-                    # 2. 如果无截图，或 VLM 没能成功生成回复，则使用纯文本接口调用
-                    # 顾问人设 Prompt
-                    base_prompt = ""
-                    if industry_engine:
-                        base_prompt = industry_engine.get_base_prompt(cur_industry_id, agent_brand=cur_agent_brand, agent_persona=cur_agent_persona)
-                    if not base_prompt:
-                        from volc_knowledge_client import BASE_PROMPT
-                        base_prompt = BASE_PROMPT
-                    
-                    seed_messages = [
-                        {"role": "system", "content": base_prompt}
-                    ]
-                    if contact_context:
-                        seed_messages.append({"role": "system", "content": contact_context})
-                    if system_prompt_addition:
-                        seed_messages.append({"role": "system", "content": system_prompt_addition})
-                    
-                    # 拼接历史记录
-                    from volc_knowledge_client import MAX_HISTORY_TURNS, get_session_messages
-                    try:
-                        db_messages = get_session_messages(session_id)
-                        history = [
-                            {"role": msg["role"], "content": msg["content"]} 
-                            for msg in db_messages[-MAX_HISTORY_TURNS * 2:]
-                            if msg["role"] in ["user", "assistant"]
-                        ]
-                    except Exception:
-                        history = []
-                    
-                    seed_messages.extend(history)
-                    seed_messages.append({"role": "user", "content": final_user_text})
-                    
-                    logger.info("非知识库模式：无截图或 VLM 回复降级，发起 Doubao-Seed-2.0 纯文本生成")
-                    reply_text = await asyncio.to_thread(_run_doubao_seed_chat, seed_messages)
-                    messages = [
-                        {"role": "user", "text": pure_user_text},
-                        {"role": "assistant", "text": reply_text},
-                    ]
+            if provider == "adp":
+                sid, skey, region, app_key = load_adp_config_from_env()
+                reply_text = await run_adp_chat(
+                    secret_id=sid,
+                    secret_key=skey,
+                    region=region,
+                    bot_app_key=app_key,
+                    session_id=session_id,
+                    user_text=f"{system_prompt_addition}\n{final_user_text}",
+                )
+                messages = [
+                    {"role": "user", "text": pure_user_text},
+                    {"role": "assistant", "text": reply_text},
+                ]
             else:
-                # 开启知识库模式（ADP 或 volc_knowledge_chat）
-                provider = _provider_from_env()
-                if provider == "adp":
-                    sid, skey, region, app_key = load_adp_config_from_env()
-                    reply_text = await run_adp_chat(
-                        secret_id=sid,
-                        secret_key=skey,
-                        region=region,
-                        bot_app_key=app_key,
-                        session_id=session_id,
-                        user_text=f"{system_prompt_addition}\n{final_user_text}",
-                    )
-                    messages = [
-                        {"role": "user", "text": pure_user_text},
-                        {"role": "assistant", "text": reply_text},
-                    ]
-                else:
-                    reply_text, debug_payload = await asyncio.to_thread(
-                        run_volc_knowledge_chat,
-                        pure_user_text=pure_user_text,
-                        user_message=final_user_text,
-                        system_prompt_addition=system_prompt_addition,
-                        contact_name=contact_name,
-                        session_id=session_id,
-                        contact_context=contact_context,
-                        industry_id=cur_industry_id,
-                        agent_brand=cur_agent_brand,
-                        agent_persona=cur_agent_persona,
-                    )
-                    messages = [
-                        {"role": "user", "text": pure_user_text},
-                        {"role": "assistant", "text": reply_text},
-                    ]
-                    if debug_payload.get("provider"):
-                        messages.append({"role": "system", "text": f"provider={debug_payload['provider']}"})
-                    logger.info(
-                        "火山知识库对话调试: session=%s contact=%s provider=%s search_query=%s skipped=%s context_bridge=%s",
-                        session_id,
-                        contact_name,
-                        debug_payload.get("provider", ""),
-                        str(debug_payload.get("search_query") or "")[:300],
-                        debug_payload.get("search_skipped_reason", ""),
-                        json.dumps(debug_payload.get("context_bridge") or {}, ensure_ascii=False)[:500],
-                    )
+                reply_text, debug_payload = await asyncio.to_thread(
+                    run_volc_knowledge_chat,
+                    pure_user_text=pure_user_text,
+                    user_message=final_user_text,
+                    system_prompt_addition=system_prompt_addition,
+                    contact_name=contact_name,
+                    session_id=session_id,
+                    contact_context=contact_context,
+                )
+                messages = [
+                    {"role": "user", "text": pure_user_text},
+                    {"role": "assistant", "text": reply_text},
+                ]
+                if debug_payload.get("provider"):
+                    messages.append({"role": "system", "text": f"provider={debug_payload['provider']}"})
+                logger.info(
+                    "火山知识库对话调试: session=%s contact=%s provider=%s search_query=%s skipped=%s context_bridge=%s",
+                    session_id,
+                    contact_name,
+                    debug_payload.get("provider", ""),
+                    str(debug_payload.get("search_query") or "")[:300],
+                    debug_payload.get("search_skipped_reason", ""),
+                    json.dumps(debug_payload.get("context_bridge") or {}, ensure_ascii=False)[:500],
+                )
         except Exception as e:
             return JSONResponse(
                 status_code=503,
@@ -1885,7 +1614,6 @@ async def wechat_chat(
                 session_id=session_id,
                 session_profile=session_profile,
                 contact=contact,
-                industry_id=cur_industry_id,
             )
             if not readiness["ready"]:
                 handoff_requested = False
@@ -1911,7 +1639,7 @@ async def wechat_chat(
                 agent_id=agent_id,
                 session_status="handoff_requested" if handoff_requested else None,
             )
-            asyncio.create_task(check_and_trigger_profile_update(session_id, contact_id=contact_id, industry_id=cur_industry_id))
+            asyncio.create_task(check_and_trigger_profile_update(session_id, contact_id=contact_id))
         except Exception:
             pass
 
@@ -2007,17 +1735,7 @@ async def api_get_session_detail(session_id: str, username: str = Depends(verify
     contact = database.get_contact_for_session(session_id) if session else None
     if contact:
         session = database.get_session(session_id)
-        
-    industry_id = "travel"
-    if session and session.get("agent_id"):
-        try:
-            agent_info = database.get_agent_by_id(session["agent_id"])
-            if agent_info:
-                industry_id = agent_info.get("industry_id") or "travel"
-        except Exception:
-            pass
-            
-    return {"session": session, "messages": messages, "profile": profile, "contact": contact, "industry_id": industry_id}
+    return {"session": session, "messages": messages, "profile": profile, "contact": contact}
 
 
 @app.get("/api/admin/outbound-tasks")
@@ -2074,9 +1792,6 @@ async def api_admin_create_agent(payload: AdminAgentCreateRequest, username: str
             password=payload.password,
             display_name=payload.display_name,
             note=payload.note,
-            industry_id=payload.industry_id,
-            brand_name=payload.brand_name,
-            agent_persona=payload.agent_persona,
         )
         logger.info("管理员 %s 创建 Agent 账号: agent_id=%s username=%s", username, agent.get("id"), agent.get("username"))
         return {"ok": True, "agent": agent}
@@ -2089,7 +1804,7 @@ async def api_admin_update_agent(agent_id: int, payload: AdminAgentUpdateRequest
     if not getattr(username, "is_super", True):
         raise HTTPException(status_code=403, detail="无权更新 Agent")
     try:
-        agent = database.update_agent(agent_id, payload.display_name, payload.status, payload.note, industry_id=payload.industry_id, brand_name=payload.brand_name, agent_persona=payload.agent_persona)
+        agent = database.update_agent(agent_id, payload.display_name, payload.status, payload.note)
         if not agent:
             return JSONResponse(status_code=404, content={"ok": False, "error": "Agent 不存在"})
         logger.info("管理员 %s 更新 Agent 账号: agent_id=%s status=%s", username, agent_id, payload.status)
@@ -2378,75 +2093,3 @@ async def api_update_session_status(session_id: str, payload: StatusUpdate, user
         status_value,
     )
     return {"ok": True, "status": status_value}
-
-
-# ---------------------------------------------------------------------------
-# 行业模板管理 API
-# ---------------------------------------------------------------------------
-
-@app.get("/api/admin/industries")
-async def api_admin_list_industries(username: str = Depends(verify_admin)):
-    return database.list_industry_templates()
-
-
-@app.get("/api/admin/industries/{industry_id}")
-async def api_admin_get_industry(industry_id: str, username: str = Depends(verify_admin)):
-    tpl = database.get_industry_template(industry_id)
-    if not tpl:
-        raise HTTPException(status_code=404, detail=f"行业模板 '{industry_id}' 不存在")
-    return tpl
-
-
-class IndustryTemplateUpdateRequest(BaseModel):
-    display_name: str | None = None
-    brand_name: str | None = None
-    agent_persona: str | None = None
-    base_prompt: str | None = None
-    handoff_prompt_addon: str | None = None
-    plan_generation_prompt: str | None = None
-    summary_prompt: str | None = None
-    session_profile_prompt: str | None = None
-    session_profile_schema: str | None = None
-    contact_memory_prompt: str | None = None
-    handoff_keywords_json: str | None = None
-    handoff_confirm_keywords_json: str | None = None
-    handoff_required_fields_json: str | None = None
-    handoff_field_patterns_json: str | None = None
-    knowledge_collection: str | None = None
-    knowledge_search_limit: int | None = None
-    remark_config_json: str | None = None
-    sales_stages_json: str | None = None
-    agent_style_keywords_json: str | None = None
-    time_repair_enabled: int | None = None
-    use_knowledge_base: int | None = None
-
-
-@app.put("/api/admin/industries/{industry_id}")
-async def api_admin_update_industry(industry_id: str, payload: IndustryTemplateUpdateRequest,
-                                    username: str = Depends(verify_admin)):
-    data = {"id": industry_id}
-    for field, value in payload.dict(exclude_unset=True).items():
-        data[field] = value
-    result = database.upsert_industry_template(data)
-    # 清除缓存
-    if industry_engine:
-        industry_engine.invalidate_cache(industry_id)
-    return result
-
-
-class IndustryTemplateCreateRequest(BaseModel):
-    id: str
-    display_name: str
-    brand_name: str = ""
-    agent_persona: str = ""
-    base_prompt: str = ""
-    knowledge_collection: str = ""
-    use_knowledge_base: int = 1
-
-
-@app.post("/api/admin/industries")
-async def api_admin_create_industry(payload: IndustryTemplateCreateRequest,
-                                    username: str = Depends(verify_admin)):
-    data = payload.dict()
-    result = database.upsert_industry_template(data)
-    return result

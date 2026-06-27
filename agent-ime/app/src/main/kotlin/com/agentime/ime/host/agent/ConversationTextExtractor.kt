@@ -1,6 +1,8 @@
 package com.agentime.ime.host.agent
 
 object ConversationTextExtractor {
+    @Volatile
+    var agentStyleKeywords: List<String> = emptyList()
     private val timeRegex = Regex("""^\d{1,2}:\d{2}$""")
     private val dateRegex = Regex("""^\d{4}[-/年]\d{1,2}([-/月]\d{1,2})?.*$""")
     private val fullTimestampRegex = Regex("""^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}.*$""")
@@ -330,6 +332,14 @@ object ConversationTextExtractor {
     private fun looksLikeAgentStyle(chunkText: String): Boolean {
         val text = signatureOf(chunkText)
         if (text.isBlank()) return false
+        
+        // 优先使用动态获取的行业关键字进行匹配
+        val keywords = agentStyleKeywords
+        if (keywords.isNotEmpty()) {
+            val hit = keywords.count { text.contains(it) }
+            return hit >= 2
+        }
+        
         val markers = listOf(
             "我是云南云鹿旅行社",
             "我是携程旅行定制师",
@@ -351,21 +361,29 @@ object ConversationTextExtractor {
         return hit >= 2
     }
 
-    private fun looksLikeAgentStyleLine(line: String): Boolean {
+        private fun looksLikeAgentStyleLine(line: String): Boolean {
         val text = signatureOf(line)
         if (text.isBlank()) return false
+        
+        // ä¼åä½¿ç¨å¨æè·åçè¡ä¸å³é®å­è¿è¡å¹é
+        val keywords = agentStyleKeywords
+        if (keywords.isNotEmpty()) {
+            val hit = keywords.count { text.contains(it) }
+            return hit >= 1
+        }
+        
         val markers = listOf(
-            "我是小鹿",
-            "云南的旅游顾问",
-            "想咨询云南旅游吗",
-            "帮您推荐",
-            "帮你推荐",
-            "适合亲子游",
-            "小朋友多大",
-            "什么时候出发",
-            "方便的话",
-            "我这边好像没收到",
-            "再发一次试试",
+            "ææ¯å°é¹¿",
+            "äºåçææ¸¸é¡¾é®",
+            "æ³å¬è¯¢äºåææ¸¸å",
+            "å¸®æ¨æ¨è",
+            "å¸®ä½ æ¨è",
+            "éåäº²å­æ¸¸",
+            "å°æåå¤å¤§",
+            "ä»ä¹æ¶ååºå",
+            "æ¹ä¾¿çè¯",
+            "æè¿è¾¹å¥½åæ²©æ¶å°",
+            "ååä¸æ¬¡è¯è¯",
         )
         val hit = markers.count { marker -> text.contains(marker) }
         return hit >= 1

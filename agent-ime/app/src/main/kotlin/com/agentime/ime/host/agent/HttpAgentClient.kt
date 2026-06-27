@@ -8,6 +8,25 @@ import java.net.URL
 import java.util.UUID
 
 class HttpAgentClient(private val context: Context) : AgentClient {
+    init {
+        try {
+            val prefs = context.getSharedPreferences("host_config", Context.MODE_PRIVATE)
+            val keywordsJsonStr = prefs.getString("agent_style_keywords", "[]") ?: "[]"
+            val array = org.json.JSONArray(keywordsJsonStr)
+            val list = mutableListOf<String>()
+            for (i in 0 until array.length()) {
+                val kw = array.optString(i, "").trim()
+                if (kw.isNotEmpty()) {
+                    list.add(kw)
+                }
+            }
+            if (list.isNotEmpty()) {
+                ConversationTextExtractor.agentStyleKeywords = list
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
     companion object {
         const val DEFAULT_ENDPOINT = "http://118.24.71.189/api/wechat/chat"
 
@@ -57,6 +76,19 @@ class HttpAgentClient(private val context: Context) : AgentClient {
                 throw IllegalStateException("登录接口返回缺少 access_token 或 agent")
             }
 
+            val keywordsArray = json.optJSONArray("agent_style_keywords")
+            val keywordsList = mutableListOf<String>()
+            if (keywordsArray != null) {
+                for (i in 0 until keywordsArray.length()) {
+                    val kw = keywordsArray.optString(i, "").trim()
+                    if (kw.isNotEmpty()) {
+                        keywordsList.add(kw)
+                    }
+                }
+            }
+            ConversationTextExtractor.agentStyleKeywords = keywordsList
+            val keywordsJsonStr = keywordsArray?.toString() ?: "[]"
+
             val result = AgentLoginResult(
                 agentId = agent.optInt("id", 0),
                 username = agent.optString("username", username).trim(),
@@ -69,6 +101,7 @@ class HttpAgentClient(private val context: Context) : AgentClient {
                 .putString("agent_display_name", result.displayName)
                 .putInt("agent_id", result.agentId)
                 .putString("agent_access_token", result.accessToken)
+                .putString("agent_style_keywords", keywordsJsonStr)
                 .apply()
             return result
         }

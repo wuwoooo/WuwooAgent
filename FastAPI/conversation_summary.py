@@ -20,6 +20,7 @@ _API_KEY = os.getenv("VOLC_ARK_API_KEY", "")
 AUTHORIZATION = f"Bearer {_API_KEY}"
 MODEL = os.getenv("VOLC_ARK_MODEL", "doubao-seed-2-0-mini-260215")
 
+# 默认回退摘要 Prompt —— 当 industry_engine 不可用或未配置行业模板时使用
 SUMMARY_PROMPT = """你是一个旅游定制人工接管助手。你的任务是根据微信聊天记录，为即将接手的人工客服快速总结当前会话。
 请务必返回一个纯 JSON 结构，不要包含任何额外说明、markdown 格式或代码块标记，只需返回合法的 JSON 字符串。
 需要的 JSON 字段：
@@ -40,7 +41,7 @@ def _normalize_limit(limit: int | None, total: int) -> int:
     return max(1, min(int(limit), 100, total))
 
 
-def summarize_conversation_sync(session_id: str, limit: int | None = 20) -> Dict[str, Any]:
+def summarize_conversation_sync(session_id: str, limit: int | None = 20, industry_id: str = "travel") -> Dict[str, Any]:
     messages = get_session_messages(session_id)
     total_messages = len(messages)
     if not messages:
@@ -49,6 +50,14 @@ def summarize_conversation_sync(session_id: str, limit: int | None = 20) -> Dict
             "used_message_count": 0,
             "total_message_count": 0,
         }
+
+    # 尝试从行业模板加载摘要 Prompt
+    try:
+        from industry_engine import get_summary_prompt
+        dynamic_prompt = get_summary_prompt(industry_id)
+        summary_prompt = dynamic_prompt if dynamic_prompt else SUMMARY_PROMPT
+    except ImportError:
+        summary_prompt = SUMMARY_PROMPT
 
     used_count = _normalize_limit(limit, total_messages)
     recent_msgs = messages[-used_count:]
@@ -66,7 +75,7 @@ def summarize_conversation_sync(session_id: str, limit: int | None = 20) -> Dict
         "messages": [
             {
                 "role": "system",
-                "content": SUMMARY_PROMPT,
+                "content": summary_prompt,
             },
             {
                 "role": "user",
@@ -136,5 +145,5 @@ def summarize_conversation_sync(session_id: str, limit: int | None = 20) -> Dict
     }
 
 
-async def async_summarize_conversation(session_id: str, limit: int | None = 20):
-    return await asyncio.to_thread(summarize_conversation_sync, session_id, limit)
+async def async_summarize_conversation(session_id: str, limit: int | None = 20, industry_id: str = "travel"):
+    return await asyncio.to_thread(summarize_conversation_sync, session_id, limit, industry_id=industry_id)

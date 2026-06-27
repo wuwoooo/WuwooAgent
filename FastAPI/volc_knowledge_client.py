@@ -13,6 +13,7 @@ from volcengine.auth.SignerV4 import SignerV4
 from volcengine.base.Request import Request
 
 
+# 默认回退 System Prompt —— 当 industry_engine 不可用或未配置行业模板时使用
 BASE_PROMPT = """# 角色
 你不是机械客服，也不是知识库机器人。
 你是云南云鹿旅行社的高级旅游顾问“小鹿”，正在微信里和客户进行一对一聊天沟通。
@@ -461,8 +462,26 @@ def run_volc_knowledge_chat(
     contact_name: str,
     session_id: str,
     contact_context: str = "",
+    industry_id: str = "travel",
+    agent_brand: str = "",
+    agent_persona: str = "",
 ) -> tuple[str, dict[str, Any]]:
     cfg = load_volc_config_from_env()
+
+    # 尝试从行业模板加载基础 Prompt 和知识库配置
+    try:
+        from industry_engine import get_base_prompt, get_knowledge_collection, get_knowledge_search_limit
+        dynamic_prompt = get_base_prompt(industry_id, agent_brand=agent_brand, agent_persona=agent_persona)
+        base_prompt = dynamic_prompt if dynamic_prompt else BASE_PROMPT
+        # 动态知识库 collection
+        dynamic_collection = get_knowledge_collection(industry_id)
+        if dynamic_collection:
+            cfg = dict(cfg)  # 复制一份避免污染全局配置
+            cfg["collection"] = dynamic_collection
+        dynamic_search_limit = get_knowledge_search_limit(industry_id)
+    except ImportError:
+        base_prompt = BASE_PROMPT
+        dynamic_search_limit = None
 
     # 从数据库提取历史记录，并截取最近 MAX_HISTORY_TURNS 轮
     try:
@@ -482,6 +501,11 @@ def run_volc_knowledge_chat(
         history,
     )
 
+    # 如果有动态 search_limit，覆盖 cfg 中的值
+    effective_search_limit = dynamic_search_limit or cfg["search_limit"]
+    cfg_for_search = dict(cfg)
+    cfg_for_search["search_limit"] = effective_search_limit
+
     # 只有纯寒暄/感谢跳过检索；短句、符号、追问等用上下文桥接后的 query 检索。
     if is_pure_social_phrase(pure_user_text):
         search_payload = {}
@@ -491,13 +515,13 @@ def run_volc_knowledge_chat(
         context_instruction = ""
     else:
         search_query = context_search_query
-        search_payload = search_knowledge(search_query, cfg)
+        search_payload = search_knowledge(search_query, cfg_for_search)
         knowledge_context = build_knowledge_context(search_payload)
         search_skipped_reason = ""
     
     # 彻底拆分系统规则、知识库检索内容，把变动部分放在后面，确保深度命中 Prefix Caching
     messages = [
-        {"role": "system", "content": BASE_PROMPT},
+        {"role": "system", "content": base_prompt},
     ]
     if knowledge_context:
         messages.append({"role": "system", "content": knowledge_context})

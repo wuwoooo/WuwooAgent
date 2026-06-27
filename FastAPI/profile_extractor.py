@@ -30,6 +30,7 @@ _API_KEY = os.getenv("VOLC_ARK_API_KEY", "")
 AUTHORIZATION = f"Bearer {_API_KEY}"
 MODEL = os.getenv("VOLC_ARK_MODEL", "doubao-seed-2-0-mini-260215")
 
+# 默认回退画像提取 Prompt —— 当 industry_engine 不可用或未配置行业模板时使用
 PROFILE_PROMPT = """你是一个旅游定制 analysis 助手，你的任务是从下面的微信聊天记录中提取出用户的画像特征。
 请务必返回一个纯 JSON 结构，不要包含任何额外的多余说明、markdown 格式或代码块标记（如 ```json），只需返回合法的 JSON 字符串。
 需要的 JSON 字段：
@@ -46,6 +47,7 @@ PROFILE_PROMPT = """你是一个旅游定制 analysis 助手，你的任务是�
 }
 """
 
+# 默认回退联系人长期记忆 Prompt —— 当 industry_engine 不可用或未配置行业模板时使用
 CONTACT_MEMORY_PROMPT = """你是一个联系人长期记忆抽取助手。请从下面的微信聊天记录中，只抽取适合长期保存、未来继续沟通会有帮助的信息。
 不要抽取一次性寒暄，不要编造，不确定的信息要降低 confidence。
 重要边界：必须区分“客户主动表达的需求”和“我方为了做方案而追问的信息”。
@@ -90,11 +92,19 @@ def _extract_json_object(result_text: str) -> Dict[str, Any]:
         raise Exception("大模型返回的 JSON 不是对象结构")
     return parsed
 
-def extract_profile_sync(session_id: str) -> Dict[str, Any]:
+def extract_profile_sync(session_id: str, industry_id: str = "travel") -> Dict[str, Any]:
     messages = get_session_messages(session_id)
     if not messages:
         return {}
-        
+
+    # 尝试从行业模板加载画像提取 Prompt
+    try:
+        from industry_engine import get_profile_prompt
+        dynamic_prompt = get_profile_prompt(industry_id)
+        profile_prompt = dynamic_prompt if dynamic_prompt else PROFILE_PROMPT
+    except ImportError:
+        profile_prompt = PROFILE_PROMPT
+
     # Get last N messages to save context, e.g. last 20 messages
     recent_msgs = messages[-20:]
     
@@ -113,7 +123,7 @@ def extract_profile_sync(session_id: str) -> Dict[str, Any]:
         "messages": [
             {
                 "role": "system",
-                "content": PROFILE_PROMPT
+                "content": profile_prompt
             },
             {
                 "role": "user",
@@ -164,11 +174,11 @@ def extract_profile_sync(session_id: str) -> Dict[str, Any]:
         raise last_error
     return {}
 
-async def async_extract_profile(session_id: str):
-    return await asyncio.to_thread(extract_profile_sync, session_id)
+async def async_extract_profile(session_id: str, industry_id: str = "travel"):
+    return await asyncio.to_thread(extract_profile_sync, session_id, industry_id=industry_id)
 
 
-def extract_contact_memory_sync(session_id: str, contact_id: int | None = None) -> Dict[str, Any]:
+def extract_contact_memory_sync(session_id: str, contact_id: int | None = None, industry_id: str = "travel") -> Dict[str, Any]:
     session = get_session(session_id)
     resolved_contact_id = contact_id or (session or {}).get("contact_id")
     if not resolved_contact_id:
@@ -177,6 +187,14 @@ def extract_contact_memory_sync(session_id: str, contact_id: int | None = None) 
     messages = get_session_messages(session_id)
     if not messages:
         return {}
+
+    # 尝试从行业模板加载联系人长期记忆 Prompt
+    try:
+        from industry_engine import get_contact_memory_prompt
+        dynamic_prompt = get_contact_memory_prompt(industry_id)
+        contact_memory_prompt = dynamic_prompt if dynamic_prompt else CONTACT_MEMORY_PROMPT
+    except ImportError:
+        contact_memory_prompt = CONTACT_MEMORY_PROMPT
 
     recent_msgs = messages[-24:]
     chat_text = "\n".join([
@@ -194,7 +212,7 @@ def extract_contact_memory_sync(session_id: str, contact_id: int | None = None) 
     payload = {
         "model": MODEL,
         "messages": [
-            {"role": "system", "content": CONTACT_MEMORY_PROMPT},
+            {"role": "system", "content": contact_memory_prompt},
             {
                 "role": "user",
                 "content": (
@@ -244,23 +262,23 @@ def extract_contact_memory_sync(session_id: str, contact_id: int | None = None) 
     return {}
 
 
-async def async_extract_contact_memory(session_id: str, contact_id: int | None = None):
-    return await asyncio.to_thread(extract_contact_memory_sync, session_id, contact_id)
+async def async_extract_contact_memory(session_id: str, contact_id: int | None = None, industry_id: str = "travel"):
+    return await asyncio.to_thread(extract_contact_memory_sync, session_id, contact_id, industry_id=industry_id)
 
 
-async def async_update_profile_and_contact_memory(session_id: str, contact_id: int | None = None):
-    profile = await async_extract_profile(session_id)
+async def async_update_profile_and_contact_memory(session_id: str, contact_id: int | None = None, industry_id: str = "travel"):
+    profile = await async_extract_profile(session_id, industry_id=industry_id)
     try:
-        await async_extract_contact_memory(session_id, contact_id=contact_id)
+        await async_extract_contact_memory(session_id, contact_id=contact_id, industry_id=industry_id)
     except Exception as e:
         logger.warning(f"联系人长期记忆更新失败，不影响会话画像: {e}")
     return profile
 
 
-async def check_and_trigger_profile_update(session_id: str, contact_id: int | None = None):
+async def check_and_trigger_profile_update(session_id: str, contact_id: int | None = None, industry_id: str = "travel"):
     """
-    Check if we need to trigger a background profile update.
-    We convert msg_count to interaction rounds (user + assistant = 1 round).
+    检查是否需要触发后台画像更新。
+    将消息数转换为交互轮次（user + assistant = 1 轮）。
     """
     messages = get_session_messages(session_id)
     msg_count = len(messages)
@@ -268,6 +286,6 @@ async def check_and_trigger_profile_update(session_id: str, contact_id: int | No
     
     # 策略：第 2 轮（约 3~4 条消息）触发首次提取，之后每 3 轮再去提取一次
     if rounds == 2 or (rounds > 2 and rounds % 3 == 0):
-        task = asyncio.create_task(async_update_profile_and_contact_memory(session_id, contact_id=contact_id))
+        task = asyncio.create_task(async_update_profile_and_contact_memory(session_id, contact_id=contact_id, industry_id=industry_id))
         background_tasks.add(task)
         task.add_done_callback(background_tasks.discard)

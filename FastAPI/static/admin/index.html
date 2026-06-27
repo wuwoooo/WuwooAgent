@@ -168,6 +168,16 @@
                         <input v-model="agentForm.username" required class="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" placeholder="用户名，例如 guide_zhangsan">
                         <input v-model="agentForm.display_name" class="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" placeholder="显示名称，例如 张三导游">
                         <input v-model="agentForm.password" required type="password" class="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" placeholder="初始密码">
+                        <div class="space-y-1">
+                            <label class="block text-[10px] text-slate-500 font-bold mb-0.5">选择行业</label>
+                            <select v-model="agentForm.industry_id" class="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white">
+                                <option v-for="ind in industries" :key="ind.id" :value="ind.id">{{ ind.display_name }}</option>
+                            </select>
+                        </div>
+                        <div class="grid grid-cols-2 gap-2">
+                            <input v-model="agentForm.brand_name" class="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" placeholder="品牌名（可选）">
+                            <input v-model="agentForm.agent_persona" class="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" placeholder="顾问人设（可选）">
+                        </div>
                         <textarea v-model="agentForm.note" class="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" rows="3" placeholder="备注，可选"></textarea>
                         <button :disabled="isSavingAgent" class="w-full py-2.5 rounded-xl bg-indigo-600 text-white font-bold hover:bg-indigo-700 disabled:opacity-60">
                             {{ isSavingAgent ? '保存中...' : '创建账号' }}
@@ -187,7 +197,8 @@
                                             {{ agent.status === 'active' ? '启用' : '禁用' }}
                                         </span>
                                     </div>
-                                    <p class="text-xs text-slate-400 mt-1">@{{ agent.username }} · {{ agent.session_count || 0 }} 个会话</p>
+                                    <p class="text-xs text-slate-400 mt-1">@{{ agent.username }} · {{ agent.session_count || 0 }} 个会话 · 行业：{{ getIndustryName(agent.industry_id) }}</p>
+                                    <p class="text-xs text-slate-500 mt-1">品牌：{{ agent.brand_name || '默认' }} · 人设：{{ agent.agent_persona || '默认' }}</p>
                                     <p class="text-xs text-slate-500 mt-1">最近登录：{{ formatTime(agent.last_login_at) || '暂无' }}；最近活跃：{{ formatTime(agent.last_seen_at) || '暂无' }}</p>
                                     <p v-if="agent.note" class="text-xs text-slate-500 mt-1">{{ agent.note }}</p>
                                 </div>
@@ -206,7 +217,127 @@
                                     重置密码
                                 </button>
                             </div>
+                            <div class="mt-2 p-3 rounded-xl bg-slate-50 border border-slate-100 space-y-2 text-xs">
+                                <div class="grid grid-cols-3 gap-2">
+                                    <div>
+                                        <label class="block text-[10px] text-slate-400 font-bold mb-0.5">修改行业</label>
+                                        <select v-model="agent.industry_id" class="w-full px-2 py-1 rounded-lg border border-slate-200 bg-white">
+                                            <option v-for="ind in industries" :key="ind.id" :value="ind.id">{{ ind.display_name }}</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label class="block text-[10px] text-slate-400 font-bold mb-0.5">修改品牌名</label>
+                                        <input v-model="agent.brand_name" class="w-full px-2 py-1 rounded-lg border border-slate-200" placeholder="例如 云鹿旅行社">
+                                    </div>
+                                    <div>
+                                        <label class="block text-[10px] text-slate-400 font-bold mb-0.5">修改人设</label>
+                                        <input v-model="agent.agent_persona" class="w-full px-2 py-1 rounded-lg border border-slate-200" placeholder="例如 小鹿">
+                                    </div>
+                                </div>
+                                <div class="flex justify-between items-center mt-1">
+                                    <span class="text-[10px] text-slate-400">修改配置需手动点击保存</span>
+                                    <button @click="updateAgentConfig(agent)" class="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1 rounded-lg font-bold">
+                                        保存配置
+                                    </button>
+                                </div>
+                            </div>
                         </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 行业模板管理弹窗 -->
+        <div v-if="showIndustryPanel" class="fixed inset-0 z-40 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-6">
+            <div class="bg-white rounded-3xl shadow-2xl w-full max-w-6xl max-h-[90vh] flex flex-col overflow-hidden border border-white/60">
+                <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+                    <div>
+                        <h2 class="text-lg font-black text-slate-800"><i class="fa-solid fa-layer-group text-indigo-500 mr-2"></i>行业模板与提示词配置</h2>
+                        <p class="text-xs text-slate-500 mt-1">管理各行业专属的 System Prompt、出方案规则和画像 Schema 等。</p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button @click="createIndustry" class="px-4 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold">
+                            <i class="fa-solid fa-plus mr-1"></i>新建行业
+                        </button>
+                        <button @click="showIndustryPanel = false" class="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 flex items-center justify-center">
+                            <i class="fa-solid fa-xmark"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="p-6 overflow-y-auto grid md:grid-cols-[250px_1fr] gap-6 flex-1">
+                    <!-- 左侧：行业模板列表 -->
+                    <div class="space-y-2 border-r border-slate-100 pr-4">
+                        <div v-for="ind in industries" :key="ind.id" 
+                             @click="selectIndustry(ind)"
+                             class="p-3 rounded-xl cursor-pointer border text-sm transition-all"
+                             :class="selectedIndustry?.id === ind.id ? 'bg-indigo-50 border-indigo-200 font-bold text-indigo-700 shadow-sm' : 'border-transparent hover:bg-slate-50 text-slate-600'">
+                            <div class="flex items-center justify-between">
+                                <span>{{ ind.display_name }}</span>
+                                <span class="text-[10px] bg-slate-100 px-1.5 py-0.5 rounded text-slate-400 font-mono">{{ ind.id }}</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 右侧：当前所选行业表单 -->
+                    <div v-if="selectedIndustry" class="space-y-4">
+                        <div class="grid grid-cols-4 gap-3">
+                            <div>
+                                <label class="block text-xs font-bold text-slate-500 mb-1">行业ID (无法修改)</label>
+                                <input :value="industryForm.id" disabled class="w-full px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 text-slate-400 text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-bold text-slate-500 mb-1">显示名称</label>
+                                <input v-model="industryForm.display_name" class="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-bold text-slate-500 mb-1">默认品牌名</label>
+                                <input v-model="industryForm.brand_name" class="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" placeholder="例如 XX房产">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-bold text-slate-500 mb-1">默认顾问人设</label>
+                                <input v-model="industryForm.agent_persona" class="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" placeholder="例如 小房">
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-xs font-bold text-slate-500 mb-1">知识库 Collection</label>
+                                <input v-model="industryForm.knowledge_collection" class="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" placeholder="对应火山知识库中的 collection 名称">
+                            </div>
+                            <div class="flex items-end pb-2">
+                                <label class="flex items-center gap-2 text-sm font-bold text-slate-600 cursor-pointer select-none">
+                                    <input type="checkbox" v-model="industryForm.use_knowledge_base" class="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500">
+                                    <span>启用火山知识库检索</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-xs font-bold text-slate-500 mb-1">基础 System Prompt (支持占位符: [品牌名] [人设名])</label>
+                                <textarea v-model="industryForm.base_prompt" rows="12" class="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs leading-5 font-mono"></textarea>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-bold text-slate-500 mb-1">后台“出方案” Prompt模板</label>
+                                <textarea v-model="industryForm.plan_generation_prompt" rows="12" class="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs leading-5 font-mono"></textarea>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-bold text-slate-500 mb-1">会话画像 JSON Schema 定义 (控制前台显示的客户画像维度)</label>
+                            <textarea v-model="industryForm.session_profile_schema" rows="6" class="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs leading-5 font-mono" placeholder='例如: {"fields": [{"key": "budget_range", "label": "预算范围"}]}'></textarea>
+                        </div>
+
+                        <div class="flex justify-end pt-3 border-t border-slate-100">
+                            <button @click="saveIndustry" :disabled="isSavingIndustry" class="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-sm disabled:opacity-50">
+                                <i v-if="isSavingIndustry" class="fa-solid fa-spinner fa-spin mr-1"></i>
+                                保存行业模板配置
+                            </button>
+                        </div>
+                    </div>
+                    <div v-else class="flex items-center justify-center text-slate-400 h-64 border border-dashed border-slate-200 rounded-3xl">
+                        请在左侧选择或新建一个行业模板进行配置
                     </div>
                 </div>
             </div>
@@ -233,7 +364,11 @@
             <div class="mx-3 mb-3 p-3 rounded-2xl border border-indigo-100 bg-indigo-50">
                 <div class="flex items-center justify-between mb-2">
                     <span class="text-sm font-bold text-indigo-700"><i class="fa-solid fa-user-shield mr-1"></i>Agent 身份</span>
-                    <button v-if="currentUser?.is_super" @click="openAgentPanel" class="text-xs text-indigo-600 hover:text-indigo-800 font-bold">管理</button>
+                    <div v-if="currentUser?.is_super" class="flex gap-2">
+                        <button @click="openAgentPanel" class="text-xs text-indigo-600 hover:text-indigo-800 font-bold">账号管理</button>
+                        <span class="text-slate-300">|</span>
+                        <button @click="openIndustryPanel" class="text-xs text-indigo-600 hover:text-indigo-800 font-bold">行业模板</button>
+                    </div>
                 </div>
                 <select v-if="currentUser?.is_super" v-model="selectedAgentId" @change="onAgentFilterChange" class="w-full px-3 py-2 rounded-xl border border-indigo-100 bg-white text-sm text-slate-700 outline-none">
                     <option value="">全部 Agent</option>
@@ -538,21 +673,14 @@
 
                     <!-- 属性卡片区 -->
                     <div class="grid grid-cols-2 gap-3">
-                        <div class="bg-amber-50 rounded-xl p-3 border border-amber-100/50">
-                            <p class="text-[10px] text-amber-600/70 mb-1 flex items-center font-semibold"><i class="fa-solid fa-map-location-dot w-4"></i>目的地</p>
-                            <p class="font-medium text-slate-700 text-sm truncate" :title="profile.destination">{{ profile.destination || '未明确' }}</p>
-                        </div>
-                        <div class="bg-blue-50 rounded-xl p-3 border border-blue-100/50">
-                            <p class="text-[10px] text-blue-600/70 mb-1 flex items-center font-semibold"><i class="fa-solid fa-users w-4"></i>人数</p>
-                            <p class="font-medium text-slate-700 text-sm">{{ profile.people_count || '未知' }}</p>
-                        </div>
-                        <div class="bg-emerald-50 rounded-xl p-3 border border-emerald-100/50">
-                            <p class="text-[10px] text-emerald-600/70 mb-1 flex items-center font-semibold"><i class="fa-regular fa-calendar w-4"></i>时间</p>
-                            <p class="font-medium text-slate-700 text-sm truncate" :title="profile.travel_time">{{ profile.travel_time || '待定' }}</p>
-                        </div>
-                        <div class="bg-rose-50 rounded-xl p-3 border border-rose-100/50">
-                            <p class="text-[10px] text-rose-600/70 mb-1 flex items-center font-semibold"><i class="fa-solid fa-wallet w-4"></i>预算</p>
-                            <p class="font-medium text-slate-700 text-sm truncate" :title="profile.budget">{{ profile.budget || '待确认' }}</p>
+                        <div v-for="field in currentIndustryFields" :key="field.key" 
+                             :class="field.colorClass" class="rounded-xl p-3 border">
+                            <p class="text-[10px] mb-1 flex items-center font-semibold">
+                                <i :class="'fa-solid ' + field.icon + ' w-4'"></i>{{ field.label }}
+                            </p>
+                            <p class="font-medium text-slate-700 text-sm truncate" :title="profile[field.key]">
+                                {{ profile[field.key] || '待确认' }}
+                            </p>
                         </div>
                     </div>
 
@@ -780,21 +908,14 @@
                                 <p class="text-xl font-bold">{{ profile.sales_stage || '待确认' }}</p>
                             </div>
                             <div class="grid grid-cols-2 gap-3">
-                                <div class="bg-amber-50 rounded-xl p-3 border border-amber-100/50">
-                                    <p class="text-[10px] text-amber-600/70 mb-1 flex items-center font-semibold"><i class="fa-solid fa-map-location-dot w-4"></i>目的地</p>
-                                    <p class="font-medium text-slate-700 text-sm">{{ profile.destination || '未明确' }}</p>
-                                </div>
-                                <div class="bg-blue-50 rounded-xl p-3 border border-blue-100/50">
-                                    <p class="text-[10px] text-blue-600/70 mb-1 flex items-center font-semibold"><i class="fa-solid fa-users w-4"></i>人数</p>
-                                    <p class="font-medium text-slate-700 text-sm">{{ profile.people_count || '未知' }}</p>
-                                </div>
-                                <div class="bg-emerald-50 rounded-xl p-3 border border-emerald-100/50">
-                                    <p class="text-[10px] text-emerald-600/70 mb-1 flex items-center font-semibold"><i class="fa-regular fa-calendar w-4"></i>时间</p>
-                                    <p class="font-medium text-slate-700 text-sm">{{ profile.travel_time || '待定' }}</p>
-                                </div>
-                                <div class="bg-rose-50 rounded-xl p-3 border border-rose-100/50">
-                                    <p class="text-[10px] text-rose-600/70 mb-1 flex items-center font-semibold"><i class="fa-solid fa-wallet w-4"></i>预算</p>
-                                    <p class="font-medium text-slate-700 text-sm">{{ profile.budget || '待确认' }}</p>
+                                <div v-for="field in currentIndustryFields" :key="'modal-' + field.key" 
+                                     :class="field.colorClass" class="rounded-xl p-3 border">
+                                    <p class="text-[10px] mb-1 flex items-center font-semibold">
+                                        <i :class="'fa-solid ' + field.icon + ' w-4'"></i>{{ field.label }}
+                                    </p>
+                                    <p class="font-medium text-slate-700 text-sm truncate" :title="profile[field.key]">
+                                        {{ profile[field.key] || '待确认' }}
+                                    </p>
                                 </div>
                             </div>
                             <div>
@@ -967,8 +1088,32 @@
                 const agents = ref([]);
                 const selectedAgentId = ref(localStorage.getItem('selected_agent_id') || '');
                 const showAgentPanel = ref(false);
+                const industries = ref([]);
+                const currentIndustryId = ref('travel');
+                const showIndustryPanel = ref(false);
+                const isSavingIndustry = ref(false);
+                const selectedIndustry = ref(null);
+                const industryForm = ref({
+                    id: '',
+                    display_name: '',
+                    brand_name: '',
+                    agent_persona: '',
+                    base_prompt: '',
+                    plan_generation_prompt: '',
+                    session_profile_schema: '',
+                    knowledge_collection: '',
+                    use_knowledge_base: true
+                });
                 const isSavingAgent = ref(false);
-                const agentForm = ref({ username: '', display_name: '', password: '', note: '' });
+                const agentForm = ref({ 
+                    username: '', 
+                    display_name: '', 
+                    password: '', 
+                    note: '',
+                    industry_id: 'travel',
+                    brand_name: '',
+                    agent_persona: ''
+                });
 
                 // 接管请求警报音
                 let audioCtx = null;
@@ -1241,6 +1386,176 @@
                     }
                 };
 
+                const currentIndustryFields = computed(() => {
+                    const ind = industries.value.find(i => i.id === currentIndustryId.value);
+                    if (!ind || !ind.session_profile_schema) {
+                        return [
+                            { key: 'destination', label: '目的地', icon: 'fa-map-location-dot', colorClass: 'bg-amber-50 border-amber-100/50 text-amber-600/70' },
+                            { key: 'people_count', label: '人数', icon: 'fa-users', colorClass: 'bg-blue-50 border-blue-100/50 text-blue-600/70' },
+                            { key: 'travel_time', label: '时间', icon: 'fa-calendar', colorClass: 'bg-emerald-50 border-emerald-100/50 text-emerald-600/70' },
+                            { key: 'budget', label: '预算', icon: 'fa-wallet', colorClass: 'bg-rose-50 border-rose-100/50 text-rose-600/70' }
+                        ];
+                    }
+                    try {
+                        const schema = JSON.parse(ind.session_profile_schema);
+                        const fields = schema.fields || [];
+                        const icons = ['fa-map-location-dot', 'fa-users', 'fa-calendar', 'fa-wallet', 'fa-heart', 'fa-id-card', 'fa-tags'];
+                        const colors = [
+                            'bg-amber-50 border-amber-100/50 text-amber-600/70',
+                            'bg-blue-50 border-blue-100/50 text-blue-600/70',
+                            'bg-emerald-50 border-emerald-100/50 text-emerald-600/70',
+                            'bg-rose-50 border-rose-100/50 text-rose-600/70',
+                            'bg-indigo-50 border-indigo-100/50 text-indigo-600/70',
+                            'bg-teal-50 border-teal-100/50 text-teal-600/70'
+                        ];
+                        return fields.map((f, idx) => ({
+                            key: f.key,
+                            label: f.label,
+                            icon: icons[idx % icons.length],
+                            colorClass: colors[idx % colors.length]
+                        }));
+                    } catch(e) {
+                        console.error('解析画像 schema 失败', e);
+                        return [];
+                    }
+                });
+
+                const getIndustryName = (id) => {
+                    const ind = industries.value.find(i => i.id === id);
+                    return ind ? ind.display_name : (id || '默认旅游');
+                };
+
+                const fetchIndustries = async () => {
+                    try {
+                        const res = await fetch('/api/admin/industries', { headers: getAuthHeaders() });
+                        if (res.ok) {
+                            industries.value = await res.json();
+                        }
+                    } catch(e) {
+                        console.error('获取行业模板失败', e);
+                    }
+                };
+
+                const openIndustryPanel = async () => {
+                    showIndustryPanel.value = true;
+                    await fetchIndustries();
+                    if (industries.value.length > 0) {
+                        selectIndustry(industries.value[0]);
+                    }
+                };
+
+                const selectIndustry = (ind) => {
+                    selectedIndustry.value = ind;
+                    industryForm.value = {
+                        id: ind.id,
+                        display_name: ind.display_name || '',
+                        brand_name: ind.brand_name || '',
+                        agent_persona: ind.agent_persona || '',
+                        base_prompt: ind.base_prompt || '',
+                        plan_generation_prompt: ind.plan_generation_prompt || '',
+                        session_profile_schema: ind.session_profile_schema || '',
+                        knowledge_collection: ind.knowledge_collection || '',
+                        use_knowledge_base: ind.use_knowledge_base !== 0
+                    };
+                };
+
+                const saveIndustry = async () => {
+                    if (isSavingIndustry.value || !selectedIndustry.value) return;
+                    isSavingIndustry.value = true;
+                    try {
+                        const payload = {
+                            ...industryForm.value,
+                            use_knowledge_base: industryForm.value.use_knowledge_base ? 1 : 0
+                        };
+                        const res = await fetch(`/api/admin/industries/${selectedIndustry.value.id}`, {
+                            method: 'PUT',
+                            headers: {
+                                ...getAuthHeaders(),
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify(payload)
+                        });
+                        if (res.ok) {
+                            alert('保存行业模板配置成功');
+                            await fetchIndustries();
+                            const updated = industries.value.find(i => i.id === selectedIndustry.value.id);
+                            if (updated) selectIndustry(updated);
+                        } else {
+                            alert('保存失败');
+                        }
+                    } catch (e) {
+                        console.error('保存行业模板异常', e);
+                        alert('保存请求异常');
+                    } finally {
+                        isSavingIndustry.value = false;
+                    }
+                };
+
+                const createIndustry = async () => {
+                    const newId = prompt('请输入新行业的模板 ID（英文，例如 realestate_sz）：');
+                    if (!newId) return;
+                    const newName = prompt('请输入新行业的显示名称（例如 深圳房产）：');
+                    if (!newName) return;
+                    try {
+                        const res = await fetch('/api/admin/industries', {
+                            method: 'POST',
+                            headers: {
+                                ...getAuthHeaders(),
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                id: newId,
+                                display_name: newName,
+                                brand_name: '',
+                                agent_persona: '',
+                                base_prompt: '# 角色\n你是专属顾问...\n',
+                                knowledge_collection: '',
+                                use_knowledge_base: 1
+                            })
+                        });
+                        if (res.ok) {
+                            alert('创建成功');
+                            await fetchIndustries();
+                            const newly = industries.value.find(i => i.id === newId);
+                            if (newly) selectIndustry(newly);
+                        } else {
+                            alert('创建失败');
+                        }
+                    } catch(e) {
+                        console.error('新建行业模板异常', e);
+                    }
+                };
+
+                const updateAgentConfig = async (agent) => {
+                    try {
+                        const res = await fetch(`/api/admin/agents/${agent.id}`, {
+                            method: 'PUT',
+                            headers: {
+                                ...getAuthHeaders(),
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                display_name: agent.display_name,
+                                status: agent.status,
+                                note: agent.note,
+                                industry_id: agent.industry_id,
+                                brand_name: agent.brand_name,
+                                agent_persona: agent.agent_persona
+                            })
+                        });
+                        if (res.ok) {
+                            alert('保存 Agent 配置成功');
+                            await fetchAgents();
+                        } else {
+                            const data = await res.json().catch(() => ({}));
+                            alert(data.error || '保存 Agent 配置失败');
+                        }
+                    } catch(e) {
+                        console.error('更新 Agent 配置异常', e);
+                        alert('保存请求异常');
+                    }
+                };
+
                 const createAgent = async () => {
                     if (isSavingAgent.value) return;
                     isSavingAgent.value = true;
@@ -1255,7 +1570,7 @@
                         });
                         const data = await res.json().catch(() => ({}));
                         if (res.ok && data.ok) {
-                            agentForm.value = { username: '', display_name: '', password: '', note: '' };
+                            agentForm.value = { username: '', display_name: '', password: '', note: '', industry_id: 'travel', brand_name: '', agent_persona: '' };
                             await fetchAgents();
                         } else if (res.status === 401) {
                             triggerLogin();
@@ -1440,10 +1755,11 @@
                         const res = await fetch(`/api/admin/sessions/${session.session_id}`, { headers: getAuthHeaders() });
                         if(res.ok) {
                             const data = await res.json();
-                            if (data.session) currentSession.value = data.session;
-                            messages.value = data.messages || [];
-                            profile.value = data.profile || null;
-                            contact.value = data.contact || null;
+                                                         if (data.session) currentSession.value = data.session;
+                             messages.value = data.messages || [];
+                             profile.value = data.profile || null;
+                             contact.value = data.contact || null;
+                             currentIndustryId.value = data.industry_id || 'travel';
                             contactManualNotesText.value = manualNotesToText(contact.value?.manual_notes || {});
                             if (isSwitchingSession) {
                                 restoreSummaryCache();
@@ -2082,6 +2398,7 @@
                         return;
                     }
                     
+                    fetchIndustries();
                     fetchAgents();
                     fetchSessions();
                     fetchServiceStatus();
@@ -2141,6 +2458,20 @@
                     showAgentPanel,
                     isSavingAgent,
                     agentForm,
+                    industries,
+                    currentIndustryId,
+                    showIndustryPanel,
+                    isSavingIndustry,
+                    selectedIndustry,
+                    industryForm,
+                    currentIndustryFields,
+                    getIndustryName,
+                    fetchIndustries,
+                    openIndustryPanel,
+                    selectIndustry,
+                    saveIndustry,
+                    createIndustry,
+                    updateAgentConfig,
                     handleLogin,
                     formatTime,
                     formatFileSize,

@@ -9,8 +9,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # ---------- 可按需覆盖的环境变量 ----------
-: "${SSH_KEY:=$HOME/.ssh/id_ed25519_tencent}"
-: "${REMOTE_USER_HOST:=ubuntu@118.24.71.189}"
+: "${SSH_KEY:=$HOME/.ssh/id_ed25519_server}"
+: "${REMOTE_USER_HOST:=ubuntu@42.193.118.91}"
 : "${REMOTE_DIR:=/home/ubuntu/fastapi-app}"
 
 RSYNC_RSH="ssh -i ${SSH_KEY} -o StrictHostKeyChecking=accept-new"
@@ -73,6 +73,6 @@ echo "==> 同步到 GitHub"
 
 echo ""
 echo "部署完成。"
-echo "  健康检查: curl -s http://118.24.71.189:8000/health"
+echo "  健康检查: curl -s http://42.193.118.91:8000/health"
 echo "  当前部署会同步本地 .env 到服务器 ${REMOTE_DIR}/.env"
 echo "  查看日志: ssh -i ${SSH_KEY} -o StrictHostKeyChecking=accept-new ${REMOTE_USER_HOST} 'tail -f ${REMOTE_DIR}/log.txt'"

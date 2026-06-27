@@ -122,33 +122,71 @@ def _add_contact_record_alias(cursor: sqlite3.Cursor, contact_id: int, alias: st
         )
 
 
-def build_remark_suggestion(contact_name: str | None, profile: Dict[str, Any] | None) -> Dict[str, str]:
-    """根据已确认画像生成短备注，供人工复制到微信备注。"""
+def build_remark_suggestion(contact_name: str | None, profile: Dict[str, Any] | None,
+                            industry_id: str = "travel") -> Dict[str, str]:
+    """根据已确认画像生成短备注，供人工复制到微信备注。支持多行业动态配置。"""
     profile = profile or {}
     base_name = canonicalize_contact_name(contact_name, default="")
     if base_name in {"客户", "当前联系人"}:
         base_name = ""
 
-    destination = _compact_profile_value(profile.get("destination"))
-    people_count = _compact_profile_value(profile.get("people_count"))
-    preferences = profile.get("preferences")
-    preference_text = _compact_profile_value(preferences)
-
     tags: list[str] = []
-    if _is_meaningful_profile_value(destination):
-        tags.append(destination[:8])
-    if _is_meaningful_profile_value(people_count):
-        tags.append(people_count[:6])
-    elif any(keyword in preference_text for keyword in ("亲子", "孩子", "老人", "家庭")):
-        tags.append("亲子")
-    elif any(keyword in preference_text for keyword in ("团建", "公司", "企业")):
-        tags.append("团建")
-    elif any(keyword in preference_text for keyword in ("蜜月", "情侣")):
-        tags.append("蜜月")
+    no_data_reason = "暂未识别到可用于备注的称呼或需求"
 
-    stage = _compact_profile_value(profile.get("sales_stage"))
-    if stage in {"意向强烈", "已出方案", "成交"}:
-        tags.append(stage[:4])
+    # 尝试从行业模板获取备注配置
+    remark_config = None
+    try:
+        from industry_engine import get_remark_config, get_sales_stages
+        remark_config = get_remark_config(industry_id)
+    except ImportError:
+        pass
+
+    if remark_config:
+        # 通用模式：根据行业配置提取标签
+        tag_fields = remark_config.get("tag_fields") or []
+        for field_key in tag_fields:
+            value = _compact_profile_value(profile.get(field_key))
+            if _is_meaningful_profile_value(value):
+                tags.append(value[:8])
+
+        # 根据偏好/关注点中的关键词添加标签
+        tag_keywords = remark_config.get("tag_keywords") or {}
+        for source_field, keyword_map in tag_keywords.items():
+            source_text = _compact_profile_value(profile.get(source_field))
+            if source_text:
+                for keyword, tag_label in keyword_map.items():
+                    if keyword in source_text and tag_label not in tags:
+                        tags.append(tag_label)
+                        break
+
+        # 销售阶段标签
+        stage = _compact_profile_value(profile.get("sales_stage"))
+        stage_show = set(remark_config.get("stage_show") or [])
+        if stage in stage_show:
+            tags.append(stage[:4])
+
+        no_data_reason = remark_config.get("no_data_reason") or no_data_reason
+    else:
+        # 回退到旅游行业的默认逻辑
+        destination = _compact_profile_value(profile.get("destination"))
+        people_count = _compact_profile_value(profile.get("people_count"))
+        preferences = profile.get("preferences")
+        preference_text = _compact_profile_value(preferences)
+
+        if _is_meaningful_profile_value(destination):
+            tags.append(destination[:8])
+        if _is_meaningful_profile_value(people_count):
+            tags.append(people_count[:6])
+        elif any(keyword in preference_text for keyword in ("亲子", "孩子", "老人", "家庭")):
+            tags.append("亲子")
+        elif any(keyword in preference_text for keyword in ("团建", "公司", "企业")):
+            tags.append("团建")
+        elif any(keyword in preference_text for keyword in ("蜜月", "情侣")):
+            tags.append("蜜月")
+
+        stage = _compact_profile_value(profile.get("sales_stage"))
+        if stage in {"意向强烈", "已出方案", "成交"}:
+            tags.append(stage[:4])
 
     deduped_tags: list[str] = []
     for tag in tags:
@@ -161,7 +199,7 @@ def build_remark_suggestion(contact_name: str | None, profile: Dict[str, Any] | 
     if not suggestion:
         return {
             "suggested_remark": "",
-            "suggested_remark_reason": "暂未识别到可用于备注的称呼或旅行需求",
+            "suggested_remark_reason": no_data_reason,
             "suggested_remark_confidence": "low",
         }
 
@@ -209,6 +247,9 @@ def init_db():
         "ALTER TABLE agents ADD COLUMN last_login_at TIMESTAMP",
         "ALTER TABLE agents ADD COLUMN last_seen_at TIMESTAMP",
         "ALTER TABLE agents ADD COLUMN last_device_id TEXT",
+        "ALTER TABLE agents ADD COLUMN industry_id TEXT DEFAULT 'travel'",
+        "ALTER TABLE agents ADD COLUMN brand_name TEXT",
+        "ALTER TABLE agents ADD COLUMN agent_persona TEXT",
     ]:
         try:
             cursor.execute(column_sql)
@@ -309,6 +350,45 @@ def init_db():
         except sqlite3.OperationalError:
             pass
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_outbound_tasks_agent_status ON outbound_tasks(agent_id, status, id)")
+
+    # 行业模板表
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS industry_templates (
+            id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            brand_name TEXT,
+            agent_persona TEXT,
+            base_prompt TEXT NOT NULL DEFAULT '',
+            handoff_prompt_addon TEXT,
+            plan_generation_prompt TEXT,
+            summary_prompt TEXT,
+            session_profile_prompt TEXT NOT NULL DEFAULT '',
+            session_profile_schema TEXT,
+            contact_memory_prompt TEXT NOT NULL DEFAULT '',
+            handoff_keywords_json TEXT,
+            handoff_confirm_keywords_json TEXT,
+            handoff_required_fields_json TEXT,
+            handoff_field_patterns_json TEXT,
+            knowledge_collection TEXT,
+            knowledge_search_limit INTEGER DEFAULT 8,
+            remark_config_json TEXT,
+            sales_stages_json TEXT,
+            agent_style_keywords_json TEXT,
+            time_repair_enabled INTEGER DEFAULT 1,
+            time_repair_rules_json TEXT,
+            use_knowledge_base INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    for column_sql in [
+        "ALTER TABLE industry_templates ADD COLUMN use_knowledge_base INTEGER DEFAULT 1",
+    ]:
+        try:
+            cursor.execute(column_sql)
+        except sqlite3.OperationalError:
+            pass
+
     conn.commit()
     conn.close()
 
@@ -349,6 +429,110 @@ def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+# ---------------------------------------------------------------------------
+# 行业模板 CRUD
+# ---------------------------------------------------------------------------
+
+def get_industry_template(industry_id: str) -> Optional[Dict[str, Any]]:
+    """获取行业模板详情。"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM industry_templates WHERE id = ?", (industry_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def list_industry_templates() -> List[Dict[str, Any]]:
+    """获取所有行业模板。"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM industry_templates ORDER BY id")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def upsert_industry_template(template_data: Dict[str, Any]) -> Dict[str, Any]:
+    """创建或更新行业模板。template_data 必须包含 'id' 字段。"""
+    template_id = (template_data.get("id") or "").strip()
+    if not template_id:
+        raise ValueError("行业模板 ID 不能为空")
+
+    now_bj = get_beijing_time()
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # 检查是否已存在
+    cursor.execute("SELECT id FROM industry_templates WHERE id = ?", (template_id,))
+    exists = cursor.fetchone() is not None
+
+    updatable_fields = [
+        "display_name", "brand_name", "agent_persona",
+        "base_prompt", "handoff_prompt_addon", "plan_generation_prompt", "summary_prompt",
+        "session_profile_prompt", "session_profile_schema", "contact_memory_prompt",
+        "handoff_keywords_json", "handoff_confirm_keywords_json",
+        "handoff_required_fields_json", "handoff_field_patterns_json",
+        "knowledge_collection", "knowledge_search_limit",
+        "remark_config_json", "sales_stages_json", "agent_style_keywords_json",
+        "time_repair_enabled", "time_repair_rules_json", "use_knowledge_base",
+    ]
+
+    if exists:
+        # 更新：只更新 template_data 中提供的字段
+        set_clauses = []
+        values = []
+        for field in updatable_fields:
+            if field in template_data:
+                set_clauses.append(f"{field} = ?")
+                values.append(template_data[field])
+        if set_clauses:
+            set_clauses.append("updated_at = ?")
+            values.append(now_bj)
+            values.append(template_id)
+            cursor.execute(
+                f"UPDATE industry_templates SET {', '.join(set_clauses)} WHERE id = ?",
+                values,
+            )
+    else:
+        # 新建
+        fields_to_insert = ["id"]
+        values_to_insert = [template_id]
+        for field in updatable_fields:
+            if field in template_data:
+                fields_to_insert.append(field)
+                values_to_insert.append(template_data[field])
+        fields_to_insert.extend(["created_at", "updated_at"])
+        values_to_insert.extend([now_bj, now_bj])
+        placeholders = ", ".join(["?"] * len(values_to_insert))
+        cursor.execute(
+            f"INSERT INTO industry_templates ({', '.join(fields_to_insert)}) VALUES ({placeholders})",
+            values_to_insert,
+        )
+
+    conn.commit()
+    cursor.execute("SELECT * FROM industry_templates WHERE id = ?", (template_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return dict(result) if result else {}
+
+
+def delete_industry_template(industry_id: str) -> bool:
+    """删除行业模板。不允许删除仍有 Agent 绑定的模板。"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM agents WHERE industry_id = ?", (industry_id,))
+    count = cursor.fetchone()[0]
+    if count > 0:
+        conn.close()
+        raise ValueError(f"仍有 {count} 个 Agent 绑定了该行业模板，无法删除")
+    cursor.execute("DELETE FROM industry_templates WHERE id = ?", (industry_id,))
+    deleted = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
+
+
 def _agent_public(row: sqlite3.Row | Dict[str, Any] | None) -> Optional[Dict[str, Any]]:
     if not row:
         return None
@@ -358,7 +542,8 @@ def _agent_public(row: sqlite3.Row | Dict[str, Any] | None) -> Optional[Dict[str
     return item
 
 
-def create_agent(username: str, password: str, display_name: str = "", note: str = "") -> Dict[str, Any]:
+def create_agent(username: str, password: str, display_name: str = "", note: str = "",
+                 industry_id: str = "travel", brand_name: str = "", agent_persona: str = "") -> Dict[str, Any]:
     username = (username or "").strip()
     display_name = (display_name or "").strip() or username
     if not username:
@@ -371,15 +556,18 @@ def create_agent(username: str, password: str, display_name: str = "", note: str
     cursor = conn.cursor()
     cursor.execute(
         """
-        INSERT INTO agents (username, display_name, password_hash, note, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO agents (username, display_name, password_hash, note, industry_id, brand_name, agent_persona, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (username, display_name, _password_hash(password), (note or "").strip(), now_bj, now_bj),
+        (username, display_name, _password_hash(password), (note or "").strip(),
+         (industry_id or "travel").strip(), (brand_name or "").strip() or None, (agent_persona or "").strip() or None,
+         now_bj, now_bj),
     )
     agent_id = cursor.lastrowid
     conn.commit()
     cursor.execute(
-        "SELECT id, username, display_name, status, note, created_at, updated_at, last_login_at, last_seen_at, last_device_id FROM agents WHERE id = ?",
+        "SELECT id, username, display_name, status, note, industry_id, brand_name, agent_persona, "
+        "created_at, updated_at, last_login_at, last_seen_at, last_device_id FROM agents WHERE id = ?",
         (agent_id,),
     )
     agent = _agent_public(cursor.fetchone())
@@ -394,6 +582,7 @@ def list_agents() -> List[Dict[str, Any]]:
         """
         SELECT a.id, a.username, a.display_name, a.status, a.note, a.created_at, a.updated_at,
                a.last_login_at, a.last_seen_at, a.last_device_id,
+               a.industry_id, a.brand_name, a.agent_persona,
                (SELECT COUNT(*) FROM sessions s WHERE s.agent_id = a.id) AS session_count
         FROM agents a
         ORDER BY a.updated_at DESC, a.id DESC
@@ -404,24 +593,36 @@ def list_agents() -> List[Dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def update_agent(agent_id: int, display_name: str, status: str, note: str = "") -> Optional[Dict[str, Any]]:
+def update_agent(agent_id: int, display_name: str, status: str, note: str = "",
+                 industry_id: str | None = None, brand_name: str | None = None,
+                 agent_persona: str | None = None) -> Optional[Dict[str, Any]]:
     status = (status or "active").strip().lower()
     if status not in {"active", "disabled"}:
         raise ValueError("Agent 状态只支持 active / disabled")
     now_bj = get_beijing_time()
     conn = get_connection()
     cursor = conn.cursor()
+    # 构建动态更新字段
+    set_parts = ["display_name = ?", "status = ?", "note = ?", "updated_at = ?"]
+    params = [(display_name or "").strip(), status, (note or "").strip(), now_bj]
+    if industry_id is not None:
+        set_parts.append("industry_id = ?")
+        params.append((industry_id or "travel").strip())
+    if brand_name is not None:
+        set_parts.append("brand_name = ?")
+        params.append(brand_name.strip() or None)
+    if agent_persona is not None:
+        set_parts.append("agent_persona = ?")
+        params.append(agent_persona.strip() or None)
+    params.append(agent_id)
     cursor.execute(
-        """
-        UPDATE agents
-        SET display_name = ?, status = ?, note = ?, updated_at = ?
-        WHERE id = ?
-        """,
-        ((display_name or "").strip(), status, (note or "").strip(), now_bj, agent_id),
+        f"UPDATE agents SET {', '.join(set_parts)} WHERE id = ?",
+        params,
     )
     conn.commit()
     cursor.execute(
-        "SELECT id, username, display_name, status, note, created_at, updated_at, last_login_at, last_seen_at, last_device_id FROM agents WHERE id = ?",
+        "SELECT id, username, display_name, status, note, industry_id, brand_name, agent_persona, "
+        "created_at, updated_at, last_login_at, last_seen_at, last_device_id FROM agents WHERE id = ?",
         (agent_id,),
     )
     agent = _agent_public(cursor.fetchone())
@@ -477,7 +678,8 @@ def authenticate_agent(username: str, password: str, device_id: str = "") -> Opt
     )
     conn.commit()
     cursor.execute(
-        "SELECT id, username, display_name, status, note, created_at, updated_at, last_login_at, last_seen_at, last_device_id FROM agents WHERE id = ?",
+        "SELECT id, username, display_name, status, note, industry_id, brand_name, agent_persona, "
+        "created_at, updated_at, last_login_at, last_seen_at, last_device_id FROM agents WHERE id = ?",
         (row["id"],),
     )
     agent = _agent_public(cursor.fetchone()) or {}
@@ -493,7 +695,8 @@ def get_agent_by_token(token: str) -> Optional[Dict[str, Any]]:
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT id, username, display_name, status, note, created_at, updated_at, last_login_at, last_seen_at, last_device_id FROM agents WHERE token_hash = ?",
+        "SELECT id, username, display_name, status, note, industry_id, brand_name, agent_persona, "
+        "created_at, updated_at, last_login_at, last_seen_at, last_device_id FROM agents WHERE token_hash = ?",
         (_token_hash(token),),
     )
     row = cursor.fetchone()
@@ -506,6 +709,20 @@ def get_agent_by_token(token: str) -> Optional[Dict[str, Any]]:
     agent = _agent_public(row)
     conn.close()
     return agent
+
+
+def get_agent_by_id(agent_id: int) -> Optional[Dict[str, Any]]:
+    """根据 ID 获取 Agent 信息。"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, username, display_name, status, note, industry_id, brand_name, agent_persona, "
+        "created_at, updated_at, last_login_at, last_seen_at, last_device_id FROM agents WHERE id = ?",
+        (agent_id,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return _agent_public(row)
 
 
 def make_agent_session_id(agent_id: int | None, session_id: str) -> str:
@@ -1234,7 +1451,14 @@ def update_session_profile(session_id: str, profile_dict: Dict[str, Any]):
     now_bj = get_beijing_time()
     cursor.execute("SELECT contact_name, suggested_remark_status FROM sessions WHERE session_id = ?", (session_id,))
     row = cursor.fetchone()
-    suggestion = build_remark_suggestion(row["contact_name"] if row else "", profile_dict)
+    # 从 session 的 agent 推断行业 ID
+    _industry_id = "travel"
+    if row:
+        cursor.execute("SELECT industry_id FROM agents WHERE id = (SELECT agent_id FROM sessions WHERE session_id = ?)", (session_id,))
+        agent_row = cursor.fetchone()
+        if agent_row:
+            _industry_id = agent_row["industry_id"] or "travel"
+    suggestion = build_remark_suggestion(row["contact_name"] if row else "", profile_dict, industry_id=_industry_id)
     cursor.execute(
         """
         UPDATE sessions
@@ -1278,6 +1502,13 @@ def refresh_remark_suggestion(session_id: str) -> Optional[Dict[str, Any]]:
         except Exception:
             profile = {}
     suggestion = build_remark_suggestion(row["contact_name"], profile)
+    # 从 session 的 agent 推断行业 ID
+    _industry_id = "travel"
+    cursor.execute("SELECT industry_id FROM agents WHERE id = (SELECT agent_id FROM sessions WHERE session_id = ?)", (session_id,))
+    agent_row = cursor.fetchone()
+    if agent_row:
+        _industry_id = agent_row["industry_id"] or "travel"
+    suggestion = build_remark_suggestion(row["contact_name"], profile, industry_id=_industry_id)
     now_bj = get_beijing_time()
     cursor.execute(
         """
